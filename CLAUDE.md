@@ -1,8 +1,8 @@
-# Silsigan — Korean → Vietnamese Live Translation App
+# Silsigan — Real-Time Speech Translation App
 
 ## Project Overview
 
-Real-time Korean speech → Vietnamese translation app built with Flutter. User speaks Korean, sees live transcript, and gets streaming Vietnamese translations powered by Soniox (ASR) and Claude API (translation).
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Supports multiple target languages: Vietnamese, English, Turkish, Korean.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -10,121 +10,36 @@ Real-time Korean speech → Vietnamese translation app built with Flutter. User 
 
 ## Tech Stack
 
-- **Framework:** Flutter (Dart) — iOS 16+ / Android 14+
-- **Korean ASR:** Soniox (`stt-rt-v4`) via WebSocket
-- **Translation:** Anthropic Claude API (`claude-sonnet-4-5`) via SSE streaming
+- **Framework:** Flutter (Dart) — iOS 16+ / Android 14+ (API 24+)
+- **ASR + Translation:** Soniox (`stt-rt-v4`) via WebSocket — handles both transcription and one-way translation
 - **Audio:** `flutter_sound` — PCM16 (pcm_s16le), 24kHz, mono
 - **State:** Riverpod
-- **Storage:** sqflite (local SQLite)
+- **Storage:** sqflite (local SQLite, DB version 2 with audio_path column)
+- **CI/CD:** Codemagic — builds iOS (TestFlight) and Android (APK)
+
+---
+
+## App IDs & Identifiers
+
+- **Android:** `com.silsigan.app` (namespace + applicationId in build.gradle, MainActivity in `com/silsigan/app/`)
+- **iOS:** `com.silsigan.app` (bundle identifier in project.pbxproj)
+- **iOS Tests:** `com.silsigan.app.RunnerTests`
+- **App Name:** `Silsigan` (capitalized)
 
 ---
 
 ## API Keys
 
-Stored in `.env` file (never committed). Loaded via `--dart-define`:
+Stored in `.env.json` (JSON format, gitignored). Loaded via `--dart-define`:
 
 ```bash
-flutter run \
-  --dart-define=SONIOX_API_KEY=... \
-  --dart-define=ANTHROPIC_API_KEY=sk-ant-...
+flutter run --dart-define=SONIOX_API_KEY=...
+flutter build apk --dart-define=SONIOX_API_KEY=...
 ```
 
 Access in Dart: `String.fromEnvironment('SONIOX_API_KEY')`
 
-The `.env` file contains both `SONIOX_API_KEY` and `ANTHROPIC_API_KEY`.
-
----
-
-## Implementation Plan
-
-### Phase 1: Project Scaffold & Configuration
-1. Create Flutter project: `flutter create silsigan`
-2. Replace `pubspec.yaml` with spec dependencies (flutter_sound, web_socket_channel, http, riverpod, flutter_riverpod, permission_handler, sqflite, path_provider)
-3. Create the full `lib/` directory structure per spec section 15
-4. Set up `utils/constants.dart` with all API URLs, model names, audio config
-5. Configure platform permissions:
-   - iOS: `NSMicrophoneUsageDescription` in Info.plist
-   - Android: `RECORD_AUDIO` + `INTERNET` in AndroidManifest.xml, `minSdkVersion 21`
-6. Set up `app.dart` with MaterialApp + ProviderScope + light theme + routing
-
-### Phase 2: Data Layer
-7. Create `models/transcript_session.dart` — data class with `toMap()`/`fromMap()`
-8. Create `services/database_service.dart` — SQLite singleton, `CREATE TABLE sessions`, CRUD methods (getAllSessions, getSession, insertSession, deleteSession)
-9. Create all Riverpod providers:
-   - `recording_provider.dart` — RecordingState enum (idle/recording/processing/postRecording)
-   - `transcript_provider.dart` — koreanDraft + koreanHistory
-   - `translation_provider.dart` — vietnameseDraft + vietnameseHistory
-   - `session_history_provider.dart` — FutureProvider loading from DB
-
-### Phase 3: Core Services
-10. Create `services/audio_service.dart`:
-    - Init flutter_sound recorder (PCM16, 24kHz, mono)
-    - Stream audio to a buffer
-    - Timer.periodic(100ms) reads buffer, sends raw Uint8List to callback
-    - Start/stop methods
-11. Create `services/soniox_realtime_service.dart`:
-    - WebSocket connect to `wss://stt-rt.soniox.com/transcribe-websocket`
-    - Send JSON config on connect (api_key, model, language_hints, audio_format, endpoint detection)
-    - Send raw binary audio frames (no base64)
-    - Parse token responses with `is_final` flag:
-      - Non-final tokens → `onTranscriptionDraft` callback (replaces draft, not append)
-      - Final tokens → accumulate in pending utterance
-      - Utterance boundary (non-final→all-final) → `onTranscriptionCompleted` callback
-    - `finalize()` to force-finalize pending tokens on stop
-    - Auto-reconnect (up to 3 times, 1s backoff)
-12. Create `services/claude_translation_service.dart`:
-    - POST to Claude Messages API with `stream: true`
-    - Parse SSE `data:` lines for `content_block_delta` events
-    - Extract `delta.text` → callback for streaming tokens
-    - Handle `message_stop` → completion callback
-    - System prompt from spec section 6
-
-### Phase 4: UI — Main Transcription Screen
-13. Create `widgets/transcript_panel.dart`:
-    - Scrollable panel showing history lines (60% opacity) + draft line (full opacity)
-    - Auto-scroll to bottom on new content (unless user scrolled up manually)
-    - Korean panel: blinking cursor `|` on draft
-    - Vietnamese panel: `...` suffix while waiting, then streaming text
-14. Create `widgets/record_button.dart`:
-    - Idle → shows mic icon "Start"
-    - Recording → shows stop icon "Stop"
-    - PostRecording → hidden (replaced by save/discard)
-15. Create `widgets/save_discard_row.dart`:
-    - [✕ Discard] and [✓ Save] buttons
-    - Save: build TranscriptSession, insert to DB, invalidate history provider, navigate to History
-    - Discard: clear all providers, reset to idle
-16. Create `widgets/status_bar.dart` — recording/processing indicator
-17. Create `screens/main_screen.dart`:
-    - Compose: top bar, Korean panel, divider, Vietnamese panel, bottom action bar
-    - Wire up record button to start/stop audio+websocket+translation pipeline
-    - Handle PostRecording state: wait for in-flight Claude stream before showing save/discard
-
-### Phase 5: UI — History & Detail Screens
-18. Create `widgets/session_card.dart` — date+time, Korean preview, Vietnamese preview
-19. Create `screens/history_screen.dart`:
-    - ListView of session cards, newest first
-    - Tap card → navigate to detail screen
-20. Create `screens/session_detail_screen.dart`:
-    - Full Korean + Vietnamese transcript, scrollable, read-only
-    - Delete button with confirmation dialog
-    - Back button returns to history list
-
-### Phase 6: Integration & Error Handling
-21. Wire the full data flow:
-    - Start: permission → websocket → audio → streaming loop
-    - Stop: stop audio → finalize → close websocket → wait for Claude → postRecording
-    - Save/Discard: DB insert or clear
-22. Implement error handling:
-    - Mic permission denied → dialog with settings link
-    - WebSocket drops → auto-reconnect (3x, 1s backoff)
-    - Claude fails → "[Translation unavailable]" placeholder
-    - No internet → banner + disable Start
-    - DB write fail → snackbar + retry
-    - Empty session → disable Save button
-23. Final polish:
-    - Light theme matching Figma
-    - Font size ≥ 18sp
-    - Gotchas: sample rate verification, iOS audio session, auto-scroll logic, sqflite singleton pattern, navigation invalidation, PostRecording Claude wait
+Only `SONIOX_API_KEY` is needed — Claude/Anthropic API is no longer used.
 
 ---
 
@@ -135,43 +50,88 @@ lib/
 ├── main.dart
 ├── app.dart
 ├── models/
-│   └── transcript_session.dart
+│   └── transcript_session.dart        # TranscriptSession with audioPath field
 ├── providers/
-│   ├── recording_provider.dart
-│   ├── transcript_provider.dart
-│   ├── translation_provider.dart
-│   └── session_history_provider.dart
+│   ├── recording_provider.dart        # RecordingState enum (idle/recording/processing/postRecording)
+│   ├── transcript_provider.dart       # koreanDraft + koreanHistory
+│   ├── translation_provider.dart      # vietnameseDraft + vietnameseHistory
+│   ├── target_language_provider.dart   # TargetLanguage enum (Vietnamese/English/Turkish/Korean)
+│   └── session_history_provider.dart  # FutureProvider loading from DB
 ├── services/
-│   ├── soniox_realtime_service.dart
-│   ├── audio_service.dart
-│   ├── claude_translation_service.dart
-│   └── database_service.dart
+│   ├── soniox_realtime_service.dart   # WebSocket transcription + translation
+│   ├── audio_service.dart             # flutter_sound capture + WAV file saving
+│   └── database_service.dart          # SQLite singleton — CRUD + audio file cleanup
 ├── ui/
 │   ├── screens/
-│   │   ├── main_screen.dart
-│   │   ├── history_screen.dart
-│   │   └── session_detail_screen.dart
+│   │   └── main_screen.dart           # Live transcription screen (only screen)
 │   └── widgets/
-│       ├── transcript_panel.dart
-│       ├── record_button.dart
-│       ├── save_discard_row.dart
-│       ├── session_card.dart
-│       └── status_bar.dart
+│       ├── transcript_panel.dart      # Scrollable text panel with copy button
+│       ├── record_button.dart         # Animated mic/stop button with haptics
+│       ├── save_discard_row.dart      # Side buttons (history/trash/check)
+│       ├── session_card.dart          # History list item card
+│       ├── history_sheet.dart         # Bottom sheet with list + detail views
+│       └── status_bar.dart            # Pulsing recording/processing indicator
 └── utils/
     ├── audio_utils.dart
-    └── constants.dart
+    └── constants.dart                 # API URLs, audio config, UI design tokens
 ```
+
+---
+
+## Architecture Notes
+
+### Navigation
+- **Single screen app** — `MainScreen` is the only route
+- **History:** modal bottom sheet (`HistorySheet`) slides up from bottom
+- **Session detail:** shown inline within the same bottom sheet (no separate page)
+- **Save flow:** save → opens bottom sheet pre-selected to the saved session
+
+### 3-State Bottom Button Flow
+1. **Idle:** History button, Mic button, Check button (unhighlighted)
+2. **Recording:** Only Stop button visible (history + check hidden)
+3. **PostRecording:** Trash button (red), Mic button, Check button (highlighted)
+
+### Audio Recording
+- PCM chunks accumulated in `_fullRecording` buffer during recording
+- On save: builds WAV file (44-byte header + PCM data), saves to app documents
+- Audio path stored in `sessions` table (`audio_path TEXT`, added in DB v2)
+- On delete: audio file is also deleted from disk
+
+### Soniox Translation
+- Translation handled by Soniox via `translation` config: `{"type": "one_way", "target_language": "vi"}`
+- When target is Korean (same as source), transcription is copied directly to translation panel
+- Callbacks: `onTranscriptionDraft/Completed` + `onTranslationDraft/Completed`
+- Tokens have `translation_status` field: `"source"` for transcription, `"translation"` for translated text
+
+### New Line Logic
+- `endpointDelayMs = 2000` (Soniox endpoint detection)
+- Completed utterances append to the last history line (not new line)
+- Timer-based new line: only after 4000ms pause (`newLinePauseMs`)
 
 ---
 
 ## Key Design Decisions
 
-- **API keys via `--dart-define`** — no .env file in bundle, no runtime file reading. Keys stored in `.env` for convenience.
-- **SQLite (sqflite)** — local-only storage, no cloud sync, singleton pattern
-- **Riverpod StateProviders** — reactive streams drive UI updates from WebSocket/SSE events
-- **PCM16 at 24kHz** — compatible with Soniox (accepts any sample rate with `pcm_s16le`)
-- **Soniox endpoint detection** — auto-finalizes tokens after speech pause (600ms delay), triggers Claude translation
-- **One Claude call per completed utterance** — triggered when Soniox finalizes tokens at an endpoint boundary
+- **Soniox handles both ASR and translation** — no Claude API dependency
+- **API keys via `--dart-define`** — no .env file in bundle
+- **SQLite (sqflite)** — local-only storage, no cloud sync, singleton pattern, DB v2
+- **Riverpod StateProviders** — reactive streams drive UI updates from WebSocket events
+- **PCM16 at 24kHz** — compatible with Soniox (`pcm_s16le`)
+- **Bottom sheet for history** — no separate pages, everything in modal sheets
+
+---
+
+## UI Design
+
+- Light theme: bg `#EAEAEA`, panels `#FCFCFC`, text `#111111`/`#333333`
+- No AppBar on main screen — title "Silsigan" in gray header area
+- Panels use uppercase labels: TRANSCRIPTION / TRANSLATION
+- Copy-to-clipboard buttons on panels (visible when text exists)
+- Text is selectable via `SelectionArea`
+- Button press feedback: scale animation + haptics
+- Pulsing status dot when recording
+- Animated ellipsis on translation draft
+- Custom app icon from `silsigan_icon.png`
 
 ---
 
@@ -184,13 +144,29 @@ No auth, no cloud sync, no export, no transcript editing, no speaker diarization
 ## Build & Run
 
 ```bash
-# Run with API keys
-flutter run --dart-define=SONIOX_API_KEY=... --dart-define=ANTHROPIC_API_KEY=sk-ant-...
+# Debug on device
+flutter run --dart-define=SONIOX_API_KEY=...
 
-# Build release
-flutter build apk --dart-define=SONIOX_API_KEY=... --dart-define=ANTHROPIC_API_KEY=sk-ant-...
-flutter build ios --dart-define=SONIOX_API_KEY=... --dart-define=ANTHROPIC_API_KEY=sk-ant-...
+# Build release APK
+flutter build apk --dart-define=SONIOX_API_KEY=...
+
+# iOS builds via Codemagic (SONIOX_API_KEY set as env var)
 ```
+
+### Version Bumping
+- Version format: `1.0.0+N` in `pubspec.yaml`
+- Bump build number (`+N`) for each App Store Connect / TestFlight upload
+
+---
+
+## Build Notes
+
+- AGP 8.7.0, Gradle 8.9, Kotlin 1.9.24 — required for SDK 35
+- compileSdk = 35, Java 17, minSdk = 24 (required by flutter_sound)
+- iOS deployment target: 16.0
+- iOS Podfile includes `-lc++` linker flag (required by native dependencies)
+- iOS project.pbxproj has `OTHER_LDFLAGS = -lc++` on Runner target
+- `flutter_launcher_icons` with `remove_alpha_ios: true` for App Store compliance
 
 ---
 
