@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'ui/screens/main_screen.dart';
-import 'ui/screens/history_screen.dart';
-import 'ui/screens/session_detail_screen.dart';
 import 'utils/constants.dart';
 
 class SilsiganApp extends StatelessWidget {
@@ -35,12 +33,7 @@ class SilsiganApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      initialRoute: '/',
-      routes: {
-        '/': (context) => const MainScreen(),
-        '/history': (context) => const HistoryScreen(),
-        '/detail': (context) => const SessionDetailScreen(),
-      },
+      home: const MainScreen(),
     );
   }
 }

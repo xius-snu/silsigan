@@ -15,6 +15,7 @@ import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
 import '../widgets/record_button.dart';
 import '../widgets/save_discard_row.dart';
+import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -27,9 +28,13 @@ class MainScreen extends ConsumerStatefulWidget {
 class _MainScreenState extends ConsumerState<MainScreen> {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
+  Timer? _newLineTimer;
+  Timer? _newLineTimerTranslation;
 
   @override
   void dispose() {
+    _newLineTimer?.cancel();
+    _newLineTimerTranslation?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     super.dispose();
@@ -66,11 +71,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       return;
     }
 
-    // Clear previous session data
+    // Clear drafts but keep history (so re-pressing mic continues the session)
     ref.read(koreanDraftProvider.notifier).state = '';
-    ref.read(koreanHistoryProvider.notifier).state = [];
     ref.read(vietnameseDraftProvider.notifier).state = '';
-    ref.read(vietnameseHistoryProvider.notifier).state = [];
 
     final targetLanguage = ref.read(targetLanguageProvider);
 
@@ -81,15 +84,37 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
-        ref.read(koreanHistoryProvider.notifier).update(
-          (state) => [...state, transcript],
-        );
+        _newLineTimer?.cancel();
+        ref.read(koreanHistoryProvider.notifier).update((state) {
+          if (state.isEmpty) return [transcript];
+          final updated = List<String>.from(state);
+          updated.last = '${updated.last} $transcript';
+          return updated;
+        });
         // Korean target: copy transcription to translation panel
         if (targetLanguage == TargetLanguage.korean) {
-          ref.read(vietnameseHistoryProvider.notifier).update(
-            (state) => [...state, transcript],
-          );
+          ref.read(vietnameseHistoryProvider.notifier).update((state) {
+            if (state.isEmpty) return [transcript];
+            final updated = List<String>.from(state);
+            updated.last = '${updated.last} $transcript';
+            return updated;
+          });
         }
+        // Start a timer — if no new utterance arrives within the pause
+        // duration, the next utterance will start on a new line.
+        _newLineTimer = Timer(
+          const Duration(milliseconds: AppConstants.newLinePauseMs),
+          () {
+            ref.read(koreanHistoryProvider.notifier).update(
+              (state) => [...state, ''],
+            );
+            if (targetLanguage == TargetLanguage.korean) {
+              ref.read(vietnameseHistoryProvider.notifier).update(
+                (state) => [...state, ''],
+              );
+            }
+          },
+        );
       }
       ref.read(koreanDraftProvider.notifier).state = '';
     };
@@ -101,8 +126,20 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
-        ref.read(vietnameseHistoryProvider.notifier).update(
-          (state) => [...state, translation],
+        _newLineTimerTranslation?.cancel();
+        ref.read(vietnameseHistoryProvider.notifier).update((state) {
+          if (state.isEmpty) return [translation];
+          final updated = List<String>.from(state);
+          updated.last = '${updated.last} $translation';
+          return updated;
+        });
+        _newLineTimerTranslation = Timer(
+          const Duration(milliseconds: AppConstants.newLinePauseMs),
+          () {
+            ref.read(vietnameseHistoryProvider.notifier).update(
+              (state) => [...state, ''],
+            );
+          },
         );
       }
       ref.read(vietnameseDraftProvider.notifier).state = '';
@@ -136,6 +173,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   }
 
   Future<void> _stopRecording() async {
+    _newLineTimer?.cancel();
+    _newLineTimerTranslation?.cancel();
     await _audioService.stop();
     _sonioxService.finalize();
     await _sonioxService.disconnect();
@@ -144,13 +183,43 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   }
 
   Future<void> _saveSession() async {
-    final koreanHistory = ref.read(koreanHistoryProvider);
-    final vietnameseHistory = ref.read(vietnameseHistoryProvider);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Save Session'),
+        content: const Text('Save this transcription session?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    _newLineTimer?.cancel();
+    _newLineTimerTranslation?.cancel();
+    final koreanHistory =
+        ref.read(koreanHistoryProvider).where((s) => s.trim().isNotEmpty).toList();
+    final vietnameseHistory =
+        ref.read(vietnameseHistoryProvider).where((s) => s.trim().isNotEmpty).toList();
 
     if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
 
     final koreanFull = koreanHistory.join('\n');
     final vietnameseFull = vietnameseHistory.join('\n');
+
+    // Save audio file if available
+    String? audioPath;
+    if (_audioService.hasRecording) {
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      audioPath = await _audioService.saveRecordingAsWav('session_$timestamp.wav');
+    }
 
     final session = TranscriptSession(
       createdAt: DateTime.now().toIso8601String(),
@@ -162,14 +231,16 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       vietnamesePreview: vietnameseFull.length > AppConstants.previewMaxLength
           ? vietnameseFull.substring(0, AppConstants.previewMaxLength)
           : vietnameseFull,
+      audioPath: audioPath,
     );
 
     try {
-      await DatabaseService.instance.insertSession(session);
+      final id = await DatabaseService.instance.insertSession(session);
       ref.invalidate(sessionHistoryProvider);
+      _audioService.clearRecording();
       _resetState();
       if (mounted) {
-        Navigator.pushNamed(context, '/history');
+        _showHistorySheetWithSession(context, id);
       }
     } catch (e) {
       if (mounted) {
@@ -183,8 +254,64 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     }
   }
 
-  void _discardSession() {
+  Future<void> _discardSession() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard Session'),
+        content: const Text('Discard this transcription? This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    _audioService.clearRecording();
     _resetState();
+  }
+
+  void _showHistorySheet(BuildContext context, WidgetRef ref) {
+    final headerHeight = MediaQuery.of(context).padding.top + 53;
+    final screenHeight = MediaQuery.of(context).size.height;
+    final sheetFraction =
+        ((screenHeight - headerHeight) / screenHeight).clamp(0.5, 0.92);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppConstants.bgColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => HistorySheet(maxFraction: sheetFraction),
+    );
+  }
+
+  void _showHistorySheetWithSession(BuildContext context, int sessionId) {
+    final headerHeight = MediaQuery.of(context).padding.top + 53;
+    final screenHeight = MediaQuery.of(context).size.height;
+    final sheetFraction =
+        ((screenHeight - headerHeight) / screenHeight).clamp(0.5, 0.92);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppConstants.bgColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => HistorySheet(
+        maxFraction: sheetFraction,
+        initialSessionId: sessionId,
+      ),
+    );
   }
 
   void _resetState() {
@@ -209,8 +336,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         recordingState == RecordingState.recording ||
             recordingState == RecordingState.processing;
     final isPostRecording = recordingState == RecordingState.postRecording;
-    final hasContent =
-        koreanHistory.isNotEmpty || vietnameseHistory.isNotEmpty;
 
     return Scaffold(
       backgroundColor: AppConstants.bgColor,
@@ -355,37 +480,57 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      // History Button
-                      BottomSideButton(
-                        icon: Icons.history,
-                        backgroundColor: AppConstants.historyButtonColor,
-                        onTap: () =>
-                            Navigator.pushNamed(context, '/history'),
+                      // Left button: History (idle) / hidden (recording) / Trash (post)
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 120),
+                        child: isRecordingOrProcessing
+                            ? SizedBox(
+                                key: const ValueKey('left-hidden'),
+                                width: AppConstants.sideButtonSize,
+                              )
+                            : isPostRecording
+                                ? BottomSideButton(
+                                    key: const ValueKey('left-trash'),
+                                    icon: Icons.delete_outline,
+                                    backgroundColor: Colors.red,
+                                    onTap: _discardSession,
+                                  )
+                                : BottomSideButton(
+                                    key: const ValueKey('left-history'),
+                                    icon: Icons.history,
+                                    backgroundColor:
+                                        AppConstants.historyButtonColor,
+                                    onTap: () => _showHistorySheet(context, ref),
+                                  ),
                       ),
                       const SizedBox(width: 40),
 
-                      // Mic / Stop Button
+                      // Center button: Mic (idle/post) / Stop (recording)
                       RecordButton(
                         state: recordingState,
-                        onStart: isPostRecording
-                            ? () {
-                                _discardSession();
-                                _startRecording();
-                              }
-                            : _startRecording,
+                        onStart: _startRecording,
                         onStop: _stopRecording,
                       ),
                       const SizedBox(width: 40),
 
-                      // Save / Check Button
-                      BottomSideButton(
-                        icon: Icons.check,
-                        backgroundColor: hasContent
-                            ? AppConstants.saveButtonActiveColor
-                            : AppConstants.saveButtonColor,
-                        onTap: (isPostRecording && hasContent)
-                            ? _saveSession
-                            : null,
+                      // Right button: Check (idle/post) / hidden (recording)
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 120),
+                        child: isRecordingOrProcessing
+                            ? SizedBox(
+                                key: const ValueKey('right-hidden'),
+                                width: AppConstants.sideButtonSize,
+                              )
+                            : BottomSideButton(
+                                key: ValueKey(
+                                    'right-check-${isPostRecording}'),
+                                icon: Icons.check,
+                                backgroundColor: isPostRecording
+                                    ? AppConstants.saveButtonActiveColor
+                                    : AppConstants.saveButtonColor,
+                                onTap:
+                                    isPostRecording ? _saveSession : null,
+                              ),
                       ),
                     ],
                   ),

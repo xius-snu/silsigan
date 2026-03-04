@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 import '../models/transcript_session.dart';
 
@@ -17,7 +18,7 @@ class DatabaseService {
     final fullPath = '$dbPath/silsigan.db';
     return openDatabase(
       fullPath,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE sessions (
@@ -26,9 +27,17 @@ class DatabaseService {
             korean_full TEXT NOT NULL,
             vietnamese_full TEXT NOT NULL,
             korean_preview TEXT NOT NULL,
-            vietnamese_preview TEXT NOT NULL
+            vietnamese_preview TEXT NOT NULL,
+            audio_path TEXT
           )
         ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+            'ALTER TABLE sessions ADD COLUMN audio_path TEXT',
+          );
+        }
       },
     );
   }
@@ -56,6 +65,14 @@ class DatabaseService {
   }
 
   Future<int> deleteSession(int id) async {
+    // Also delete the audio file if it exists
+    final session = await getSession(id);
+    if (session?.audioPath != null) {
+      final file = File(session!.audioPath!);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    }
     final db = await database;
     return db.delete('sessions', where: 'id = ?', whereArgs: [id]);
   }
