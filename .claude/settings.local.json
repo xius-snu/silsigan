@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_figma_figma__get_design_context",
+      "mcp__plugin_figma_figma__get_screenshot",
+      "Bash(flutter analyze:*)",
+      "Bash(flutter build:*)",
+      "Bash(sdkmanager:*)",
+      "Bash(\"/c/Users/Hajun/AppData/Local/Android/sdk/cmdline-tools/latest/bin/sdkmanager.bat\":*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(flutter clean:*)"
+    ]
+  }
+}
