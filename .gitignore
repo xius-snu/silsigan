@@ -44,3 +44,5 @@ app.*.map.json
 
 # API keys
 .env.json
+server/.env
+server/node_modules/

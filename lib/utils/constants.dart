@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 class AppConstants {
+  // Server
+  static const serverBaseUrl = 'https://silsigan.onrender.com';
+
   // Soniox
   static const sonioxRealtimeUrl =
       'wss://stt-rt.soniox.com/transcribe-websocket';

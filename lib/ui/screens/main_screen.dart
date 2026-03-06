@@ -17,6 +17,7 @@ import '../widgets/record_button.dart';
 import '../widgets/save_discard_row.dart';
 import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
+import '../widgets/friend_dialog.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
@@ -314,6 +315,13 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
   }
 
+  void _showFriendDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => const FriendDialog(),
+    );
+  }
+
   void _resetState() {
     ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
     ref.read(koreanDraftProvider.notifier).state = '';
@@ -363,6 +371,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                   ),
                   const SizedBox(width: 12),
                   StatusBar(state: recordingState),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: _showFriendDialog,
+                    child: const Icon(
+                      Icons.person_add_outlined,
+                      size: 24,
+                      color: AppConstants.textSecondary,
+                    ),
+                  ),
                 ],
               ),
             ),
