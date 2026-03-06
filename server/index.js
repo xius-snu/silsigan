@@ -1,10 +1,5 @@
 require('dotenv').config();
 const fastify = require('fastify')({ logger: true });
-fastify.register(require('@fastify/cors'), {
-    origin: true,
-    methods: ['GET', 'POST']
-});
-fastify.register(require('@fastify/websocket'));
 const { Pool } = require('pg');
 const crypto = require('crypto');
 
@@ -81,6 +76,13 @@ async function authenticateRequest(req, reply) {
 // ============================================
 
 async function start() {
+    // Register plugins
+    await fastify.register(require('@fastify/cors'), {
+        origin: true,
+        methods: ['GET', 'POST']
+    });
+    await fastify.register(require('@fastify/websocket'));
+
     // Initialize schema
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
@@ -121,7 +123,7 @@ async function start() {
     // HEALTH CHECK
     // ==================
 
-    fastify.get('/', async () => ({ status: 'ok', version: 3 }));
+    fastify.get('/', async () => ({ status: 'ok', version: 4 }));
 
     // ==================
     // USER ENDPOINTS
