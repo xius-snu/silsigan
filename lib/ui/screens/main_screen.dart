@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -194,7 +195,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   }
 
   Future<void> _startRecording() async {
-    final status = await Permission.microphone.request();
+    final needsPermission = Platform.isAndroid || Platform.isIOS;
+    final status = needsPermission
+        ? await Permission.microphone.request()
+        : PermissionStatus.granted;
     if (!status.isGranted) {
       if (mounted) {
         showDialog(

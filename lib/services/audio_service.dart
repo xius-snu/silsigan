@@ -2,12 +2,19 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
 import '../utils/constants.dart';
 
 class AudioService {
-  final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
+  // flutter_sound (mobile)
+  FlutterSoundRecorder? _recorder;
   StreamSubscription? _recorderSubscription;
+
+  // record package (Windows)
+  rec.AudioRecorder? _winRecorder;
+  StreamSubscription? _winStreamSubscription;
+
   Timer? _chunkTimer;
   final List<int> _audioBuffer = [];
   final List<int> _fullRecording = [];
@@ -15,9 +22,16 @@ class AudioService {
 
   Function(Uint8List)? onAudioChunk;
 
+  bool get _useRecord => Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
   Future<void> init() async {
     if (_isInitialized) return;
-    await _recorder.openRecorder();
+    if (_useRecord) {
+      _winRecorder = rec.AudioRecorder();
+    } else {
+      _recorder = FlutterSoundRecorder();
+      await _recorder!.openRecorder();
+    }
     _isInitialized = true;
   }
 
@@ -25,22 +39,44 @@ class AudioService {
     if (!_isInitialized) await init();
     _audioBuffer.clear();
 
+    if (_useRecord) {
+      await _startWithRecord();
+    } else {
+      await _startWithFlutterSound();
+    }
+
+    _chunkTimer = Timer.periodic(
+      const Duration(milliseconds: AppConstants.chunkIntervalMs),
+      (_) => _sendChunk(),
+    );
+  }
+
+  Future<void> _startWithRecord() async {
+    final stream = await _winRecorder!.startStream(
+      const rec.RecordConfig(
+        encoder: rec.AudioEncoder.pcm16bits,
+        sampleRate: AppConstants.sampleRate,
+        numChannels: AppConstants.numChannels,
+      ),
+    );
+    _winStreamSubscription = stream.listen((data) {
+      _audioBuffer.addAll(data);
+      _fullRecording.addAll(data);
+    });
+  }
+
+  Future<void> _startWithFlutterSound() async {
     final controller = StreamController<Uint8List>();
     _recorderSubscription = controller.stream.listen((data) {
       _audioBuffer.addAll(data);
       _fullRecording.addAll(data);
     });
 
-    await _recorder.startRecorder(
+    await _recorder!.startRecorder(
       toStream: controller.sink,
       codec: Codec.pcm16,
       numChannels: AppConstants.numChannels,
       sampleRate: AppConstants.sampleRate,
-    );
-
-    _chunkTimer = Timer.periodic(
-      const Duration(milliseconds: AppConstants.chunkIntervalMs),
-      (_) => _sendChunk(),
     );
   }
 
@@ -54,14 +90,20 @@ class AudioService {
   Future<void> stop() async {
     _chunkTimer?.cancel();
     _chunkTimer = null;
-    _recorderSubscription?.cancel();
-    _recorderSubscription = null;
-    if (_recorder.isRecording) {
-      await _recorder.stopRecorder();
+
+    if (_useRecord) {
+      _winStreamSubscription?.cancel();
+      _winStreamSubscription = null;
+      await _winRecorder?.stop();
+    } else {
+      _recorderSubscription?.cancel();
+      _recorderSubscription = null;
+      if (_recorder != null && _recorder!.isRecording) {
+        await _recorder!.stopRecorder();
+      }
     }
   }
 
-  /// Save accumulated PCM data as a WAV file. Returns the file path.
   Future<String> saveRecordingAsWav(String fileName) async {
     final dir = await getApplicationDocumentsDirectory();
     final filePath = '${dir.path}/$fileName';
@@ -71,7 +113,6 @@ class AudioService {
     return filePath;
   }
 
-  /// Clear the accumulated recording buffer.
   void clearRecording() {
     _fullRecording.clear();
   }
@@ -107,9 +148,9 @@ class AudioService {
     buffer.setUint8(offset++, 0x6D); // m
     buffer.setUint8(offset++, 0x74); // t
     buffer.setUint8(offset++, 0x20); // (space)
-    buffer.setUint32(offset, 16, Endian.little); // chunk size
+    buffer.setUint32(offset, 16, Endian.little);
     offset += 4;
-    buffer.setUint16(offset, 1, Endian.little); // PCM format
+    buffer.setUint16(offset, 1, Endian.little);
     offset += 2;
     buffer.setUint16(offset, numChannels, Endian.little);
     offset += 2;
@@ -130,7 +171,6 @@ class AudioService {
     buffer.setUint32(offset, dataSize, Endian.little);
     offset += 4;
 
-    // PCM data
     for (int i = 0; i < pcmData.length; i++) {
       buffer.setUint8(offset++, pcmData[i]);
     }
@@ -141,7 +181,13 @@ class AudioService {
   Future<void> dispose() async {
     await stop();
     if (_isInitialized) {
-      await _recorder.closeRecorder();
+      if (_useRecord) {
+        await _winRecorder?.dispose();
+        _winRecorder = null;
+      } else {
+        await _recorder?.closeRecorder();
+        _recorder = null;
+      }
       _isInitialized = false;
     }
   }

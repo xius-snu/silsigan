@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../providers/recording_provider.dart';
@@ -105,7 +106,10 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   }
 
   Future<void> _startRecording() async {
-    final status = await Permission.microphone.request();
+    final needsPermission = Platform.isAndroid || Platform.isIOS;
+    final status = needsPermission
+        ? await Permission.microphone.request()
+        : PermissionStatus.granted;
     if (!status.isGranted) return;
 
     setState(() => _myDraft = '');

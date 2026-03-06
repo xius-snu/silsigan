@@ -8,6 +8,7 @@ import '../utils/constants.dart';
 class SessionRelayService {
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
+  bool _intentionallyClosed = false;
 
   Function(String text)? onPartnerTranslationDraft;
   Function(String text)? onPartnerTranslationCompleted;
@@ -19,6 +20,7 @@ class SessionRelayService {
     required String sessionId,
     required String userId,
   }) async {
+    _intentionallyClosed = false;
     final wsUrl = AppConstants.serverBaseUrl
         .replaceFirst('https://', 'wss://')
         .replaceFirst('http://', 'ws://');
@@ -31,10 +33,10 @@ class SessionRelayService {
       _handleMessage,
       onError: (e) {
         debugPrint('Session relay error: $e');
-        onPartnerDisconnected?.call();
+        if (!_intentionallyClosed) onPartnerDisconnected?.call();
       },
       onDone: () {
-        onPartnerDisconnected?.call();
+        if (!_intentionallyClosed) onPartnerDisconnected?.call();
       },
     );
   }
@@ -85,6 +87,7 @@ class SessionRelayService {
   }
 
   Future<void> disconnect() async {
+    _intentionallyClosed = true;
     _subscription?.cancel();
     _subscription = null;
     await _channel?.sink.close();

@@ -44,6 +44,7 @@ const PUBLIC_ROUTES = new Set([
     'GET:/api/friends/:userId',
     'GET:/api/session/pending/:userId',
     'GET:/api/session/status/:inviteId',
+    'GET:/ws/session',
 ]);
 
 async function authenticateRequest(req, reply) {
