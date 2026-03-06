@@ -48,7 +48,9 @@ const PUBLIC_ROUTES = new Set([
 ]);
 
 async function authenticateRequest(req, reply) {
-    const routeKey = `${req.method}:${req.routeOptions?.url || req.url}`;
+    // Strip query params for route matching
+    const urlPath = (req.routeOptions?.url || req.url.split('?')[0]);
+    const routeKey = `${req.method}:${urlPath}`;
     if (PUBLIC_ROUTES.has(routeKey)) return;
 
     const authHeader = req.headers['authorization'];
