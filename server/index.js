@@ -48,8 +48,12 @@ const PUBLIC_ROUTES = new Set([
 ]);
 
 async function authenticateRequest(req, reply) {
+    // Skip auth for WebSocket routes
+    const path = req.url.split('?')[0];
+    if (path.startsWith('/ws/')) return;
+
     // Strip query params for route matching
-    const urlPath = (req.routeOptions?.url || req.url.split('?')[0]);
+    const urlPath = (req.routeOptions?.url || path);
     const routeKey = `${req.method}:${urlPath}`;
     if (PUBLIC_ROUTES.has(routeKey)) return;
 
@@ -117,7 +121,7 @@ async function start() {
     // HEALTH CHECK
     // ==================
 
-    fastify.get('/', async () => ({ status: 'ok' }));
+    fastify.get('/', async () => ({ status: 'ok', version: 3 }));
 
     // ==================
     // USER ENDPOINTS
