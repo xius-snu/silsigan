@@ -18,6 +18,9 @@ import '../widgets/save_discard_row.dart';
 import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/friend_dialog.dart';
+import '../widgets/session_invite_banner.dart';
+import '../../services/user_service.dart';
+import 'live_session_screen.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
@@ -32,13 +35,162 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
 
+  // Session invite state
+  Map<String, dynamic>? _outgoingInvite;
+  Map<String, dynamic>? _incomingInvite;
+  Timer? _incomingPollTimer;
+  Timer? _outgoingPollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startIncomingPoll();
+  }
+
   @override
   void dispose() {
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _incomingPollTimer?.cancel();
+    _outgoingPollTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     super.dispose();
+  }
+
+  void _startIncomingPoll() {
+    _incomingPollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (_outgoingInvite != null || _incomingInvite != null) return;
+      final invite = await UserService.instance.getIncomingInvite();
+      if (mounted && invite != null && _incomingInvite == null) {
+        setState(() => _incomingInvite = invite);
+      }
+    });
+  }
+
+  void _startOutgoingPoll(int inviteId) {
+    _outgoingPollTimer?.cancel();
+    _outgoingPollTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      final status = await UserService.instance.getInviteStatus(inviteId);
+      if (!mounted || status == null) return;
+
+      final inviteStatus = status['status'] as String?;
+      if (inviteStatus == 'accepted') {
+        _outgoingPollTimer?.cancel();
+        final sessionId = status['session_id'] as String;
+        final partnerLanguage = status['to_language'] as String;
+        final myLanguage = _outgoingInvite!['myLanguage'] as String;
+        final friendCode = _outgoingInvite!['friendCode'] as String;
+        setState(() => _outgoingInvite = null);
+        _navigateToSession(sessionId, myLanguage, partnerLanguage, friendCode);
+      } else if (inviteStatus == 'rejected' || inviteStatus == 'expired' || inviteStatus == 'cancelled') {
+        _outgoingPollTimer?.cancel();
+        setState(() => _outgoingInvite = null);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Invite $inviteStatus')),
+          );
+        }
+      }
+    });
+  }
+
+  Future<void> _handleOutgoingInviteResult(Map<String, dynamic> data) async {
+    if (data['status'] == 'accepted') {
+      // Auto-accepted (they already sent us an invite)
+      _navigateToSession(
+        data['sessionId'] as String,
+        data['myLanguage'] as String,
+        data['partnerLanguage'] as String,
+        data['friendCode'] as String,
+      );
+    } else {
+      // Pending - start polling
+      setState(() => _outgoingInvite = data);
+      _startOutgoingPoll(data['inviteId'] as int);
+    }
+  }
+
+  Future<void> _cancelOutgoingInvite() async {
+    if (_outgoingInvite == null) return;
+    _outgoingPollTimer?.cancel();
+    await UserService.instance
+        .cancelSessionInvite(_outgoingInvite!['inviteId'] as int);
+    setState(() => _outgoingInvite = null);
+  }
+
+  Future<void> _acceptIncomingInvite() async {
+    if (_incomingInvite == null) return;
+
+    final language = await showDialog<TargetLanguage>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Select your language'),
+        children: TargetLanguage.values
+            .map(
+              (lang) => SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, lang),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(lang.displayName,
+                      style: const TextStyle(fontSize: 16)),
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (language == null) return;
+
+    final inviteId = _incomingInvite!['id'] as int;
+    final partnerLanguage = _incomingInvite!['from_language'] as String;
+    final partnerCode = _incomingInvite!['from_friend_code'] as String;
+
+    final result =
+        await UserService.instance.acceptSessionInvite(inviteId, language.code);
+    if (!mounted) return;
+
+    if (result != null && result['success'] == true) {
+      setState(() => _incomingInvite = null);
+      _navigateToSession(
+        result['sessionId'] as String,
+        language.code,
+        partnerLanguage,
+        partnerCode,
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text(result?['error'] ?? 'Failed to accept invite')),
+      );
+    }
+  }
+
+  Future<void> _rejectIncomingInvite() async {
+    if (_incomingInvite == null) return;
+    await UserService.instance
+        .rejectSessionInvite(_incomingInvite!['id'] as int);
+    setState(() => _incomingInvite = null);
+  }
+
+  void _navigateToSession(String sessionId, String myLanguage,
+      String partnerLanguage, String partnerFriendCode) {
+    _incomingPollTimer?.cancel();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LiveSessionScreen(
+          sessionId: sessionId,
+          partnerLanguage: partnerLanguage,
+          myLanguage: myLanguage,
+          partnerFriendCode: partnerFriendCode,
+        ),
+      ),
+    ).then((_) {
+      // Restart polling when returning from session
+      _startIncomingPoll();
+    });
   }
 
   Future<void> _startRecording() async {
@@ -315,11 +467,14 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
   }
 
-  void _showFriendDialog() {
-    showDialog(
+  void _showFriendDialog() async {
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => const FriendDialog(),
     );
+    if (result != null && result['type'] == 'session_invite') {
+      _handleOutgoingInviteResult(result);
+    }
   }
 
   void _resetState() {
@@ -351,6 +506,20 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Session invite banners
+            if (_incomingInvite != null)
+              IncomingInviteBanner(
+                friendCode:
+                    _incomingInvite!['from_friend_code'] as String? ?? '?',
+                onAccept: _acceptIncomingInvite,
+                onReject: _rejectIncomingInvite,
+              ),
+            if (_outgoingInvite != null)
+              OutgoingInviteBanner(
+                friendCode: _outgoingInvite!['friendCode'] as String? ?? '?',
+                onCancel: _cancelOutgoingInvite,
+              ),
+
             // Header: Title + Status
             Padding(
               padding: const EdgeInsets.only(

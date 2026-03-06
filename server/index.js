@@ -4,6 +4,7 @@ fastify.register(require('@fastify/cors'), {
     origin: true,
     methods: ['GET', 'POST']
 });
+fastify.register(require('@fastify/websocket'));
 const { Pool } = require('pg');
 const crypto = require('crypto');
 
@@ -16,6 +17,12 @@ const pool = new Pool({
     connectionString: DATABASE_URL,
     ssl: { rejectUnauthorized: true }
 });
+
+// ============================================
+// IN-MEMORY SESSION ROOMS
+// ============================================
+
+const sessionRooms = new Map(); // sessionId -> Map<userId, WebSocket>
 
 // ============================================
 // HELPERS
@@ -35,6 +42,8 @@ const PUBLIC_ROUTES = new Set([
     'POST:/api/user/sync-friend-code',
     'GET:/api/user/by-code/:code',
     'GET:/api/friends/:userId',
+    'GET:/api/session/pending/:userId',
+    'GET:/api/session/status/:inviteId',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -85,6 +94,20 @@ async function start() {
     `);
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code) WHERE friend_code IS NOT NULL');
 
+    // Session invites table
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS session_invites (
+            id SERIAL PRIMARY KEY,
+            from_user_id TEXT NOT NULL REFERENCES users(user_id),
+            to_user_id TEXT NOT NULL REFERENCES users(user_id),
+            from_language TEXT NOT NULL,
+            to_language TEXT,
+            session_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
     fastify.addHook('preHandler', authenticateRequest);
 
     // ==================
@@ -97,7 +120,6 @@ async function start() {
     // USER ENDPOINTS
     // ==================
 
-    // Auto-register with device ID
     fastify.post('/api/user/register', async (req, reply) => {
         const { userId, friendCode } = req.body;
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
@@ -130,7 +152,6 @@ async function start() {
         }
     });
 
-    // Sync friend code (fire-and-forget from client)
     fastify.post('/api/user/sync-friend-code', async (req, reply) => {
         const { userId, friendCode } = req.body;
         if (!userId || !friendCode) return reply.code(400).send({ error: 'Missing fields' });
@@ -146,7 +167,6 @@ async function start() {
         }
     });
 
-    // Lookup user by friend code
     fastify.get('/api/user/by-code/:code', async (req, reply) => {
         const { code } = req.params;
         try {
@@ -166,7 +186,6 @@ async function start() {
     // FRIEND ENDPOINTS
     // ==================
 
-    // Send friend request (auto-accept if they already sent one to us)
     fastify.post('/api/friends/add', async (req, reply) => {
         const { userId, friendId } = req.body;
         if (!userId || !friendId) return reply.code(400).send({ error: 'Missing userId or friendId' });
@@ -176,7 +195,6 @@ async function start() {
         try {
             await client.query('BEGIN');
 
-            // Check friend count cap (200 max)
             const friendCount = await client.query(
                 `SELECT COUNT(*) as cnt FROM friends WHERE user_id = $1 AND status = 'accepted'`,
                 [userId]
@@ -186,7 +204,6 @@ async function start() {
                 return reply.code(400).send({ error: 'Friend limit reached (200 max)' });
             }
 
-            // Check outgoing pending cap (50 max)
             const pendingCount = await client.query(
                 `SELECT COUNT(*) as cnt FROM friends WHERE user_id = $1 AND status = 'pending'`,
                 [userId]
@@ -196,7 +213,6 @@ async function start() {
                 return reply.code(400).send({ error: 'Too many pending requests (50 max)' });
             }
 
-            // Check existing relationship
             const existing = await client.query(
                 `SELECT user_id, friend_id, status FROM friends
                  WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
@@ -208,7 +224,6 @@ async function start() {
                 return reply.code(400).send({ error: 'Already friends' });
             }
 
-            // Auto-accept if they sent us a pending request
             const incomingPending = existing.rows.find(
                 r => r.user_id === friendId && r.friend_id === userId && r.status === 'pending'
             );
@@ -225,7 +240,6 @@ async function start() {
                 return { success: true, status: 'accepted' };
             }
 
-            // Check if already sent
             const alreadySent = existing.rows.find(
                 r => r.user_id === userId && r.friend_id === friendId && r.status === 'pending'
             );
@@ -234,7 +248,6 @@ async function start() {
                 return reply.code(400).send({ error: 'Request already sent' });
             }
 
-            // Create pending request
             await client.query(
                 `INSERT INTO friends (user_id, friend_id, status) VALUES ($1, $2, 'pending') ON CONFLICT (user_id, friend_id) DO UPDATE SET status = 'pending'`,
                 [userId, friendId]
@@ -250,7 +263,6 @@ async function start() {
         }
     });
 
-    // Accept incoming friend request
     fastify.post('/api/friends/accept', async (req, reply) => {
         const { userId, requesterId } = req.body;
         if (!userId || !requesterId) return reply.code(400).send({ error: 'Missing params' });
@@ -285,7 +297,6 @@ async function start() {
         }
     });
 
-    // Decline incoming friend request
     fastify.post('/api/friends/decline', async (req, reply) => {
         const { userId, requesterId } = req.body;
         if (!userId || !requesterId) return reply.code(400).send({ error: 'Missing params' });
@@ -301,7 +312,6 @@ async function start() {
         }
     });
 
-    // Cancel outgoing friend request
     fastify.post('/api/friends/cancel', async (req, reply) => {
         const { userId, friendId } = req.body;
         if (!userId || !friendId) return reply.code(400).send({ error: 'Missing params' });
@@ -317,7 +327,6 @@ async function start() {
         }
     });
 
-    // Remove friend (both directions)
     fastify.post('/api/friends/remove', async (req, reply) => {
         const { userId, friendId } = req.body;
         if (!userId || !friendId) return reply.code(400).send({ error: 'Missing userId or friendId' });
@@ -333,7 +342,6 @@ async function start() {
         }
     });
 
-    // List friends, incoming requests, and outgoing requests
     fastify.get('/api/friends/:userId', async (req, reply) => {
         const { userId } = req.params;
         try {
@@ -370,6 +378,274 @@ async function start() {
             fastify.log.error('List friends error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         }
+    });
+
+    // ==================
+    // SESSION INVITE ENDPOINTS
+    // ==================
+
+    // Send session invite (auto-accepts if they already sent one to us)
+    fastify.post('/api/session/invite', async (req, reply) => {
+        const { userId, toUserId, fromLanguage } = req.body;
+        if (!userId || !toUserId || !fromLanguage) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        if (userId === toUserId) {
+            return reply.code(400).send({ error: 'Cannot invite yourself' });
+        }
+
+        try {
+            // Expire old pending invites (> 5 min)
+            await pool.query(
+                `UPDATE session_invites SET status = 'expired'
+                 WHERE status = 'pending' AND created_at < NOW() - INTERVAL '5 minutes'`
+            );
+
+            // Check if I already have a pending outgoing invite
+            const myPending = await pool.query(
+                `SELECT id FROM session_invites
+                 WHERE from_user_id = $1 AND status = 'pending'`,
+                [userId]
+            );
+            if (myPending.rows.length > 0) {
+                return reply.code(400).send({ error: 'You already have a pending invite' });
+            }
+
+            // Check if they already sent me a pending invite -> auto-accept
+            const theirPending = await pool.query(
+                `SELECT id, from_language FROM session_invites
+                 WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending'`,
+                [toUserId, userId]
+            );
+            if (theirPending.rows.length > 0) {
+                const sessionId = crypto.randomUUID();
+                await pool.query(
+                    `UPDATE session_invites
+                     SET status = 'accepted', to_language = $2, session_id = $3
+                     WHERE id = $1`,
+                    [theirPending.rows[0].id, fromLanguage, sessionId]
+                );
+                return {
+                    success: true,
+                    status: 'accepted',
+                    inviteId: theirPending.rows[0].id,
+                    sessionId,
+                    partnerLanguage: theirPending.rows[0].from_language,
+                };
+            }
+
+            // Create new pending invite
+            const result = await pool.query(
+                `INSERT INTO session_invites (from_user_id, to_user_id, from_language)
+                 VALUES ($1, $2, $3) RETURNING id`,
+                [userId, toUserId, fromLanguage]
+            );
+
+            return { success: true, status: 'pending', inviteId: result.rows[0].id };
+        } catch (e) {
+            fastify.log.error('Session invite error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Cancel my pending session invite
+    fastify.post('/api/session/cancel-invite', async (req, reply) => {
+        const { userId, inviteId } = req.body;
+        if (!userId || !inviteId) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            await pool.query(
+                `UPDATE session_invites SET status = 'cancelled'
+                 WHERE id = $1 AND from_user_id = $2 AND status = 'pending'`,
+                [inviteId, userId]
+            );
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Cancel invite error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Accept incoming session invite
+    fastify.post('/api/session/accept-invite', async (req, reply) => {
+        const { userId, inviteId, toLanguage } = req.body;
+        if (!userId || !inviteId || !toLanguage) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        try {
+            const invite = await pool.query(
+                `SELECT id, from_user_id, from_language FROM session_invites
+                 WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
+                [inviteId, userId]
+            );
+            if (invite.rows.length === 0) {
+                return reply.code(404).send({ error: 'Invite not found or expired' });
+            }
+
+            const sessionId = crypto.randomUUID();
+            await pool.query(
+                `UPDATE session_invites
+                 SET status = 'accepted', to_language = $2, session_id = $3
+                 WHERE id = $1`,
+                [inviteId, toLanguage, sessionId]
+            );
+
+            return {
+                success: true,
+                sessionId,
+                partnerLanguage: invite.rows[0].from_language,
+            };
+        } catch (e) {
+            fastify.log.error('Accept invite error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Reject incoming session invite
+    fastify.post('/api/session/reject-invite', async (req, reply) => {
+        const { userId, inviteId } = req.body;
+        if (!userId || !inviteId) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            await pool.query(
+                `UPDATE session_invites SET status = 'rejected'
+                 WHERE id = $1 AND to_user_id = $2 AND status = 'pending'`,
+                [inviteId, userId]
+            );
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Reject invite error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Get pending invites for me (polling by receiver)
+    fastify.get('/api/session/pending/:userId', async (req, reply) => {
+        const { userId } = req.params;
+        try {
+            // Expire old invites first
+            await pool.query(
+                `UPDATE session_invites SET status = 'expired'
+                 WHERE status = 'pending' AND created_at < NOW() - INTERVAL '5 minutes'`
+            );
+
+            const res = await pool.query(`
+                SELECT si.id, si.from_user_id, si.from_language, si.created_at,
+                       u.friend_code as from_friend_code
+                FROM session_invites si
+                JOIN users u ON u.user_id = si.from_user_id
+                WHERE si.to_user_id = $1 AND si.status = 'pending'
+                ORDER BY si.created_at DESC
+                LIMIT 1
+            `, [userId]);
+
+            return { invite: res.rows.length > 0 ? res.rows[0] : null };
+        } catch (e) {
+            fastify.log.error('Pending invites error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Check invite status (polling by sender)
+    fastify.get('/api/session/status/:inviteId', async (req, reply) => {
+        const { inviteId } = req.params;
+        try {
+            const res = await pool.query(`
+                SELECT si.id, si.status, si.session_id, si.from_language, si.to_language,
+                       si.from_user_id, si.to_user_id,
+                       u.friend_code as to_friend_code
+                FROM session_invites si
+                JOIN users u ON u.user_id = si.to_user_id
+                WHERE si.id = $1
+            `, [inviteId]);
+
+            if (res.rows.length === 0) {
+                return reply.code(404).send({ error: 'Invite not found' });
+            }
+
+            // Auto-expire if too old
+            const invite = res.rows[0];
+            if (invite.status === 'pending') {
+                const age = Date.now() - new Date(invite.created_at).getTime();
+                if (age > 5 * 60 * 1000) {
+                    await pool.query(
+                        `UPDATE session_invites SET status = 'expired' WHERE id = $1`,
+                        [inviteId]
+                    );
+                    invite.status = 'expired';
+                }
+            }
+
+            return invite;
+        } catch (e) {
+            fastify.log.error('Invite status error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // ==================
+    // WEBSOCKET SESSION RELAY
+    // ==================
+
+    fastify.get('/ws/session', { websocket: true }, (socket, req) => {
+        const { sessionId, userId } = req.query;
+
+        if (!sessionId || !userId) {
+            socket.close(4000, 'Missing sessionId or userId');
+            return;
+        }
+
+        // Get or create room
+        if (!sessionRooms.has(sessionId)) {
+            sessionRooms.set(sessionId, new Map());
+        }
+        const room = sessionRooms.get(sessionId);
+
+        // Check room capacity
+        if (room.size >= 2 && !room.has(userId)) {
+            socket.close(4001, 'Session room is full');
+            return;
+        }
+
+        // Add user to room
+        room.set(userId, socket);
+        fastify.log.info(`User ${userId} joined session ${sessionId} (${room.size}/2)`);
+
+        socket.on('message', (rawMsg) => {
+            try {
+                const msg = JSON.parse(rawMsg.toString());
+
+                if (msg.type === 'end_session') {
+                    for (const [uid, ws] of room) {
+                        if (uid !== userId && ws.readyState === 1) {
+                            ws.send(JSON.stringify({ type: 'session_ended' }));
+                        }
+                    }
+                    sessionRooms.delete(sessionId);
+                    return;
+                }
+
+                // Relay to partner
+                for (const [uid, ws] of room) {
+                    if (uid !== userId && ws.readyState === 1) {
+                        ws.send(rawMsg.toString());
+                    }
+                }
+            } catch (e) {
+                // ignore malformed messages
+            }
+        });
+
+        socket.on('close', () => {
+            room.delete(userId);
+            for (const [, ws] of room) {
+                if (ws.readyState === 1) {
+                    ws.send(JSON.stringify({ type: 'partner_disconnected' }));
+                }
+            }
+            if (room.size === 0) {
+                sessionRooms.delete(sessionId);
+            }
+            fastify.log.info(`User ${userId} left session ${sessionId}`);
+        });
     });
 
     // ==================

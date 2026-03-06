@@ -32,10 +32,19 @@ class SonioxRealtimeService {
   Function(String error)? onError;
   Function()? onConnected;
 
-  Future<void> connect({String? targetLanguageCode}) async {
+  bool _forceTranslation = false;
+  String? _languageHint;
+
+  Future<void> connect({
+    String? targetLanguageCode,
+    bool forceTranslation = false,
+    String? languageHint,
+  }) async {
     _intentionallyClosed = false;
     _reconnectAttempts = 0;
     _targetLanguageCode = targetLanguageCode;
+    _forceTranslation = forceTranslation;
+    _languageHint = languageHint;
     _resetTokenState();
     await _doConnect();
   }
@@ -50,7 +59,7 @@ class SonioxRealtimeService {
       final config = <String, dynamic>{
         'api_key': _apiKey,
         'model': AppConstants.sonioxModel,
-        'language_hints': [AppConstants.transcriptionLanguage],
+        'language_hints': [_languageHint ?? AppConstants.transcriptionLanguage],
         'audio_format': AppConstants.audioFormat,
         'sample_rate': AppConstants.sampleRate,
         'num_channels': AppConstants.numChannels,
@@ -60,7 +69,8 @@ class SonioxRealtimeService {
 
       // Add translation config if target is not the source language
       if (_targetLanguageCode != null &&
-          _targetLanguageCode != AppConstants.transcriptionLanguage) {
+          (_forceTranslation ||
+              _targetLanguageCode != AppConstants.transcriptionLanguage)) {
         config['translation'] = {
           'type': 'one_way',
           'target_language': _targetLanguageCode,
@@ -182,7 +192,6 @@ class SonioxRealtimeService {
   }
 
   void _processTranslationTokens(List<Map<String, dynamic>> tokens) {
-    final hadProvisional = _provisionalTranslation.isNotEmpty;
     String newProvisionalText = '';
     String newFinalText = '';
 

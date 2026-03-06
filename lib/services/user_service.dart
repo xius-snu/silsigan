@@ -225,6 +225,109 @@ class UserService {
     }
   }
 
+  // ==================
+  // Session invite operations
+  // ==================
+
+  Future<Map<String, dynamic>?> sendSessionInvite(
+      String toUserId, String fromLanguage) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/session/invite'),
+        headers: _authHeaders,
+        body: json.encode({
+          'userId': _userId,
+          'toUserId': toUserId,
+          'fromLanguage': fromLanguage,
+        }),
+      );
+      return json.decode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('Send session invite error: $e');
+      return null;
+    }
+  }
+
+  Future<bool> cancelSessionInvite(int inviteId) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/session/cancel-invite'),
+        headers: _authHeaders,
+        body: json.encode({'userId': _userId, 'inviteId': inviteId}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Cancel session invite error: $e');
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> acceptSessionInvite(
+      int inviteId, String toLanguage) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/session/accept-invite'),
+        headers: _authHeaders,
+        body: json.encode({
+          'userId': _userId,
+          'inviteId': inviteId,
+          'toLanguage': toLanguage,
+        }),
+      );
+      return json.decode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('Accept session invite error: $e');
+      return null;
+    }
+  }
+
+  Future<bool> rejectSessionInvite(int inviteId) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/session/reject-invite'),
+        headers: _authHeaders,
+        body: json.encode({'userId': _userId, 'inviteId': inviteId}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('Reject session invite error: $e');
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getIncomingInvite() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/session/pending/$_userId'),
+        headers: {'Content-Type': 'application/json'},
+      );
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body) as Map<String, dynamic>;
+        return data['invite'] as Map<String, dynamic>?;
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Get incoming invite error: $e');
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getInviteStatus(int inviteId) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/session/status/$inviteId'),
+        headers: {'Content-Type': 'application/json'},
+      );
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Get invite status error: $e');
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>> listFriends() async {
     try {
       final response = await http.get(

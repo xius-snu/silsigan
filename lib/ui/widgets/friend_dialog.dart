@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../providers/target_language_provider.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 
@@ -510,44 +511,124 @@ class _FriendDialogState extends State<FriendDialog> {
     );
   }
 
+  Future<void> _startSession(String friendId, String friendCode) async {
+    final language = await showDialog<TargetLanguage>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Select your language'),
+        children: TargetLanguage.values
+            .map(
+              (lang) => SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, lang),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(lang.displayName, style: const TextStyle(fontSize: 16)),
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (language == null) return;
+
+    final result =
+        await _userService.sendSessionInvite(friendId, language.code);
+    if (!mounted) return;
+
+    if (result != null && result['success'] == true) {
+      Navigator.pop(context, {
+        'type': 'session_invite',
+        'inviteId': result['inviteId'],
+        'friendCode': friendCode,
+        'friendId': friendId,
+        'myLanguage': language.code,
+        'status': result['status'],
+        if (result['status'] == 'accepted') ...{
+          'sessionId': result['sessionId'],
+          'partnerLanguage': result['partnerLanguage'],
+        },
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(result?['error'] ?? 'Failed to send invite')),
+      );
+    }
+  }
+
+  void _showFriendMenu(
+      BuildContext context, String userId, String code, Offset position) {
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+          position.dx, position.dy, position.dx, position.dy),
+      items: [
+        const PopupMenuItem(
+          value: 'session',
+          child: Row(
+            children: [
+              Icon(Icons.call, size: 18, color: AppConstants.textSecondary),
+              SizedBox(width: 8),
+              Text('Start Session'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'remove',
+          child: Row(
+            children: [
+              Icon(Icons.person_remove, size: 18, color: Colors.red),
+              SizedBox(width: 8),
+              Text('Remove Friend', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+        ),
+      ],
+    ).then((value) {
+      if (value == 'session') _startSession(userId, code);
+      if (value == 'remove') _removeFriend(userId);
+    });
+  }
+
   Widget _friendTile(dynamic friend) {
     final code = (friend as Map<String, dynamic>)['friend_code'] as String? ??
         '????????';
     final id = friend['user_id'] as String;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: AppConstants.bgColor,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.person,
-            size: 18,
-            color: AppConstants.textSecondary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              code,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: AppConstants.textPrimary,
+    return GestureDetector(
+      onTapDown: (details) =>
+          _showFriendMenu(context, id, code, details.globalPosition),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppConstants.bgColor,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.person,
+              size: 18,
+              color: AppConstants.textSecondary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                code,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: AppConstants.textPrimary,
+                ),
               ),
             ),
-          ),
-          GestureDetector(
-            onTap: () => _removeFriend(id),
-            child: Icon(
-              Icons.person_remove_outlined,
+            Icon(
+              Icons.more_vert,
               size: 18,
               color: Colors.grey.shade400,
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
