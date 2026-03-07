@@ -1,8 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import '../models/transcript_session.dart';
 import '../utils/constants.dart';
 import 'user_service.dart';
@@ -20,25 +18,13 @@ class SyncService {
           'Authorization': 'Bearer ${UserService.instance.authToken}',
       };
 
-  /// Upload a single session to the server (fire-and-forget).
+  /// Upload a single session to the server (text only, fire-and-forget).
   Future<void> uploadSession(TranscriptSession session) async {
     try {
       final userId = UserService.instance.userId;
       if (userId == null) return;
 
-      String? audioBase64;
-      if (session.audioPath != null) {
-        final file = File(session.audioPath!);
-        if (await file.exists()) {
-          final bytes = await file.readAsBytes();
-          // Skip audio if > 15MB to avoid timeout
-          if (bytes.length < 15 * 1024 * 1024) {
-            audioBase64 = base64Encode(bytes);
-          }
-        }
-      }
-
-      await http
+      final response = await http
           .post(
             Uri.parse('$_baseUrl/api/sessions/save'),
             headers: _headers,
@@ -49,10 +35,10 @@ class SyncService {
               'translation': session.vietnameseFull,
               'transcriptionPreview': session.koreanPreview,
               'translationPreview': session.vietnamesePreview,
-              'audioBase64': audioBase64,
             }),
           )
-          .timeout(const Duration(seconds: 60));
+          .timeout(const Duration(seconds: 15));
+      debugPrint('Upload session response: ${response.statusCode} ${response.body}');
     } catch (e) {
       debugPrint('Upload session error: $e');
     }
@@ -126,23 +112,12 @@ class SyncService {
       final session = data['session'];
       if (session == null) return;
 
-      // Save audio file locally if present
-      String? audioPath;
-      if (session['audio_base64'] != null) {
-        final audioBytes = base64Decode(session['audio_base64'] as String);
-        final dir = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        audioPath = '${dir.path}/session_sync_$timestamp.wav';
-        await File(audioPath).writeAsBytes(audioBytes);
-      }
-
       final newSession = TranscriptSession(
         createdAt: session['created_at'] as String,
         koreanFull: session['transcription'] as String,
         vietnameseFull: session['translation'] as String,
         koreanPreview: session['transcription_preview'] as String,
         vietnamesePreview: session['translation_preview'] as String,
-        audioPath: audioPath,
       );
 
       await DatabaseService.instance.insertSession(newSession);
