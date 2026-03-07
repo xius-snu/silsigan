@@ -9,6 +9,7 @@ import '../../providers/target_language_provider.dart';
 import '../../providers/transcript_provider.dart';
 import '../../providers/translation_provider.dart';
 import '../../providers/session_history_provider.dart';
+import '../../providers/display_mode_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
@@ -18,9 +19,11 @@ import '../widgets/record_button.dart';
 import '../widgets/save_discard_row.dart';
 import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
+import '../widgets/line_by_line_panel.dart';
 import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
 import '../../services/user_service.dart';
+import '../../services/sync_service.dart';
 import 'live_session_screen.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -84,7 +87,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         final friendCode = _outgoingInvite!['friendCode'] as String;
         setState(() => _outgoingInvite = null);
         _navigateToSession(sessionId, myLanguage, partnerLanguage, friendCode);
-      } else if (inviteStatus == 'rejected' || inviteStatus == 'expired' || inviteStatus == 'cancelled') {
+      } else if (inviteStatus == 'rejected' ||
+          inviteStatus == 'expired' ||
+          inviteStatus == 'cancelled') {
         _outgoingPollTimer?.cancel();
         setState(() => _outgoingInvite = null);
         if (mounted) {
@@ -161,9 +166,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content:
-                Text(result?['error'] ?? 'Failed to accept invite')),
+        SnackBar(content: Text(result?['error'] ?? 'Failed to accept invite')),
       );
     }
   }
@@ -242,36 +245,61 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
         _newLineTimer?.cancel();
-        ref.read(koreanHistoryProvider.notifier).update((state) {
-          if (state.isEmpty) return [transcript];
-          final updated = List<String>.from(state);
-          updated.last = '${updated.last} $transcript';
-          return updated;
-        });
-        // Korean target: copy transcription to translation panel
-        if (targetLanguage == TargetLanguage.korean) {
-          ref.read(vietnameseHistoryProvider.notifier).update((state) {
+        final isLineByLine =
+            ref.read(displayModeProvider) == DisplayMode.lineByLine;
+
+        if (isLineByLine) {
+          // Line-by-line: each Soniox endpoint = one segment.
+          // Korean is SOV — meaning is incomplete until the verb arrives
+          // at the end. Soniox endpoints fire on ~2s silence, which
+          // naturally aligns with Korean sentence boundaries.
+          // We always ADD a new entry (never merge with previous).
+          ref.read(koreanHistoryProvider.notifier).update(
+                (state) => [...state, transcript],
+              );
+          if (targetLanguage == TargetLanguage.korean) {
+            // Korean target: copy transcription directly as translation
+            ref.read(vietnameseHistoryProvider.notifier).update(
+                  (state) => [...state, transcript],
+                );
+          } else {
+            // Pre-create empty slot — will be filled by onTranslationCompleted
+            // which fires immediately after (flushed at source boundary).
+            ref.read(vietnameseHistoryProvider.notifier).update(
+                  (state) => [...state, ''],
+                );
+          }
+          // No timer needed — segments are endpoint-delimited
+        } else {
+          // Split mode: append to last line, timer-based new lines
+          ref.read(koreanHistoryProvider.notifier).update((state) {
             if (state.isEmpty) return [transcript];
             final updated = List<String>.from(state);
             updated.last = '${updated.last} $transcript';
             return updated;
           });
+          if (targetLanguage == TargetLanguage.korean) {
+            ref.read(vietnameseHistoryProvider.notifier).update((state) {
+              if (state.isEmpty) return [transcript];
+              final updated = List<String>.from(state);
+              updated.last = '${updated.last} $transcript';
+              return updated;
+            });
+          }
+          _newLineTimer = Timer(
+            const Duration(milliseconds: AppConstants.newLinePauseMs),
+            () {
+              ref.read(koreanHistoryProvider.notifier).update(
+                    (state) => [...state, ''],
+                  );
+              if (targetLanguage == TargetLanguage.korean) {
+                ref.read(vietnameseHistoryProvider.notifier).update(
+                      (state) => [...state, ''],
+                    );
+              }
+            },
+          );
         }
-        // Start a timer — if no new utterance arrives within the pause
-        // duration, the next utterance will start on a new line.
-        _newLineTimer = Timer(
-          const Duration(milliseconds: AppConstants.newLinePauseMs),
-          () {
-            ref.read(koreanHistoryProvider.notifier).update(
-              (state) => [...state, ''],
-            );
-            if (targetLanguage == TargetLanguage.korean) {
-              ref.read(vietnameseHistoryProvider.notifier).update(
-                (state) => [...state, ''],
-              );
-            }
-          },
-        );
       }
       ref.read(koreanDraftProvider.notifier).state = '';
     };
@@ -284,20 +312,42 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
         _newLineTimerTranslation?.cancel();
-        ref.read(vietnameseHistoryProvider.notifier).update((state) {
-          if (state.isEmpty) return [translation];
-          final updated = List<String>.from(state);
-          updated.last = '${updated.last} $translation';
-          return updated;
-        });
-        _newLineTimerTranslation = Timer(
-          const Duration(milliseconds: AppConstants.newLinePauseMs),
-          () {
-            ref.read(vietnameseHistoryProvider.notifier).update(
-              (state) => [...state, ''],
-            );
-          },
-        );
+        final isLineByLine =
+            ref.read(displayModeProvider) == DisplayMode.lineByLine;
+
+        if (isLineByLine) {
+          // Translation is flushed BEFORE the new transcription (swap in
+          // Soniox service), so accumulated translation belongs to the
+          // PREVIOUS segment. Fill the earliest empty slot (forward search).
+          ref.read(vietnameseHistoryProvider.notifier).update((state) {
+            if (state.isEmpty) return [translation];
+            final updated = List<String>.from(state);
+            for (int i = 0; i < updated.length; i++) {
+              if (updated[i].isEmpty) {
+                updated[i] = translation;
+                return updated;
+              }
+            }
+            // No empty slot — add as new entry
+            return [...updated, translation];
+          });
+        } else {
+          // Split mode: append to last line
+          ref.read(vietnameseHistoryProvider.notifier).update((state) {
+            if (state.isEmpty) return [translation];
+            final updated = List<String>.from(state);
+            updated.last = '${updated.last} $translation';
+            return updated;
+          });
+          _newLineTimerTranslation = Timer(
+            const Duration(milliseconds: AppConstants.newLinePauseMs),
+            () {
+              ref.read(vietnameseHistoryProvider.notifier).update(
+                    (state) => [...state, ''],
+                  );
+            },
+          );
+        }
       }
       ref.read(vietnameseDraftProvider.notifier).state = '';
     };
@@ -361,10 +411,14 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
-    final koreanHistory =
-        ref.read(koreanHistoryProvider).where((s) => s.trim().isNotEmpty).toList();
-    final vietnameseHistory =
-        ref.read(vietnameseHistoryProvider).where((s) => s.trim().isNotEmpty).toList();
+    final koreanHistory = ref
+        .read(koreanHistoryProvider)
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    final vietnameseHistory = ref
+        .read(vietnameseHistoryProvider)
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
 
     if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
 
@@ -375,7 +429,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     String? audioPath;
     if (_audioService.hasRecording) {
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      audioPath = await _audioService.saveRecordingAsWav('session_$timestamp.wav');
+      audioPath =
+          await _audioService.saveRecordingAsWav('session_$timestamp.wav');
     }
 
     final session = TranscriptSession(
@@ -395,6 +450,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       final id = await DatabaseService.instance.insertSession(session);
       ref.invalidate(sessionHistoryProvider);
       _audioService.clearRecording();
+      // Upload to server (fire-and-forget)
+      SyncService.instance.uploadSession(session);
       _resetState();
       if (mounted) {
         _showHistorySheetWithSession(context, id);
@@ -416,7 +473,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Discard Session'),
-        content: const Text('Discard this transcription? This cannot be undone.'),
+        content:
+            const Text('Discard this transcription? This cannot be undone.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -498,6 +556,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     final vietnameseHistory = ref.watch(vietnameseHistoryProvider);
 
     final targetLanguage = ref.watch(targetLanguageProvider);
+    final displayMode = ref.watch(displayModeProvider);
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||
@@ -553,37 +612,81 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                       color: AppConstants.textSecondary,
                     ),
                   ),
+                  const SizedBox(width: 16),
+                  PopupMenuButton<DisplayMode>(
+                    onSelected: (mode) {
+                      ref.read(displayModeProvider.notifier).state = mode;
+                    },
+                    offset: const Offset(0, 40),
+                    itemBuilder: (context) {
+                      final current = ref.read(displayModeProvider);
+                      return [
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.lineByLine,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Line by Line')),
+                              if (current == DisplayMode.lineByLine)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.split,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Split View')),
+                              if (current == DisplayMode.split)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                      ];
+                    },
+                    child: const Icon(
+                      Icons.settings_outlined,
+                      size: 24,
+                      color: AppConstants.textSecondary,
+                    ),
+                  ),
                 ],
               ),
             ),
 
-            // Transcription Panel
-            Expanded(
-              child: TranscriptPanel(
-                history: koreanHistory,
-                draft: koreanDraft,
-                label: 'Transcription',
-                showCursor:
-                    isRecordingOrProcessing && koreanDraft.isNotEmpty,
-                roundedTop: true,
+            // Content area: Split or Line-by-Line
+            if (displayMode == DisplayMode.split) ...[
+              Expanded(
+                child: TranscriptPanel(
+                  history: koreanHistory,
+                  draft: koreanDraft,
+                  label: 'Transcription',
+                  showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                  roundedTop: true,
+                ),
               ),
-            ),
-
-            // Divider
-            Container(
-              height: 5,
-              color: AppConstants.dividerColor,
-            ),
-
-            // Translation Panel
-            Expanded(
-              child: TranscriptPanel(
-                history: vietnameseHistory,
-                draft: vietnameseDraft,
-                label: 'Translation',
-                showEllipsis: isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
+              Container(
+                height: 5,
+                color: AppConstants.dividerColor,
               ),
-            ),
+              Expanded(
+                child: TranscriptPanel(
+                  history: vietnameseHistory,
+                  draft: vietnameseDraft,
+                  label: 'Translation',
+                  showEllipsis:
+                      isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
+                ),
+              ),
+            ] else
+              Expanded(
+                child: LineByLinePanel(
+                  transcriptionHistory: koreanHistory,
+                  transcriptionDraft: koreanDraft,
+                  translationHistory: vietnameseHistory,
+                  translationDraft: vietnameseDraft,
+                  isRecording: isRecordingOrProcessing,
+                ),
+              ),
 
             // Bottom Controls Area
             Container(
@@ -624,7 +727,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                       PopupMenuButton<TargetLanguage>(
                         enabled: !isRecordingOrProcessing,
                         onSelected: (lang) {
-                          ref.read(targetLanguageProvider.notifier).state = lang;
+                          ref.read(targetLanguageProvider.notifier).state =
+                              lang;
                         },
                         offset: const Offset(0, -160),
                         itemBuilder: (context) => TargetLanguage.values
@@ -690,7 +794,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                                     icon: Icons.history,
                                     backgroundColor:
                                         AppConstants.historyButtonColor,
-                                    onTap: () => _showHistorySheet(context, ref),
+                                    onTap: () =>
+                                        _showHistorySheet(context, ref),
                                   ),
                       ),
                       const SizedBox(width: 40),
@@ -712,14 +817,12 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                                 width: AppConstants.sideButtonSize,
                               )
                             : BottomSideButton(
-                                key: ValueKey(
-                                    'right-check-${isPostRecording}'),
+                                key: ValueKey('right-check-${isPostRecording}'),
                                 icon: Icons.check,
                                 backgroundColor: isPostRecording
                                     ? AppConstants.saveButtonActiveColor
                                     : AppConstants.saveButtonColor,
-                                onTap:
-                                    isPostRecording ? _saveSession : null,
+                                onTap: isPostRecording ? _saveSession : null,
                               ),
                       ),
                     ],

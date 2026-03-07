@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:sqflite/sqflite.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/transcript_session.dart';
 
 class DatabaseService {
@@ -62,6 +64,30 @@ class DatabaseService {
   Future<int> insertSession(TranscriptSession session) async {
     final db = await database;
     return db.insert('sessions', session.toMap());
+  }
+
+  Future<String> exportAllSessionsAsJson() async {
+    final sessions = await getAllSessions();
+    final exportData = {
+      'app': 'Silsigan',
+      'version': 1,
+      'exported_at': DateTime.now().toIso8601String(),
+      'session_count': sessions.length,
+      'sessions': sessions
+          .map((s) => {
+                'created_at': s.createdAt,
+                'transcription': s.koreanFull,
+                'translation': s.vietnameseFull,
+              })
+          .toList(),
+    };
+    final jsonString =
+        const JsonEncoder.withIndent('  ').convert(exportData);
+    final dir = await getTemporaryDirectory();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final filePath = '${dir.path}/silsigan_export_$timestamp.json';
+    await File(filePath).writeAsString(jsonString);
+    return filePath;
   }
 
   Future<int> deleteSession(int id) async {

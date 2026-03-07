@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../models/transcript_session.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
+import '../../services/sync_service.dart';
 import '../../utils/constants.dart';
 import 'session_card.dart';
 
@@ -39,6 +41,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     _initPlayer();
     if (widget.initialSessionId != null) {
       _loadInitialSession(widget.initialSessionId!);
+    }
+    _syncFromServer();
+  }
+
+  Future<void> _syncFromServer() async {
+    final anyNew = await SyncService.instance.syncFromServer();
+    if (anyNew && mounted) {
+      ref.invalidate(sessionHistoryProvider);
     }
   }
 
@@ -183,9 +193,28 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
     if (confirmed == true && _selectedSession?.id != null) {
       if (_isPlaying) await _player.stopPlayer();
+      final createdAt = _selectedSession!.createdAt;
       await DatabaseService.instance.deleteSession(_selectedSession!.id!);
+      // Delete from server (fire-and-forget)
+      SyncService.instance.deleteFromServer(createdAt);
       ref.invalidate(sessionHistoryProvider);
       _goBackToList();
+    }
+  }
+
+  Future<void> _exportSessions() async {
+    try {
+      final filePath = await DatabaseService.instance.exportAllSessionsAsJson();
+      await Share.shareXFiles(
+        [XFile(filePath)],
+        subject: 'Silsigan Export',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
     }
   }
 
@@ -203,8 +232,18 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     try {
       final dt = DateTime.parse(isoDate);
       final months = [
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
       ];
       final hour = dt.hour.toString().padLeft(2, '0');
       final minute = dt.minute.toString().padLeft(2, '0');
@@ -247,18 +286,28 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       key: const ValueKey('history-list'),
       children: [
         _buildDragHandle(),
-        const Padding(
-          padding: EdgeInsets.only(left: 20, bottom: 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'History',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: AppConstants.textPrimary,
+        Padding(
+          padding: const EdgeInsets.only(left: 20, right: 12, bottom: 8),
+          child: Row(
+            children: [
+              const Text(
+                'History',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: AppConstants.textPrimary,
+                ),
               ),
-            ),
+              const Spacer(),
+              GestureDetector(
+                onTap: _exportSessions,
+                child: const Icon(
+                  Icons.ios_share,
+                  size: 22,
+                  color: AppConstants.textSecondary,
+                ),
+              ),
+            ],
           ),
         ),
         Expanded(

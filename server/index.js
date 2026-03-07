@@ -1,5 +1,5 @@
 require('dotenv').config();
-const fastify = require('fastify')({ logger: true });
+const fastify = require('fastify')({ logger: true, bodyLimit: 50 * 1024 * 1024 });
 const { Pool } = require('pg');
 const crypto = require('crypto');
 
@@ -103,6 +103,21 @@ async function start() {
     `);
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code) WHERE friend_code IS NOT NULL');
 
+    // Saved sessions table (cloud sync)
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS saved_sessions (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(user_id),
+            created_at TEXT NOT NULL,
+            transcription TEXT NOT NULL,
+            translation TEXT NOT NULL,
+            transcription_preview TEXT NOT NULL DEFAULT '',
+            translation_preview TEXT NOT NULL DEFAULT '',
+            audio_data BYTEA,
+            UNIQUE(user_id, created_at)
+        )
+    `);
+
     // Session invites table
     await pool.query(`
         CREATE TABLE IF NOT EXISTS session_invites (
@@ -123,7 +138,7 @@ async function start() {
     // HEALTH CHECK
     // ==================
 
-    fastify.get('/', async () => ({ status: 'ok', version: 4 }));
+    fastify.get('/', async () => ({ status: 'ok', version: 5 }));
 
     // ==================
     // USER ENDPOINTS
@@ -586,6 +601,95 @@ async function start() {
             return invite;
         } catch (e) {
             fastify.log.error('Invite status error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // ==================
+    // SAVED SESSIONS (CLOUD SYNC)
+    // ==================
+
+    // Save/upsert a session
+    fastify.post('/api/sessions/save', async (req, reply) => {
+        const { userId, createdAt, transcription, translation, transcriptionPreview, translationPreview, audioBase64 } = req.body;
+        if (!userId || !createdAt || transcription == null || translation == null) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        try {
+            const audioData = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
+            await pool.query(`
+                INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (user_id, created_at) DO UPDATE SET
+                    transcription = EXCLUDED.transcription,
+                    translation = EXCLUDED.translation,
+                    transcription_preview = EXCLUDED.transcription_preview,
+                    translation_preview = EXCLUDED.translation_preview,
+                    audio_data = COALESCE(EXCLUDED.audio_data, saved_sessions.audio_data)
+            `, [userId, createdAt, transcription, translation, transcriptionPreview || '', translationPreview || '', audioData]);
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Save session error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // List sessions (metadata only, no audio)
+    fastify.post('/api/sessions/list', async (req, reply) => {
+        const { userId } = req.body;
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            const res = await pool.query(`
+                SELECT id, created_at, transcription_preview, translation_preview,
+                       (audio_data IS NOT NULL) as has_audio
+                FROM saved_sessions
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+            `, [userId]);
+            return { sessions: res.rows };
+        } catch (e) {
+            fastify.log.error('List sessions error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Get single session with full data including audio
+    fastify.post('/api/sessions/get', async (req, reply) => {
+        const { userId, sessionId } = req.body;
+        if (!userId || !sessionId) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            const res = await pool.query(`
+                SELECT id, created_at, transcription, translation,
+                       transcription_preview, translation_preview, audio_data
+                FROM saved_sessions
+                WHERE id = $1 AND user_id = $2
+            `, [sessionId, userId]);
+            if (res.rows.length === 0) return reply.code(404).send({ error: 'Session not found' });
+            const { audio_data, ...rest } = res.rows[0];
+            return {
+                session: {
+                    ...rest,
+                    audio_base64: audio_data ? audio_data.toString('base64') : null,
+                }
+            };
+        } catch (e) {
+            fastify.log.error('Get session error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Delete session from server
+    fastify.post('/api/sessions/delete', async (req, reply) => {
+        const { userId, createdAt } = req.body;
+        if (!userId || !createdAt) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            await pool.query(
+                'DELETE FROM saved_sessions WHERE user_id = $1 AND created_at = $2',
+                [userId, createdAt]
+            );
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Delete session error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         }
     });

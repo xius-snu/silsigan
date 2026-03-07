@@ -175,10 +175,9 @@ class SonioxRealtimeService {
     if (hadProvisional &&
         _provisionalText.isEmpty &&
         _pendingUtterance.isNotEmpty) {
-      onTranscriptionCompleted?.call(_pendingUtterance.trim());
-      _pendingUtterance = '';
-
-      // Flush pending translation at source utterance boundary
+      // Flush translation FIRST — accumulated translation corresponds to
+      // the PREVIOUS utterance (translation lags behind source by ~1 segment).
+      // Flushing before emitting transcription ensures it fills the correct slot.
       if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
         final fullTranslation =
             (_pendingTranslation + _provisionalTranslation).trim();
@@ -188,6 +187,9 @@ class SonioxRealtimeService {
         _pendingTranslation = '';
         _provisionalTranslation = '';
       }
+
+      onTranscriptionCompleted?.call(_pendingUtterance.trim());
+      _pendingUtterance = '';
     }
   }
 
@@ -255,16 +257,16 @@ class SonioxRealtimeService {
     _subscription?.cancel();
     _subscription = null;
 
-    // Flush any remaining pending utterance
-    if (_pendingUtterance.isNotEmpty) {
-      onTranscriptionCompleted?.call(_pendingUtterance.trim());
-      _pendingUtterance = '';
-    }
-
-    // Flush any remaining pending translation
+    // Flush translation first (fills the last segment's empty slot)
     if (_pendingTranslation.isNotEmpty) {
       onTranslationCompleted?.call(_pendingTranslation.trim());
       _pendingTranslation = '';
+    }
+
+    // Then flush any remaining pending utterance
+    if (_pendingUtterance.isNotEmpty) {
+      onTranscriptionCompleted?.call(_pendingUtterance.trim());
+      _pendingUtterance = '';
     }
 
     await _channel?.sink.close();

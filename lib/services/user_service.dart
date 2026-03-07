@@ -19,6 +19,7 @@ class UserService {
 
   String? get userId => _userId;
   String? get friendCode => _friendCode;
+  String? get authToken => _authToken;
   bool get isInitialized => _initialized;
 
   String get _baseUrl => AppConstants.serverBaseUrl;
