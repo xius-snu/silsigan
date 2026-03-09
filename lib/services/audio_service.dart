@@ -44,11 +44,15 @@ class AudioService {
     if (!_isInitialized) await init();
     _audioBuffer.clear();
 
-    // Open temp file for PCM recording on disk
-    final tempDir = await getTemporaryDirectory();
-    _tempFilePath = '${tempDir.path}/silsigan_recording_${DateTime.now().millisecondsSinceEpoch}.pcm';
-    _tempRaf = await File(_tempFilePath!).open(mode: FileMode.write);
-    _pcmBytesWritten = 0;
+    // Open temp file for PCM recording on disk (append if resuming same session)
+    if (_tempFilePath != null && await File(_tempFilePath!).exists()) {
+      _tempRaf = await File(_tempFilePath!).open(mode: FileMode.append);
+    } else {
+      final tempDir = await getTemporaryDirectory();
+      _tempFilePath = '${tempDir.path}/silsigan_recording_${DateTime.now().millisecondsSinceEpoch}.pcm';
+      _tempRaf = await File(_tempFilePath!).open(mode: FileMode.write);
+      _pcmBytesWritten = 0;
+    }
 
     if (_useRecord) {
       await _startWithRecord();

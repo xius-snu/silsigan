@@ -202,17 +202,31 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     }
   }
 
-  Future<void> _exportSessions() async {
+  Future<void> _shareSession() async {
+    if (_selectedSession == null) return;
     try {
-      final filePath = await DatabaseService.instance.exportAllSessionsAsJson();
+      final session = _selectedSession!;
+      final date = _formatDate(session.createdAt);
+      final text = StringBuffer();
+      text.writeln('Silsigan — $date');
+      text.writeln();
+      text.writeln('── TRANSCRIPTION ──');
+      text.writeln(session.koreanFull);
+      text.writeln();
+      text.writeln('── TRANSLATION ──');
+      text.writeln(session.vietnameseFull);
+
+      final dir = Directory.systemTemp;
+      final file = File('${dir.path}/silsigan_session.txt');
+      await file.writeAsString(text.toString());
       await Share.shareXFiles(
-        [XFile(filePath)],
-        subject: 'Silsigan Export',
+        [XFile(file.path, mimeType: 'text/plain')],
+        subject: 'Silsigan Session — $date',
       );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e')),
+          SnackBar(content: Text('Share failed: $e')),
         );
       }
     }
@@ -270,11 +284,19 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       maxChildSize: widget.maxFraction,
       expand: false,
       builder: (context, scrollController) {
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 200),
-          child: _selectedSession == null
-              ? _buildListView(scrollController)
-              : _buildDetailView(scrollController),
+        return PopScope(
+          canPop: _selectedSession == null,
+          onPopInvoked: (didPop) {
+            if (!didPop && _selectedSession != null) {
+              _goBackToList();
+            }
+          },
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: _selectedSession == null
+                ? _buildListView(scrollController)
+                : _buildDetailView(scrollController),
+          ),
         );
       },
     );
@@ -296,15 +318,6 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
                   color: AppConstants.textPrimary,
-                ),
-              ),
-              const Spacer(),
-              GestureDetector(
-                onTap: _exportSessions,
-                child: const Icon(
-                  Icons.ios_share,
-                  size: 22,
-                  color: AppConstants.textSecondary,
                 ),
               ),
             ],
@@ -405,6 +418,12 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                     color: AppConstants.textPrimary,
                   ),
                 ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.ios_share),
+                color: AppConstants.textSecondary,
+                iconSize: 22,
+                onPressed: _shareSession,
               ),
               IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
