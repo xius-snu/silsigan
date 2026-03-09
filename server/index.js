@@ -40,6 +40,7 @@ const PUBLIC_ROUTES = new Set([
     'GET:/api/session/pending/:userId',
     'GET:/api/session/status/:inviteId',
     'GET:/ws/session',
+    'POST:/api/user/activity',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -102,6 +103,10 @@ async function start() {
         )
     `);
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code) WHERE friend_code IS NOT NULL');
+
+    // Add activity tracking columns (safe for existing tables)
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_recorded_at TIMESTAMP`);
 
     // Saved sessions table (cloud sync)
     await pool.query(`
@@ -187,6 +192,28 @@ async function start() {
             return { success: true };
         } catch (e) {
             fastify.log.error('Sync friend code error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    fastify.post('/api/user/activity', async (req, reply) => {
+        const { userId, event } = req.body;
+        if (!userId || !event) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            if (event === 'app_open') {
+                await pool.query(
+                    'UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE user_id = $1',
+                    [userId]
+                );
+            } else if (event === 'recording_start') {
+                await pool.query(
+                    'UPDATE users SET last_seen_at = CURRENT_TIMESTAMP, last_recorded_at = CURRENT_TIMESTAMP WHERE user_id = $1',
+                    [userId]
+                );
+            }
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Activity update error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         }
     });

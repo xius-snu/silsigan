@@ -28,21 +28,38 @@ class SyncService {
       if (userId == null) return;
       if (UserService.instance.authToken == null) return;
 
-      final response = await http
+      final body = json.encode({
+        'userId': userId,
+        'createdAt': session.createdAt,
+        'transcription': session.koreanFull,
+        'translation': session.vietnameseFull,
+        'transcriptionPreview': session.koreanPreview,
+        'translationPreview': session.vietnamesePreview,
+      });
+
+      var response = await http
           .post(
             Uri.parse('$_baseUrl/api/sessions/save'),
             headers: _headers,
-            body: json.encode({
-              'userId': userId,
-              'createdAt': session.createdAt,
-              'transcription': session.koreanFull,
-              'translation': session.vietnameseFull,
-              'transcriptionPreview': session.koreanPreview,
-              'translationPreview': session.vietnamesePreview,
-            }),
+            body: body,
           )
           .timeout(const Duration(seconds: 15));
-      debugPrint('Upload session response: ${response.statusCode} ${response.body}');
+
+      // If 401, token is stale — refresh and retry once
+      if (response.statusCode == 401) {
+        debugPrint('Upload got 401, refreshing token and retrying');
+        await UserService.instance.refreshToken();
+        if (UserService.instance.authToken == null) return;
+        response = await http
+            .post(
+              Uri.parse('$_baseUrl/api/sessions/save'),
+              headers: _headers,
+              body: body,
+            )
+            .timeout(const Duration(seconds: 15));
+      }
+
+      debugPrint('Upload session response: ${response.statusCode}');
     } catch (e) {
       debugPrint('Upload session error: $e');
     }
@@ -59,13 +76,26 @@ class SyncService {
       if (UserService.instance.authToken == null) return false;
 
       // Get server session list (metadata only)
-      final response = await http
+      var response = await http
           .post(
             Uri.parse('$_baseUrl/api/sessions/list'),
             headers: _headers,
             body: json.encode({'userId': userId}),
           )
           .timeout(const Duration(seconds: 10));
+
+      // If 401, refresh token and retry once
+      if (response.statusCode == 401) {
+        await UserService.instance.refreshToken();
+        if (UserService.instance.authToken == null) return false;
+        response = await http
+            .post(
+              Uri.parse('$_baseUrl/api/sessions/list'),
+              headers: _headers,
+              body: json.encode({'userId': userId}),
+            )
+            .timeout(const Duration(seconds: 10));
+      }
 
       if (response.statusCode != 200) return false;
 

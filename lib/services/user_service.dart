@@ -38,6 +38,15 @@ class UserService {
     _friendCode = prefs.getString('friend_code');
     _authToken = prefs.getString('auth_token');
 
+    // Invalidate token if userId changed (e.g., upgrade from old device ID logic)
+    final storedUserId = prefs.getString('auth_user_id');
+    if (storedUserId != null && storedUserId != _userId) {
+      debugPrint('UserService: userId changed ($storedUserId → $_userId), clearing stale token');
+      _authToken = null;
+      await prefs.remove('auth_token');
+      await prefs.remove('auth_user_id');
+    }
+
     if (_friendCode == null) {
       await _generateFriendCode();
     }
@@ -53,6 +62,7 @@ class UserService {
     }
 
     _initialized = true;
+    debugPrint('UserService: init complete, userId=$_userId, hasToken=${_authToken != null}');
   }
 
   Future<void> _register() async {
@@ -67,12 +77,14 @@ class UserService {
             }),
           )
           .timeout(const Duration(seconds: 30));
+      debugPrint('Register response: ${response.statusCode}');
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['token'] != null) {
           _authToken = data['token'] as String;
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('auth_token', _authToken!);
+          await prefs.setString('auth_user_id', _userId!);
         }
       }
     } catch (e) {
@@ -84,6 +96,16 @@ class UserService {
   Future<void> ensureAuthenticated() async {
     if (_authToken != null) return;
     if (_userId == null) return;
+    await _register();
+  }
+
+  /// Clear current token and re-register. Used when server returns 401.
+  Future<void> refreshToken() async {
+    debugPrint('UserService: refreshing token (old one invalid)');
+    _authToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('auth_token');
+    await prefs.remove('auth_user_id');
     await _register();
   }
 
@@ -124,6 +146,19 @@ class UserService {
     final bytes = utf8.encode(uniqueId);
     final digest = sha256.convert(bytes);
     return digest.toString().substring(0, 32);
+  }
+
+  /// Fire-and-forget activity ping to server.
+  void reportActivity(String event) {
+    if (_userId == null) return;
+    http
+        .post(
+          Uri.parse('$_baseUrl/api/user/activity'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({'userId': _userId, 'event': event}),
+        )
+        .timeout(const Duration(seconds: 10))
+        .catchError((_) => http.Response('', 500));
   }
 
   Future<void> _syncFriendCode() async {

@@ -8,6 +8,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   BackgroundService.init();
   await UserService.instance.init();
+  UserService.instance.reportActivity('app_open');
   runApp(
     const ProviderScope(
       child: SilsiganApp(),

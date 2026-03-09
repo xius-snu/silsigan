@@ -75,13 +75,18 @@ class SonioxRealtimeService {
       final config = <String, dynamic>{
         'api_key': _apiKey,
         'model': AppConstants.sonioxModel,
-        'language_hints': [_languageHint ?? AppConstants.transcriptionLanguage],
         'audio_format': AppConstants.audioFormat,
         'sample_rate': AppConstants.sampleRate,
         'num_channels': AppConstants.numChannels,
         'enable_endpoint_detection': true,
         'max_endpoint_delay_ms': AppConstants.endpointDelayMs,
       };
+
+      // Only send language hint if provided (empty = let Soniox auto-detect)
+      final hint = _languageHint ?? AppConstants.transcriptionLanguage;
+      if (hint.isNotEmpty) {
+        config['language_hints'] = [hint];
+      }
 
       if (_targetLanguageCode != null &&
           (_forceTranslation ||
@@ -296,24 +301,24 @@ class SonioxRealtimeService {
         _provisionalText.isEmpty &&
         _pendingUtterance.isNotEmpty) {
       // Flush translation FIRST (fills the correct slot)
-      if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
-        final fullTranslation =
-            (_pendingTranslation + _provisionalTranslation).trim();
-        if (fullTranslation.isNotEmpty) {
-          if (_hasRepetitionLoop(fullTranslation)) {
-            // Garbage detected — discard and force-rotate
-            _pendingTranslation = '';
-            _provisionalTranslation = '';
-            _pendingUtterance = '';
-            onTranslationDraft?.call('');
-            _rotateSession();
-            return;
-          }
-          onTranslationCompleted?.call(fullTranslation);
-        }
+      final fullTranslation =
+          (_pendingTranslation + _provisionalTranslation).trim();
+
+      if (fullTranslation.isNotEmpty && _hasRepetitionLoop(fullTranslation)) {
+        // Garbage detected — discard and force-rotate
         _pendingTranslation = '';
         _provisionalTranslation = '';
+        _pendingUtterance = '';
+        onTranslationDraft?.call('');
+        _rotateSession();
+        return;
       }
+
+      // Always signal translation completion at endpoint (even if empty)
+      // so line-by-line slot alignment stays in sync.
+      onTranslationCompleted?.call(fullTranslation);
+      _pendingTranslation = '';
+      _provisionalTranslation = '';
 
       onTranscriptionCompleted?.call(_pendingUtterance.trim());
       _pendingUtterance = '';

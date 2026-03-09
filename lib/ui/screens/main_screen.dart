@@ -268,25 +268,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
         if (isLineByLine) {
           // Line-by-line: each Soniox endpoint = one segment.
-          // Korean is SOV — meaning is incomplete until the verb arrives
-          // at the end. Soniox endpoints fire on ~2s silence, which
-          // naturally aligns with Korean sentence boundaries.
           // We always ADD a new entry (never merge with previous).
           ref.read(koreanHistoryProvider.notifier).update(
                 (state) => [...state, transcript],
               );
-          if (targetLanguage == TargetLanguage.korean) {
-            // Korean target: copy transcription directly as translation
-            ref.read(vietnameseHistoryProvider.notifier).update(
-                  (state) => [...state, transcript],
-                );
-          } else {
-            // Pre-create empty slot — will be filled by onTranslationCompleted
-            // which fires immediately after (flushed at source boundary).
-            ref.read(vietnameseHistoryProvider.notifier).update(
-                  (state) => [...state, ''],
-                );
-          }
+          // Pre-create empty slot — will be filled by onTranslationCompleted
+          // which fires immediately after (flushed at source boundary).
+          ref.read(vietnameseHistoryProvider.notifier).update(
+                (state) => [...state, ''],
+              );
           // No timer needed — segments are endpoint-delimited
         } else {
           // Split mode: append to last line, timer-based new lines
@@ -296,25 +286,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
             updated.last = '${updated.last} $transcript';
             return updated;
           });
-          if (targetLanguage == TargetLanguage.korean) {
-            ref.read(vietnameseHistoryProvider.notifier).update((state) {
-              if (state.isEmpty) return [transcript];
-              final updated = List<String>.from(state);
-              updated.last = '${updated.last} $transcript';
-              return updated;
-            });
-          }
           _newLineTimer = Timer(
             const Duration(milliseconds: AppConstants.newLinePauseMs),
             () {
               ref.read(koreanHistoryProvider.notifier).update(
                     (state) => [...state, ''],
                   );
-              if (targetLanguage == TargetLanguage.korean) {
-                ref.read(vietnameseHistoryProvider.notifier).update(
-                      (state) => [...state, ''],
-                    );
-              }
             },
           );
         }
@@ -328,44 +305,46 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onTranslationCompleted = (translation) {
-      if (translation.isNotEmpty) {
-        _newLineTimerTranslation?.cancel();
-        final isLineByLine =
-            ref.read(displayModeProvider) == DisplayMode.lineByLine;
+      _newLineTimerTranslation?.cancel();
+      final isLineByLine =
+          ref.read(displayModeProvider) == DisplayMode.lineByLine;
 
-        if (isLineByLine) {
-          // Translation is flushed BEFORE the new transcription (swap in
-          // Soniox service), so accumulated translation belongs to the
-          // PREVIOUS segment. Fill the earliest empty slot (forward search).
-          ref.read(vietnameseHistoryProvider.notifier).update((state) {
-            if (state.isEmpty) return [translation];
-            final updated = List<String>.from(state);
-            for (int i = 0; i < updated.length; i++) {
-              if (updated[i].isEmpty) {
-                updated[i] = translation;
-                return updated;
-              }
+      if (isLineByLine) {
+        // Line-by-line: fill the earliest empty slot.
+        // Always consume the slot even if translation is empty (short
+        // utterance with no translation) — use ' ' placeholder so the
+        // slot counts as filled and alignment stays in sync.
+        ref.read(vietnameseHistoryProvider.notifier).update((state) {
+          if (state.isEmpty) {
+            return translation.isNotEmpty ? [translation] : state;
+          }
+          final updated = List<String>.from(state);
+          for (int i = 0; i < updated.length; i++) {
+            if (updated[i].isEmpty) {
+              updated[i] = translation.isNotEmpty ? translation : ' ';
+              return updated;
             }
-            // No empty slot — add as new entry
-            return [...updated, translation];
-          });
-        } else {
-          // Split mode: append to last line
-          ref.read(vietnameseHistoryProvider.notifier).update((state) {
-            if (state.isEmpty) return [translation];
-            final updated = List<String>.from(state);
-            updated.last = '${updated.last} $translation';
-            return updated;
-          });
-          _newLineTimerTranslation = Timer(
-            const Duration(milliseconds: AppConstants.newLinePauseMs),
-            () {
-              ref.read(vietnameseHistoryProvider.notifier).update(
-                    (state) => [...state, ''],
-                  );
-            },
-          );
-        }
+          }
+          // No empty slot — add as new entry
+          if (translation.isNotEmpty) return [...updated, translation];
+          return updated;
+        });
+      } else if (translation.isNotEmpty) {
+        // Split mode: append to last line (ignore empty translations)
+        ref.read(vietnameseHistoryProvider.notifier).update((state) {
+          if (state.isEmpty) return [translation];
+          final updated = List<String>.from(state);
+          updated.last = '${updated.last} $translation';
+          return updated;
+        });
+        _newLineTimerTranslation = Timer(
+          const Duration(milliseconds: AppConstants.newLinePauseMs),
+          () {
+            ref.read(vietnameseHistoryProvider.notifier).update(
+                  (state) => [...state, ''],
+                );
+          },
+        );
       }
       ref.read(vietnameseDraftProvider.notifier).state = '';
     };
@@ -392,10 +371,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
     try {
       // Start foreground service first (Android) to prevent OS killing the app
       await BackgroundService.startRecordingService();
-      await _sonioxService.connect(targetLanguageCode: targetLanguage.code);
+      await _sonioxService.connect(
+        targetLanguageCode: targetLanguage.code,
+        forceTranslation: targetLanguage == TargetLanguage.korean,
+        languageHint: targetLanguage == TargetLanguage.korean ? '' : null,
+      );
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
+      UserService.instance.reportActivity('recording_start');
     } catch (e) {
       await BackgroundService.stopRecordingService();
       if (mounted) {
