@@ -24,6 +24,7 @@ import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
 import '../../services/user_service.dart';
 import '../../services/sync_service.dart';
+import '../../services/background_service.dart';
 import 'live_session_screen.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -33,7 +34,8 @@ class MainScreen extends ConsumerStatefulWidget {
   ConsumerState<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends ConsumerState<MainScreen> {
+class _MainScreenState extends ConsumerState<MainScreen>
+    with WidgetsBindingObserver {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
   Timer? _newLineTimer;
@@ -45,14 +47,19 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   Timer? _incomingPollTimer;
   Timer? _outgoingPollTimer;
 
+  // Suppress repeated error snackbars during reconnection
+  DateTime? _lastErrorShown;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _startIncomingPoll();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     _incomingPollTimer?.cancel();
@@ -60,6 +67,17 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     _audioService.dispose();
     _sonioxService.disconnect();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // App came back to foreground — reconnect WebSocket if recording
+      final recordingState = ref.read(recordingStateProvider);
+      if (recordingState == RecordingState.recording) {
+        _sonioxService.ensureConnected();
+      }
+    }
   }
 
   void _startIncomingPoll() {
@@ -353,11 +371,17 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     };
 
     _sonioxService.onError = (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Transcription error: $error')),
-        );
+      if (!mounted) return;
+      // Throttle error snackbars — show at most once per 10 seconds
+      final now = DateTime.now();
+      if (_lastErrorShown != null &&
+          now.difference(_lastErrorShown!).inSeconds < 10) {
+        return;
       }
+      _lastErrorShown = now;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Transcription error: $error')),
+      );
     };
 
     // Set up audio callback
@@ -366,11 +390,14 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     };
 
     try {
+      // Start foreground service first (Android) to prevent OS killing the app
+      await BackgroundService.startRecordingService();
       await _sonioxService.connect(targetLanguageCode: targetLanguage.code);
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
     } catch (e) {
+      await BackgroundService.stopRecordingService();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to start: $e')),
@@ -385,6 +412,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     await _audioService.stop();
     _sonioxService.finalize();
     await _sonioxService.disconnect();
+    await BackgroundService.stopRecordingService();
     ref.read(recordingStateProvider.notifier).state =
         RecordingState.postRecording;
   }

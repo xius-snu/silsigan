@@ -17,12 +17,17 @@ class AudioService {
 
   Timer? _chunkTimer;
   final List<int> _audioBuffer = [];
-  final List<int> _fullRecording = [];
   bool _isInitialized = false;
+
+  // Disk-based recording instead of in-memory list
+  RandomAccessFile? _tempRaf;
+  String? _tempFilePath;
+  int _pcmBytesWritten = 0;
 
   Function(Uint8List)? onAudioChunk;
 
-  bool get _useRecord => Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+  bool get _useRecord =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
   Future<void> init() async {
     if (_isInitialized) return;
@@ -38,6 +43,12 @@ class AudioService {
   Future<void> start() async {
     if (!_isInitialized) await init();
     _audioBuffer.clear();
+
+    // Open temp file for PCM recording on disk
+    final tempDir = await getTemporaryDirectory();
+    _tempFilePath = '${tempDir.path}/silsigan_recording_${DateTime.now().millisecondsSinceEpoch}.pcm';
+    _tempRaf = await File(_tempFilePath!).open(mode: FileMode.write);
+    _pcmBytesWritten = 0;
 
     if (_useRecord) {
       await _startWithRecord();
@@ -61,7 +72,8 @@ class AudioService {
     );
     _winStreamSubscription = stream.listen((data) {
       _audioBuffer.addAll(data);
-      _fullRecording.addAll(data);
+      // Write to disk instead of in-memory list
+      _writeToDisk(data);
     });
   }
 
@@ -69,7 +81,8 @@ class AudioService {
     final controller = StreamController<Uint8List>();
     _recorderSubscription = controller.stream.listen((data) {
       _audioBuffer.addAll(data);
-      _fullRecording.addAll(data);
+      // Write to disk instead of in-memory list
+      _writeToDisk(data);
     });
 
     await _recorder!.startRecorder(
@@ -78,6 +91,15 @@ class AudioService {
       numChannels: AppConstants.numChannels,
       sampleRate: AppConstants.sampleRate,
     );
+  }
+
+  void _writeToDisk(List<int> data) {
+    try {
+      _tempRaf?.writeFromSync(data);
+      _pcmBytesWritten += data.length;
+    } catch (_) {
+      // Disk write failed — don't crash recording
+    }
   }
 
   void _sendChunk() {
@@ -102,33 +124,77 @@ class AudioService {
         await _recorder!.stopRecorder();
       }
     }
+
+    // Flush and keep temp file open for potential save
+    try {
+      await _tempRaf?.flush();
+    } catch (_) {}
   }
 
   Future<String> saveRecordingAsWav(String fileName) async {
+    // Close the temp PCM file
+    try {
+      await _tempRaf?.flush();
+      await _tempRaf?.close();
+    } catch (_) {}
+    _tempRaf = null;
+
     final dir = await getApplicationDocumentsDirectory();
     final filePath = '${dir.path}/$fileName';
-    final pcmData = Uint8List.fromList(_fullRecording);
-    final wavData = _buildWav(pcmData);
-    await File(filePath).writeAsBytes(wavData);
+
+    // Stream copy: write WAV header then copy PCM data in chunks
+    final outRaf = await File(filePath).open(mode: FileMode.write);
+
+    // Write 44-byte WAV header
+    final header = _buildWavHeader(_pcmBytesWritten);
+    await outRaf.writeFrom(header);
+
+    // Copy PCM data from temp file in chunks (avoids loading entire file)
+    if (_tempFilePath != null && await File(_tempFilePath!).exists()) {
+      final inStream = File(_tempFilePath!).openRead();
+      await for (final chunk in inStream) {
+        await outRaf.writeFrom(chunk);
+      }
+      // Clean up temp file
+      try {
+        await File(_tempFilePath!).delete();
+      } catch (_) {}
+    }
+
+    await outRaf.close();
+    _tempFilePath = null;
+    _pcmBytesWritten = 0;
+
     return filePath;
   }
 
   void clearRecording() {
-    _fullRecording.clear();
+    // Close and delete temp file
+    try {
+      _tempRaf?.closeSync();
+    } catch (_) {}
+    _tempRaf = null;
+
+    if (_tempFilePath != null) {
+      try {
+        File(_tempFilePath!).deleteSync();
+      } catch (_) {}
+      _tempFilePath = null;
+    }
+    _pcmBytesWritten = 0;
   }
 
-  bool get hasRecording => _fullRecording.isNotEmpty;
+  bool get hasRecording => _pcmBytesWritten > 0;
 
-  Uint8List _buildWav(Uint8List pcmData) {
+  Uint8List _buildWavHeader(int pcmDataSize) {
     const sampleRate = AppConstants.sampleRate;
     const numChannels = AppConstants.numChannels;
     const bitsPerSample = 16;
     final byteRate = sampleRate * numChannels * bitsPerSample ~/ 8;
     final blockAlign = numChannels * bitsPerSample ~/ 8;
-    final dataSize = pcmData.length;
-    final fileSize = 36 + dataSize;
+    final fileSize = 36 + pcmDataSize;
 
-    final buffer = ByteData(44 + dataSize);
+    final buffer = ByteData(44);
     int offset = 0;
 
     // RIFF header
@@ -168,18 +234,14 @@ class AudioService {
     buffer.setUint8(offset++, 0x61); // a
     buffer.setUint8(offset++, 0x74); // t
     buffer.setUint8(offset++, 0x61); // a
-    buffer.setUint32(offset, dataSize, Endian.little);
-    offset += 4;
-
-    for (int i = 0; i < pcmData.length; i++) {
-      buffer.setUint8(offset++, pcmData[i]);
-    }
+    buffer.setUint32(offset, pcmDataSize, Endian.little);
 
     return buffer.buffer.asUint8List();
   }
 
   Future<void> dispose() async {
     await stop();
+    clearRecording();
     if (_isInitialized) {
       if (_useRecord) {
         await _winRecorder?.dispose();

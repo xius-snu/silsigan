@@ -21,8 +21,12 @@ class SyncService {
   /// Upload a single session to the server (text only, fire-and-forget).
   Future<void> uploadSession(TranscriptSession session) async {
     try {
+      // Ensure we have an auth token before uploading
+      await UserService.instance.ensureAuthenticated();
+
       final userId = UserService.instance.userId;
       if (userId == null) return;
+      if (UserService.instance.authToken == null) return;
 
       final response = await http
           .post(
@@ -48,8 +52,11 @@ class SyncService {
   /// not on server. Returns true if any new sessions were downloaded.
   Future<bool> syncFromServer() async {
     try {
+      await UserService.instance.ensureAuthenticated();
+
       final userId = UserService.instance.userId;
       if (userId == null) return false;
+      if (UserService.instance.authToken == null) return false;
 
       // Get server session list (metadata only)
       final response = await http
@@ -129,8 +136,11 @@ class SyncService {
   /// Delete a session from the server by its created_at timestamp.
   Future<void> deleteFromServer(String createdAt) async {
     try {
+      await UserService.instance.ensureAuthenticated();
+
       final userId = UserService.instance.userId;
       if (userId == null) return;
+      if (UserService.instance.authToken == null) return;
 
       await http
           .post(

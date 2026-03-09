@@ -66,7 +66,7 @@ class UserService {
               'friendCode': _friendCode,
             }),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 30));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['token'] != null) {
@@ -80,6 +80,13 @@ class UserService {
     }
   }
 
+  /// Ensure we have a valid auth token. If not, try to register.
+  Future<void> ensureAuthenticated() async {
+    if (_authToken != null) return;
+    if (_userId == null) return;
+    await _register();
+  }
+
   Future<void> _generateFriendCode() async {
     final random = Random();
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -90,33 +97,28 @@ class UserService {
   }
 
   Future<String> _getStableDeviceId() async {
-    String? uniqueId;
-    try {
-      if (!kIsWeb && Platform.isAndroid) {
-        final deviceInfo = DeviceInfoPlugin();
-        final androidInfo = await deviceInfo.androidInfo;
-        uniqueId = androidInfo.id;
-      } else if (!kIsWeb && Platform.isIOS) {
-        final prefs = await SharedPreferences.getInstance();
-        uniqueId = prefs.getString('device_unique_id');
-        if (uniqueId == null) {
+    final prefs = await SharedPreferences.getInstance();
+    String? uniqueId = prefs.getString('device_unique_id');
+
+    if (uniqueId == null) {
+      try {
+        if (!kIsWeb && Platform.isAndroid) {
+          // Generate a random UUID — Build.ID is NOT unique per device
+          uniqueId =
+              '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(999999999)}';
+        } else if (!kIsWeb && Platform.isIOS) {
           final deviceInfo = DeviceInfoPlugin();
           final iosInfo = await deviceInfo.iosInfo;
           uniqueId =
               iosInfo.identifierForVendor ?? DateTime.now().toIso8601String();
-          await prefs.setString('device_unique_id', uniqueId);
-        }
-      } else {
-        final prefs = await SharedPreferences.getInstance();
-        uniqueId = prefs.getString('device_unique_id');
-        if (uniqueId == null) {
+        } else {
           uniqueId = DateTime.now().toIso8601String();
-          await prefs.setString('device_unique_id', uniqueId);
         }
+      } catch (e) {
+        debugPrint('Error getting device ID: $e');
+        uniqueId = 'fallback-${DateTime.now().millisecondsSinceEpoch}';
       }
-    } catch (e) {
-      debugPrint('Error getting device ID: $e');
-      uniqueId = 'fallback-${DateTime.now().millisecondsSinceEpoch}';
+      await prefs.setString('device_unique_id', uniqueId);
     }
 
     final bytes = utf8.encode(uniqueId);
