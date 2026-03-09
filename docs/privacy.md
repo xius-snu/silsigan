@@ -47,4 +47,4 @@ We may update this policy from time to time. Any changes will be reflected by th
 
 ## Contact
 
-If you have questions about this privacy policy, contact us at: **silsigan.app@gmail.com**
+If you have questions about this privacy policy, contact us at: **xiusprimary@gmail.com**
