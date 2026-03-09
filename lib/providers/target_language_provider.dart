@@ -4,6 +4,7 @@ enum TargetLanguage {
   vietnamese('Vietnamese', 'vi'),
   english('English', 'en'),
   turkish('Turkish', 'tr'),
+  chinese('Chinese', 'zh'),
   korean('Korean', 'ko');
 
   const TargetLanguage(this.displayName, this.code);
