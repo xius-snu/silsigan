@@ -10,6 +10,9 @@ class TranscriptPanel extends StatefulWidget {
   final bool showCursor;
   final bool showEllipsis;
   final bool roundedTop;
+  final bool showSpeakerToggle;
+  final bool speakerEnabled;
+  final VoidCallback? onSpeakerToggle;
 
   const TranscriptPanel({
     super.key,
@@ -19,6 +22,9 @@ class TranscriptPanel extends StatefulWidget {
     this.showCursor = false,
     this.showEllipsis = false,
     this.roundedTop = false,
+    this.showSpeakerToggle = false,
+    this.speakerEnabled = false,
+    this.onSpeakerToggle,
   });
 
   @override
@@ -154,6 +160,22 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                   ),
                 ),
                 const Spacer(),
+                if (widget.showSpeakerToggle)
+                  GestureDetector(
+                    onTap: widget.onSpeakerToggle,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: Icon(
+                        widget.speakerEnabled
+                            ? Icons.volume_up
+                            : Icons.volume_off_outlined,
+                        size: 20,
+                        color: widget.speakerEnabled
+                            ? AppConstants.textPrimary
+                            : AppConstants.textSecondary,
+                      ),
+                    ),
+                  ),
                 if (_hasText)
                   GestureDetector(
                     onTap: _copyAll,

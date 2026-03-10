@@ -13,6 +13,8 @@ import '../../providers/display_mode_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
+import '../../services/elevenlabs_tts_service.dart';
+import '../../providers/tts_provider.dart';
 import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
 import '../widgets/record_button.dart';
@@ -38,6 +40,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     with WidgetsBindingObserver {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
+  final ElevenLabsTtsService _ttsService = ElevenLabsTtsService();
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
 
@@ -66,6 +69,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _outgoingPollTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
+    _ttsService.dispose();
     super.dispose();
   }
 
@@ -306,6 +310,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onTranslationCompleted = (translation) {
       _newLineTimerTranslation?.cancel();
+
+      // Send to TTS if enabled and target is Vietnamese
+      if (translation.isNotEmpty &&
+          _ttsService.enabled &&
+          targetLanguage == TargetLanguage.vietnamese) {
+        _ttsService.speak(translation);
+      }
+
       final isLineByLine =
           ref.read(displayModeProvider) == DisplayMode.lineByLine;
 
@@ -397,6 +409,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sonioxService.finalize();
     await _sonioxService.disconnect();
     await BackgroundService.stopRecordingService();
+    // Don't stop TTS here — let queued segments finish playing
     ref.read(recordingStateProvider.notifier).state =
         RecordingState.postRecording;
   }
@@ -557,6 +570,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(koreanHistoryProvider.notifier).state = [];
     ref.read(vietnameseDraftProvider.notifier).state = '';
     ref.read(vietnameseHistoryProvider.notifier).state = [];
+    _ttsService.stop();
   }
 
   @override
@@ -569,6 +583,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     final targetLanguage = ref.watch(targetLanguageProvider);
     final displayMode = ref.watch(displayModeProvider);
+    final ttsEnabled = ref.watch(ttsEnabledProvider);
+
+    // Sync TTS service state with provider
+    _ttsService.setEnabled(ttsEnabled);
+
+    // Only show speaker toggle for Vietnamese with a valid API key
+    final showTtsToggle = targetLanguage == TargetLanguage.vietnamese &&
+        ElevenLabsTtsService.hasApiKey;
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||
@@ -687,6 +709,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   label: 'Translation',
                   showEllipsis:
                       isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
+                  showSpeakerToggle: showTtsToggle,
+                  speakerEnabled: ttsEnabled,
+                  onSpeakerToggle: () {
+                    ref.read(ttsEnabledProvider.notifier).state = !ttsEnabled;
+                  },
                 ),
               ),
             ] else
@@ -697,6 +724,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   translationHistory: vietnameseHistory,
                   translationDraft: vietnameseDraft,
                   isRecording: isRecordingOrProcessing,
+                  showSpeakerToggle: showTtsToggle,
+                  speakerEnabled: ttsEnabled,
+                  onSpeakerToggle: () {
+                    ref.read(ttsEnabledProvider.notifier).state = !ttsEnabled;
+                  },
                 ),
               ),
 

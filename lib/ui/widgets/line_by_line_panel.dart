@@ -10,6 +10,9 @@ class LineByLinePanel extends StatefulWidget {
   final List<String> translationHistory;
   final String translationDraft;
   final bool isRecording;
+  final bool showSpeakerToggle;
+  final bool speakerEnabled;
+  final VoidCallback? onSpeakerToggle;
 
   const LineByLinePanel({
     super.key,
@@ -18,6 +21,9 @@ class LineByLinePanel extends StatefulWidget {
     required this.translationHistory,
     required this.translationDraft,
     required this.isRecording,
+    this.showSpeakerToggle = false,
+    this.speakerEnabled = false,
+    this.onSpeakerToggle,
   });
 
   @override
@@ -216,6 +222,22 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                   ),
                 ),
                 const Spacer(),
+                if (widget.showSpeakerToggle)
+                  GestureDetector(
+                    onTap: widget.onSpeakerToggle,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: Icon(
+                        widget.speakerEnabled
+                            ? Icons.volume_up
+                            : Icons.volume_off_outlined,
+                        size: 20,
+                        color: widget.speakerEnabled
+                            ? AppConstants.textPrimary
+                            : AppConstants.textSecondary,
+                      ),
+                    ),
+                  ),
                 if (_hasText)
                   GestureDetector(
                     onTap: _copyAll,
