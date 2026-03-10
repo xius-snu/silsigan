@@ -13,6 +13,7 @@ class LineByLinePanel extends StatefulWidget {
   final bool showSpeakerToggle;
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
+  final Function(String text)? onSpeakLine;
 
   const LineByLinePanel({
     super.key,
@@ -24,6 +25,7 @@ class LineByLinePanel extends StatefulWidget {
     this.showSpeakerToggle = false,
     this.speakerEnabled = false,
     this.onSpeakerToggle,
+    this.onSpeakLine,
   });
 
   @override
@@ -314,16 +316,37 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
           color: const Color(0xFFE8F0FE),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text(
-          text,
-          style: TextStyle(
-            fontSize: AppConstants.contentFontSize,
-            color: isDraft
-                ? AppConstants.textPrimary
-                : AppConstants.textPrimary
-                    .withOpacity(AppConstants.historyOpacity),
-            height: 1.5,
-          ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: AppConstants.contentFontSize,
+                  color: isDraft
+                      ? AppConstants.textPrimary
+                      : AppConstants.textPrimary
+                          .withOpacity(AppConstants.historyOpacity),
+                  height: 1.5,
+                ),
+              ),
+            ),
+            if (!isDraft &&
+                widget.showSpeakerToggle &&
+                widget.onSpeakLine != null)
+              GestureDetector(
+                onTap: () => widget.onSpeakLine?.call(text),
+                child: const Padding(
+                  padding: EdgeInsets.only(left: 8, top: 2),
+                  child: Icon(
+                    Icons.volume_up_outlined,
+                    size: 18,
+                    color: AppConstants.textSecondary,
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );

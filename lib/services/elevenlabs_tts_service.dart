@@ -89,8 +89,6 @@ class ElevenLabsTtsService {
       return;
     }
 
-    if (!_enabled) return;
-
     // Save to temp file for reliable playback alongside active recorder
     final tempDir = await getTemporaryDirectory();
     final tempFile =
@@ -106,6 +104,19 @@ class ElevenLabsTtsService {
     try {
       await tempFile.delete();
     } catch (_) {}
+  }
+
+  /// Manual one-off TTS — works regardless of auto-TTS toggle.
+  /// Stops any current playback and plays immediately.
+  Future<void> speakOnce(String text) async {
+    if (text.trim().isEmpty || !hasApiKey) return;
+    _queue.clear();
+    await _stopPlayback();
+    try {
+      await _synthesizeAndPlay(text.trim());
+    } catch (e) {
+      onError?.call('TTS: $e');
+    }
   }
 
   Future<void> _stopPlayback() async {

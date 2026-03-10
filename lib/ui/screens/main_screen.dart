@@ -571,6 +571,34 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
+  Future<void> _toggleTts() async {
+    final current = ref.read(ttsEnabledProvider);
+    if (current) {
+      ref.read(ttsEnabledProvider.notifier).state = false;
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use Headphones'),
+        content: const Text(
+          'Please put on headphones or earphones before enabling voice '
+          'translation. Without them, the TTS audio may be picked up by '
+          'the microphone and re-transcribed as input.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      ref.read(ttsEnabledProvider.notifier).state = true;
+    }
+  }
+
   void _resetState() {
     ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
     ref.read(koreanDraftProvider.notifier).state = '';
@@ -718,9 +746,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
                   showSpeakerToggle: showTtsToggle,
                   speakerEnabled: ttsEnabled,
-                  onSpeakerToggle: () {
-                    ref.read(ttsEnabledProvider.notifier).state = !ttsEnabled;
-                  },
+                  onSpeakerToggle: _toggleTts,
                 ),
               ),
             ] else
@@ -733,9 +759,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   isRecording: isRecordingOrProcessing,
                   showSpeakerToggle: showTtsToggle,
                   speakerEnabled: ttsEnabled,
-                  onSpeakerToggle: () {
-                    ref.read(ttsEnabledProvider.notifier).state = !ttsEnabled;
-                  },
+                  onSpeakerToggle: _toggleTts,
+                  onSpeakLine: (text) => _ttsService.speakOnce(text),
                 ),
               ),
 
