@@ -761,6 +761,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   speakerEnabled: ttsEnabled,
                   onSpeakerToggle: _toggleTts,
                   onSpeakLine: (text) => _ttsService.speakOnce(text),
+                  ttsLineState: showTtsToggle ? _ttsService.lineState : null,
                 ),
               ),
 

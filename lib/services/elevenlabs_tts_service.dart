@@ -3,8 +3,11 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+
+enum TtsLineStatus { idle, loading, playing }
 
 class ElevenLabsTtsService {
   static const _voiceId = 'A5w1fw5x0uXded1LDvZp';
@@ -19,6 +22,10 @@ class ElevenLabsTtsService {
   Completer<void>? _playbackCompleter;
 
   Function(String error)? onError;
+
+  /// Tracks per-line TTS state for UI (loading spinner / stop button).
+  final lineState = ValueNotifier<({String? text, TtsLineStatus status})>(
+      (text: null, status: TtsLineStatus.idle));
 
   bool get enabled => _enabled;
   static bool get hasApiKey => _apiKey.isNotEmpty;
@@ -95,6 +102,12 @@ class ElevenLabsTtsService {
         File('${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
     await tempFile.writeAsBytes(response.bodyBytes);
 
+    // Transition to playing state (for per-line icon)
+    if (lineState.value.text != null) {
+      lineState.value =
+          (text: lineState.value.text, status: TtsLineStatus.playing);
+    }
+
     _playbackCompleter = Completer<void>();
     await _player.play(DeviceFileSource(tempFile.path));
     await _playbackCompleter!.future;
@@ -107,15 +120,33 @@ class ElevenLabsTtsService {
   }
 
   /// Manual one-off TTS — works regardless of auto-TTS toggle.
-  /// Stops any current playback and plays immediately.
+  /// Tap while playing → stop. Tap while idle → play with loading state.
   Future<void> speakOnce(String text) async {
-    if (text.trim().isEmpty || !hasApiKey) return;
+    final trimmed = text.trim();
+    if (trimmed.isEmpty || !hasApiKey) return;
+
+    // Tapping while playing this line → stop
+    if (lineState.value.text == trimmed &&
+        lineState.value.status == TtsLineStatus.playing) {
+      await _stopPlayback();
+      lineState.value = (text: null, status: TtsLineStatus.idle);
+      return;
+    }
+
+    // Ignore tap while loading
+    if (lineState.value.status == TtsLineStatus.loading) return;
+
     _queue.clear();
     await _stopPlayback();
+    lineState.value = (text: trimmed, status: TtsLineStatus.loading);
     try {
-      await _synthesizeAndPlay(text.trim());
+      await _synthesizeAndPlay(trimmed);
     } catch (e) {
       onError?.call('TTS: $e');
+    }
+    // Only reset if this line is still the active one
+    if (lineState.value.text == trimmed) {
+      lineState.value = (text: null, status: TtsLineStatus.idle);
     }
   }
 

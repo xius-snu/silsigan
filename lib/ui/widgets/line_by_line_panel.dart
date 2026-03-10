@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../services/elevenlabs_tts_service.dart';
 import '../../utils/constants.dart';
 
 class LineByLinePanel extends StatefulWidget {
@@ -14,6 +15,7 @@ class LineByLinePanel extends StatefulWidget {
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
   final Function(String text)? onSpeakLine;
+  final ValueNotifier<({String? text, TtsLineStatus status})>? ttsLineState;
 
   const LineByLinePanel({
     super.key,
@@ -26,6 +28,7 @@ class LineByLinePanel extends StatefulWidget {
     this.speakerEnabled = false,
     this.onSpeakerToggle,
     this.onSpeakLine,
+    this.ttsLineState,
   });
 
   @override
@@ -306,6 +309,32 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     );
   }
 
+  Widget _buildLineIcon(TtsLineStatus status) {
+    switch (status) {
+      case TtsLineStatus.loading:
+        return const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: AppConstants.textSecondary,
+          ),
+        );
+      case TtsLineStatus.playing:
+        return const _PulsingIcon(
+          icon: Icons.stop_rounded,
+          size: 20,
+          color: AppConstants.textPrimary,
+        );
+      case TtsLineStatus.idle:
+        return const Icon(
+          Icons.volume_up_outlined,
+          size: 18,
+          color: AppConstants.textSecondary,
+        );
+    }
+  }
+
   Widget _buildTranslationBlock(String text, {bool isDraft = false}) {
     return Padding(
       padding: const EdgeInsets.only(top: 4),
@@ -334,21 +363,71 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
             ),
             if (!isDraft &&
                 widget.showSpeakerToggle &&
-                widget.onSpeakLine != null)
-              GestureDetector(
-                onTap: () => widget.onSpeakLine?.call(text),
-                child: const Padding(
-                  padding: EdgeInsets.only(left: 8, top: 2),
-                  child: Icon(
-                    Icons.volume_up_outlined,
-                    size: 18,
-                    color: AppConstants.textSecondary,
-                  ),
-                ),
+                widget.onSpeakLine != null &&
+                widget.ttsLineState != null)
+              ValueListenableBuilder<({String? text, TtsLineStatus status})>(
+                valueListenable: widget.ttsLineState!,
+                builder: (context, state, _) {
+                  final isThisLine = state.text == text;
+                  return GestureDetector(
+                    onTap: () => widget.onSpeakLine?.call(text),
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      child: _buildLineIcon(isThisLine ? state.status : TtsLineStatus.idle),
+                    ),
+                  );
+                },
               ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _PulsingIcon extends StatefulWidget {
+  final IconData icon;
+  final double size;
+  final Color color;
+
+  const _PulsingIcon({
+    required this.icon,
+    required this.size,
+    required this.color,
+  });
+
+  @override
+  State<_PulsingIcon> createState() => _PulsingIconState();
+}
+
+class _PulsingIconState extends State<_PulsingIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) => Opacity(
+        opacity: 0.4 + 0.6 * _controller.value,
+        child: child,
+      ),
+      child: Icon(widget.icon, size: widget.size, color: widget.color),
     );
   }
 }
