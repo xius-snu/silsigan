@@ -170,6 +170,33 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     await _player.seekToPlayer(position);
   }
 
+  Future<void> _shareAudio() async {
+    final audioPath = _selectedSession?.audioPath;
+    if (audioPath == null) return;
+    final file = File(audioPath);
+    if (!await file.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Audio file not found')),
+        );
+      }
+      return;
+    }
+    try {
+      final date = _formatDate(_selectedSession!.createdAt);
+      await Share.shareXFiles(
+        [XFile(audioPath, mimeType: 'audio/wav')],
+        subject: 'Silsigan Audio — $date',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Share failed: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _deleteSession() async {
     if (_selectedSession == null) return;
     final confirmed = await showDialog<bool>(
@@ -534,37 +561,50 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           ),
           const SizedBox(height: 8),
           Row(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              IconButton(
-                icon: const Icon(Icons.replay_10),
-                iconSize: 32,
-                color: AppConstants.textPrimary,
-                onPressed: () => _seekRelative(-10),
-              ),
-              const SizedBox(width: 24),
-              GestureDetector(
-                onTap: _playPause,
-                child: Container(
-                  width: 56,
-                  height: 56,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: AppConstants.textPrimary,
-                  ),
-                  child: Icon(
-                    _isPlaying ? Icons.pause : Icons.play_arrow,
-                    size: 30,
-                    color: Colors.white,
-                  ),
+              const SizedBox(width: 48),
+              Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.replay_10),
+                      iconSize: 32,
+                      color: AppConstants.textPrimary,
+                      onPressed: () => _seekRelative(-10),
+                    ),
+                    const SizedBox(width: 24),
+                    GestureDetector(
+                      onTap: _playPause,
+                      child: Container(
+                        width: 56,
+                        height: 56,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppConstants.textPrimary,
+                        ),
+                        child: Icon(
+                          _isPlaying ? Icons.pause : Icons.play_arrow,
+                          size: 30,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 24),
+                    IconButton(
+                      icon: const Icon(Icons.forward_10),
+                      iconSize: 32,
+                      color: AppConstants.textPrimary,
+                      onPressed: () => _seekRelative(10),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 24),
               IconButton(
-                icon: const Icon(Icons.forward_10),
-                iconSize: 32,
-                color: AppConstants.textPrimary,
-                onPressed: () => _seekRelative(10),
+                icon: const Icon(Icons.download_rounded),
+                iconSize: 24,
+                color: AppConstants.textSecondary,
+                onPressed: _shareAudio,
               ),
             ],
           ),
