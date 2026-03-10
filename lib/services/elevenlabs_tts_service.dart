@@ -8,7 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 class ElevenLabsTtsService {
   static const _voiceId = 'A5w1fw5x0uXded1LDvZp';
-  static const _modelId = 'eleven_v3';
+  static const _modelId = 'eleven_flash_v2_5';
   static const _apiUrl = 'https://api.elevenlabs.io/v1/text-to-speech';
   static const _apiKey = String.fromEnvironment('ELEVENLABS_API_KEY');
 
@@ -62,7 +62,8 @@ class ElevenLabsTtsService {
   }
 
   Future<void> _synthesizeAndPlay(String text) async {
-    final url = Uri.parse('$_apiUrl/$_voiceId');
+    final url = Uri.parse(
+        '$_apiUrl/$_voiceId?optimize_streaming_latency=3&output_format=mp3_22050_32');
     final response = await http.post(
       url,
       headers: {
