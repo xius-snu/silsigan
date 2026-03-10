@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
-import 'package:flutter_sound/flutter_sound.dart';
+import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 class ElevenLabsTtsService {
   static const _voiceId = 'A5w1fw5x0uXded1LDvZp';
@@ -10,14 +12,24 @@ class ElevenLabsTtsService {
   static const _apiUrl = 'https://api.elevenlabs.io/v1/text-to-speech';
   static const _apiKey = String.fromEnvironment('ELEVENLABS_API_KEY');
 
-  FlutterSoundPlayer? _player;
+  final AudioPlayer _player = AudioPlayer();
   final Queue<String> _queue = Queue();
   bool _isProcessing = false;
   bool _enabled = false;
   Completer<void>? _playbackCompleter;
 
+  Function(String error)? onError;
+
   bool get enabled => _enabled;
   static bool get hasApiKey => _apiKey.isNotEmpty;
+
+  ElevenLabsTtsService() {
+    _player.onPlayerComplete.listen((_) {
+      if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
+        _playbackCompleter!.complete();
+      }
+    });
+  }
 
   void setEnabled(bool value) {
     _enabled = value;
@@ -33,13 +45,6 @@ class ElevenLabsTtsService {
     _processQueue();
   }
 
-  Future<void> _ensurePlayerOpen() async {
-    if (_player == null) {
-      _player = FlutterSoundPlayer();
-      await _player!.openPlayer();
-    }
-  }
-
   Future<void> _processQueue() async {
     if (_isProcessing || _queue.isEmpty) return;
     _isProcessing = true;
@@ -48,8 +53,8 @@ class ElevenLabsTtsService {
       final text = _queue.removeFirst();
       try {
         await _synthesizeAndPlay(text);
-      } catch (_) {
-        // Silently fail — don't disrupt user experience
+      } catch (e) {
+        onError?.call('TTS: $e');
       }
     }
 
@@ -57,8 +62,6 @@ class ElevenLabsTtsService {
   }
 
   Future<void> _synthesizeAndPlay(String text) async {
-    await _ensurePlayerOpen();
-
     final url = Uri.parse('$_apiUrl/$_voiceId');
     final response = await http.post(
       url,
@@ -77,27 +80,36 @@ class ElevenLabsTtsService {
       }),
     );
 
-    if (response.statusCode == 200 && _enabled) {
-      _playbackCompleter = Completer<void>();
-      await _player!.startPlayer(
-        fromDataBuffer: response.bodyBytes,
-        codec: Codec.mp3,
-        whenFinished: () {
-          if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
-            _playbackCompleter!.complete();
-          }
-        },
-      );
-      await _playbackCompleter!.future;
-      _playbackCompleter = null;
+    if (response.statusCode != 200) {
+      final body = response.body.length > 200
+          ? response.body.substring(0, 200)
+          : response.body;
+      onError?.call('ElevenLabs ${response.statusCode}: $body');
+      return;
     }
+
+    if (!_enabled) return;
+
+    // Save to temp file for reliable playback alongside active recorder
+    final tempDir = await getTemporaryDirectory();
+    final tempFile =
+        File('${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
+    await tempFile.writeAsBytes(response.bodyBytes);
+
+    _playbackCompleter = Completer<void>();
+    await _player.play(DeviceFileSource(tempFile.path));
+    await _playbackCompleter!.future;
+    _playbackCompleter = null;
+
+    // Clean up temp file
+    try {
+      await tempFile.delete();
+    } catch (_) {}
   }
 
   Future<void> _stopPlayback() async {
     try {
-      if (_player != null && _player!.isPlaying) {
-        await _player!.stopPlayer();
-      }
+      await _player.stop();
     } catch (_) {}
     if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
       _playbackCompleter!.complete();
@@ -113,11 +125,6 @@ class ElevenLabsTtsService {
 
   Future<void> dispose() async {
     await stop();
-    if (_player != null) {
-      try {
-        await _player!.closePlayer();
-      } catch (_) {}
-      _player = null;
-    }
+    await _player.dispose();
   }
 }

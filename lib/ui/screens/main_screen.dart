@@ -58,6 +58,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startIncomingPoll();
+    _ttsService.onError = (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error), duration: const Duration(seconds: 3)),
+        );
+      }
+    };
   }
 
   @override
