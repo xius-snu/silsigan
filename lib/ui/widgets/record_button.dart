@@ -56,8 +56,40 @@ class _RecordButtonState extends State<RecordButton>
 
   @override
   Widget build(BuildContext context) {
-    final isRecording = widget.state == RecordingState.recording ||
-        widget.state == RecordingState.processing;
+    final isRecording = widget.state == RecordingState.recording;
+    final isProcessing = widget.state == RecordingState.processing;
+    final showStop = isRecording || isProcessing;
+
+    // Processing state: show spinner, don't allow taps
+    if (isProcessing) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeInOut,
+        width: AppConstants.micButtonSize,
+        height: AppConstants.micButtonSize,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.red.withOpacity(0.8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.red.withOpacity(0.3),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: const Center(
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation(Colors.white),
+            ),
+          ),
+        ),
+      );
+    }
 
     return GestureDetector(
       onTapDown: _onTapDown,
@@ -65,7 +97,7 @@ class _RecordButtonState extends State<RecordButton>
       onTapCancel: _onTapCancel,
       onTap: () {
         HapticFeedback.mediumImpact();
-        if (isRecording) {
+        if (showStop) {
           widget.onStop();
         } else {
           widget.onStart();
@@ -86,10 +118,10 @@ class _RecordButtonState extends State<RecordButton>
           height: AppConstants.micButtonSize,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: isRecording ? Colors.red : AppConstants.micButtonColor,
+            color: showStop ? Colors.red : AppConstants.micButtonColor,
             boxShadow: [
               BoxShadow(
-                color: isRecording
+                color: showStop
                     ? Colors.red.withOpacity(0.3)
                     : Colors.black.withOpacity(0.2),
                 blurRadius: 12,
@@ -98,7 +130,7 @@ class _RecordButtonState extends State<RecordButton>
             ],
           ),
           child: Icon(
-            isRecording ? Icons.stop_rounded : Icons.mic,
+            showStop ? Icons.stop_rounded : Icons.mic,
             size: AppConstants.micIconSize,
             color: Colors.white,
           ),

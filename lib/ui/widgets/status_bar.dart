@@ -59,7 +59,7 @@ class _StatusBarState extends State<StatusBar>
     }
 
     final isRecording = widget.state == RecordingState.recording;
-    final label = isRecording ? 'Recording' : 'Processing';
+    final label = isRecording ? 'Recording' : 'Saving...';
     final color = isRecording ? Colors.red : Colors.amber.shade800;
 
     return Container(

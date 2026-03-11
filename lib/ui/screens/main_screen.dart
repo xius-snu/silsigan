@@ -1,20 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../models/transcript_session.dart';
+import '../../models/word_timestamp.dart';
 import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
 import '../../providers/transcript_provider.dart';
 import '../../providers/translation_provider.dart';
 import '../../providers/session_history_provider.dart';
 import '../../providers/display_mode_provider.dart';
+import '../../providers/detected_language_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
 import '../../services/elevenlabs_tts_service.dart';
 import '../../providers/tts_provider.dart';
+import '../../providers/speaker_provider.dart';
 import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
 import '../widgets/record_button.dart';
@@ -53,6 +57,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Map<String, dynamic>? _incomingInvite;
   Timer? _incomingPollTimer;
   Timer? _outgoingPollTimer;
+
+  // Word timestamps per transcription line (for saved sessions)
+  final List<List<WordTimestamp>> _wordTimestampsPerLine = [];
+
+  // Guard against multiple stop taps
+  bool _isStopping = false;
 
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
@@ -271,16 +281,35 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     final targetLanguage = ref.read(targetLanguageProvider);
 
-    // Set up Soniox transcription callbacks
-    _sonioxService.onTranscriptionDraft = (draft) {
-      ref.read(koreanDraftProvider.notifier).state = draft;
+    // Update context with recent transcript to help model on reconnects
+    final existingHistory = ref.read(koreanHistoryProvider);
+    if (existingHistory.isNotEmpty) {
+      _sonioxService.contextText =
+          existingHistory.reversed.take(10).toList().reversed.join(' ');
+    }
+
+    // Set up language detection callback
+    _sonioxService.onLanguageDetected = (language) {
+      ref.read(detectedLanguageProvider.notifier).state = language;
     };
 
-    _sonioxService.onTranscriptionCompleted = (transcript) {
+    // Set up Soniox transcription callbacks
+    _sonioxService.onTranscriptionDraft = (draft, speaker) {
+      ref.read(koreanDraftProvider.notifier).state = draft;
+      if (speaker != null) {
+        ref.read(draftSpeakerProvider.notifier).state = speaker;
+      }
+    };
+
+    _sonioxService.onTranscriptionCompleted = (transcript, speaker) {
       if (transcript.isNotEmpty) {
         _newLineTimer?.cancel();
         final isLineByLine =
             ref.read(displayModeProvider) == DisplayMode.lineByLine;
+
+        // Grab word timestamps for this utterance
+        final words =
+            List<WordTimestamp>.from(_sonioxService.lastCompletedWords);
 
         if (isLineByLine) {
           // Line-by-line: each Soniox endpoint = one segment.
@@ -293,6 +322,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ref.read(vietnameseHistoryProvider.notifier).update(
                 (state) => [...state, ''],
               );
+          // Track speaker for this line
+          ref.read(transcriptionSpeakersProvider.notifier).update(
+                (state) => [...state, speaker],
+              );
+          ref.read(translationSpeakersProvider.notifier).update(
+                (state) => [...state, speaker],
+              );
+          // Track word timestamps for this line
+          _wordTimestampsPerLine.add(words);
           // No timer needed — segments are endpoint-delimited
         } else {
           // Split mode: append to last line, timer-based new lines
@@ -302,15 +340,40 @@ class _MainScreenState extends ConsumerState<MainScreen>
             updated.last = '${updated.last} $transcript';
             return updated;
           });
+          // Track speaker for this line (first speaker wins)
+          ref.read(transcriptionSpeakersProvider.notifier).update((state) {
+            if (state.isEmpty) return [speaker];
+            final updated = List<String?>.from(state);
+            if (updated.last == null) updated.last = speaker;
+            return updated;
+          });
+          // Merge word timestamps into last line
+          if (_wordTimestampsPerLine.isEmpty) {
+            _wordTimestampsPerLine.add(words);
+          } else {
+            _wordTimestampsPerLine.last = [
+              ..._wordTimestampsPerLine.last,
+              ...words
+            ];
+          }
           _newLineTimer = Timer(
             const Duration(milliseconds: AppConstants.newLinePauseMs),
             () {
               ref.read(koreanHistoryProvider.notifier).update(
                     (state) => [...state, ''],
                   );
+              ref.read(transcriptionSpeakersProvider.notifier).update(
+                    (state) => [...state, null],
+                  );
+              _wordTimestampsPerLine.add([]);
             },
           );
         }
+
+        // Update context for next rotation with recent transcript
+        final history = ref.read(koreanHistoryProvider);
+        _sonioxService.contextText =
+            history.reversed.take(10).toList().reversed.join(' ');
       }
       ref.read(koreanDraftProvider.notifier).state = '';
     };
@@ -336,7 +399,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
     };
 
-    _sonioxService.onTranslationCompleted = (translation) {
+    _sonioxService.onTranslationCompleted = (translation, speaker) {
       _ttsDraftTimer?.cancel();
       _newLineTimerTranslation?.cancel();
 
@@ -380,11 +443,21 @@ class _MainScreenState extends ConsumerState<MainScreen>
           updated.last = '${updated.last} $translation';
           return updated;
         });
+        // Track speaker for translation line (first speaker wins)
+        ref.read(translationSpeakersProvider.notifier).update((state) {
+          if (state.isEmpty) return [speaker];
+          final updated = List<String?>.from(state);
+          if (updated.last == null) updated.last = speaker;
+          return updated;
+        });
         _newLineTimerTranslation = Timer(
           const Duration(milliseconds: AppConstants.newLinePauseMs),
           () {
             ref.read(vietnameseHistoryProvider.notifier).update(
                   (state) => [...state, ''],
+                );
+            ref.read(translationSpeakersProvider.notifier).update(
+                  (state) => [...state, null],
                 );
           },
         );
@@ -434,17 +507,41 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   Future<void> _stopRecording() async {
+    // Guard against multiple taps while stopping
+    if (_isStopping) return;
+    _isStopping = true;
+
+    // Immediately show processing state so user sees feedback
+    ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
+
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     _ttsDraftTimer?.cancel();
     _ttsFiredForSegment = false;
-    await _audioService.stop();
-    _sonioxService.finalize();
-    await _sonioxService.disconnect();
-    await BackgroundService.stopRecordingService();
+
+    // Stop audio capture (timeout in case recorder is stuck after background)
+    try {
+      await _audioService.stop().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    // Finalize + disconnect Soniox (timeout in case WebSocket is stale)
+    try {
+      _sonioxService.finalize();
+      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    // Stop foreground service
+    try {
+      await BackgroundService.stopRecordingService()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
     // Don't stop TTS here — let queued segments finish playing
-    ref.read(recordingStateProvider.notifier).state =
-        RecordingState.postRecording;
+    _isStopping = false;
+    if (mounted) {
+      ref.read(recordingStateProvider.notifier).state =
+          RecordingState.postRecording;
+    }
   }
 
   Future<void> _saveSession() async {
@@ -469,19 +566,59 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
-    final koreanHistory = ref
-        .read(koreanHistoryProvider)
-        .where((s) => s.trim().isNotEmpty)
-        .toList();
-    final vietnameseHistory = ref
-        .read(vietnameseHistoryProvider)
-        .where((s) => s.trim().isNotEmpty)
-        .toList();
+    final rawKoreanHistory = ref.read(koreanHistoryProvider);
+    final rawVietnameseHistory = ref.read(vietnameseHistoryProvider);
+    final tSpeakers = ref.read(transcriptionSpeakersProvider);
+    final tlSpeakers = ref.read(translationSpeakersProvider);
+
+    final koreanHistory =
+        rawKoreanHistory.where((s) => s.trim().isNotEmpty).toList();
+    final vietnameseHistory =
+        rawVietnameseHistory.where((s) => s.trim().isNotEmpty).toList();
 
     if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
 
-    final koreanFull = koreanHistory.join('\n');
-    final vietnameseFull = vietnameseHistory.join('\n');
+    // Determine if we have multiple speakers
+    final uniqueSpeakers = tSpeakers.where((s) => s != null).toSet();
+    final hasMultiple = uniqueSpeakers.length > 1;
+
+    String formatWithSpeakers(
+        List<String> raw, List<String> filtered, List<String?> speakers) {
+      if (!hasMultiple) return filtered.join('\n');
+      final result = <String>[];
+      int filteredIdx = 0;
+      for (int i = 0; i < raw.length && filteredIdx < filtered.length; i++) {
+        if (raw[i].trim().isEmpty) continue;
+        final speaker = i < speakers.length ? speakers[i] : null;
+        if (speaker != null) {
+          result.add('${speakerLabel(speaker)}: ${filtered[filteredIdx]}');
+        } else {
+          result.add(filtered[filteredIdx]);
+        }
+        filteredIdx++;
+      }
+      return result.join('\n');
+    }
+
+    final koreanFull =
+        formatWithSpeakers(rawKoreanHistory, koreanHistory, tSpeakers);
+    final vietnameseFull =
+        formatWithSpeakers(rawVietnameseHistory, vietnameseHistory, tlSpeakers);
+
+    // Serialize word timestamps (per-line, aligned with raw history)
+    String? timestampsJson;
+    if (_wordTimestampsPerLine.isNotEmpty) {
+      // Build per-line arrays matching rawKoreanHistory indices (filter empties)
+      final tsPerLine = <List<Map<String, dynamic>>>[];
+      for (int i = 0; i < rawKoreanHistory.length; i++) {
+        if (rawKoreanHistory[i].trim().isEmpty) continue;
+        final words = i < _wordTimestampsPerLine.length
+            ? _wordTimestampsPerLine[i]
+            : <WordTimestamp>[];
+        tsPerLine.add(words.map((w) => w.toJson()).toList());
+      }
+      timestampsJson = jsonEncode(tsPerLine);
+    }
 
     // Save audio file if available
     String? audioPath;
@@ -502,6 +639,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ? vietnameseFull.substring(0, AppConstants.previewMaxLength)
           : vietnameseFull,
       audioPath: audioPath,
+      timestampsJson: timestampsJson,
     );
 
     try {
@@ -631,6 +769,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(koreanHistoryProvider.notifier).state = [];
     ref.read(vietnameseDraftProvider.notifier).state = '';
     ref.read(vietnameseHistoryProvider.notifier).state = [];
+    ref.read(transcriptionSpeakersProvider.notifier).state = [];
+    ref.read(translationSpeakersProvider.notifier).state = [];
+    ref.read(draftSpeakerProvider.notifier).state = null;
+    ref.read(detectedLanguageProvider.notifier).state = null;
+    _wordTimestampsPerLine.clear();
+    _sonioxService.contextText = null;
     _ttsService.stop();
   }
 
@@ -645,6 +789,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final targetLanguage = ref.watch(targetLanguageProvider);
     final displayMode = ref.watch(displayModeProvider);
     final ttsEnabled = ref.watch(ttsEnabledProvider);
+    final transcriptionSpeakers = ref.watch(transcriptionSpeakersProvider);
+    final translationSpeakers = ref.watch(translationSpeakersProvider);
+    final draftSpeaker = ref.watch(draftSpeakerProvider);
+    final detectedLanguage = ref.watch(detectedLanguageProvider);
 
     // Sync TTS service state with provider
     _ttsService.setLanguageCode(targetLanguage.code);
@@ -759,6 +907,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   label: 'Transcription',
                   showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
                   roundedTop: true,
+                  speakers: transcriptionSpeakers,
+                  draftSpeaker: draftSpeaker,
                 ),
               ),
               Container(
@@ -775,6 +925,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   showSpeakerToggle: showTtsToggle,
                   speakerEnabled: ttsEnabled,
                   onSpeakerToggle: _toggleTts,
+                  speakers: translationSpeakers,
+                  draftSpeaker: draftSpeaker,
                 ),
               ),
             ] else
@@ -790,6 +942,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onSpeakerToggle: _toggleTts,
                   onSpeakLine: (text) => _ttsService.speakOnce(text),
                   ttsLineState: showTtsToggle ? _ttsService.lineState : null,
+                  speakers: transcriptionSpeakers,
+                  draftSpeaker: draftSpeaker,
                 ),
               ),
 
@@ -803,21 +957,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Container(
-                        width: AppConstants.langBoxWidth,
-                        height: AppConstants.langBoxHeight,
-                        decoration: BoxDecoration(
-                          color: AppConstants.panelColor,
-                          borderRadius: BorderRadius.circular(
-                            AppConstants.langBoxRadius,
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 200),
+                        child: Container(
+                          key: ValueKey(detectedLanguage ?? 'any'),
+                          width: AppConstants.langBoxWidth,
+                          height: AppConstants.langBoxHeight,
+                          decoration: BoxDecoration(
+                            color: AppConstants.panelColor,
+                            borderRadius: BorderRadius.circular(
+                              AppConstants.langBoxRadius,
+                            ),
                           ),
-                        ),
-                        alignment: Alignment.center,
-                        child: const Text(
-                          'Any',
-                          style: TextStyle(
-                            fontSize: AppConstants.langFontSize,
-                            color: AppConstants.textPrimary,
+                          alignment: Alignment.center,
+                          child: Text(
+                            detectedLanguage != null
+                                ? languageDisplayName(detectedLanguage)
+                                : 'Any',
+                            style: const TextStyle(
+                              fontSize: AppConstants.langFontSize,
+                              color: AppConstants.textPrimary,
+                            ),
                           ),
                         ),
                       ),

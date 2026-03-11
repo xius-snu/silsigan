@@ -18,6 +18,9 @@ class ElevenLabsTtsService {
   static const _voices = <String, String>{
     'vi': 'A5w1fw5x0uXded1LDvZp',
     'ko': 'QPFsEL6IBxlT15xfiD6C',
+    'en': '21m00Tcm4TlvDq8ikWAM',
+    'tr': 'ErXwobaYiN019PkySvjV',
+    'zh': 'pNInz6obpgDQGcFmaJgB',
   };
 
   /// The language code currently used for TTS (determines voice + language_code).
@@ -30,6 +33,9 @@ class ElevenLabsTtsService {
   Completer<void>? _playbackCompleter;
 
   Function(String error)? onError;
+
+  /// Called when TTS playback starts/stops — useful for muting mic during TTS.
+  Function(bool playing)? onPlaybackStateChanged;
 
   /// Tracks per-line TTS state for UI (loading spinner / stop button).
   final lineState = ValueNotifier<({String? text, TtsLineStatus status})>(
@@ -114,8 +120,8 @@ class ElevenLabsTtsService {
 
     // Save to temp file for reliable playback alongside active recorder
     final tempDir = await getTemporaryDirectory();
-    final tempFile =
-        File('${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
+    final tempFile = File(
+        '${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
     await tempFile.writeAsBytes(response.bodyBytes);
 
     // Transition to playing state (for per-line icon)
@@ -125,9 +131,11 @@ class ElevenLabsTtsService {
     }
 
     _playbackCompleter = Completer<void>();
+    onPlaybackStateChanged?.call(true);
     await _player.play(DeviceFileSource(tempFile.path));
     await _playbackCompleter!.future;
     _playbackCompleter = null;
+    onPlaybackStateChanged?.call(false);
 
     // Clean up temp file
     try {
@@ -174,6 +182,7 @@ class ElevenLabsTtsService {
       _playbackCompleter!.complete();
     }
     _playbackCompleter = null;
+    onPlaybackStateChanged?.call(false);
   }
 
   Future<void> stop() async {

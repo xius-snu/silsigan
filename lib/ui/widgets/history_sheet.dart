@@ -1,10 +1,14 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../models/transcript_session.dart';
+import '../../models/word_timestamp.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
 import '../../services/sync_service.dart';
@@ -31,9 +35,17 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   // Audio player
   final FlutterSoundPlayer _player = FlutterSoundPlayer();
   bool _playerInitialized = false;
+
+  // Word timestamps for tap-to-seek (per-line, for transcription)
+  List<List<WordTimestamp>>? _parsedTimestamps;
+  final List<TapGestureRecognizer> _tapRecognizers = [];
   bool _isPlaying = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+
+  // Tap highlight effect
+  String? _highlightedWordId; // "lineIdx_wordIdx"
+  Timer? _highlightTimer;
 
   @override
   void initState() {
@@ -77,10 +89,19 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
   @override
   void dispose() {
+    _highlightTimer?.cancel();
+    _clearTapRecognizers();
     if (_playerInitialized) {
       _player.closePlayer();
     }
     super.dispose();
+  }
+
+  void _clearTapRecognizers() {
+    for (final r in _tapRecognizers) {
+      r.dispose();
+    }
+    _tapRecognizers.clear();
   }
 
   void _selectSession(TranscriptSession session) async {
@@ -88,8 +109,22 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (_isPlaying) {
       await _player.stopPlayer();
     }
+    _clearTapRecognizers();
+    // Parse word timestamps if available
+    List<List<WordTimestamp>>? timestamps;
+    if (session.timestampsJson != null) {
+      try {
+        final raw = jsonDecode(session.timestampsJson!) as List;
+        timestamps = raw
+            .map((line) => (line as List)
+                .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
+                .toList())
+            .toList();
+      } catch (_) {}
+    }
     setState(() {
       _selectedSession = session;
+      _parsedTimestamps = timestamps;
       _isPlaying = false;
       _position = Duration.zero;
       _duration = Duration.zero;
@@ -116,8 +151,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (_isPlaying) {
       await _player.stopPlayer();
     }
+    _clearTapRecognizers();
     setState(() {
       _selectedSession = null;
+      _parsedTimestamps = null;
       _isPlaying = false;
       _position = Duration.zero;
       _duration = Duration.zero;
@@ -137,6 +174,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         await _player.resumePlayer();
         setState(() => _isPlaying = true);
       } else {
+        final seekTarget = _position > Duration.zero ? _position : null;
         setState(() => _isPlaying = true);
         await _player.startPlayer(
           fromURI: audioPath,
@@ -150,6 +188,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
             }
           },
         );
+        // If user tapped a word before playing, seek to that position
+        if (seekTarget != null) {
+          await Future.delayed(const Duration(milliseconds: 50));
+          await _player.seekToPlayer(seekTarget);
+        }
       }
     }
   }
@@ -168,6 +211,29 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (!_playerInitialized) return;
     if (!_isPlaying && !_player.isPaused) return;
     await _player.seekToPlayer(position);
+  }
+
+  /// Seek audio to [ms] milliseconds.
+  /// - If playing: seek and continue playing.
+  /// - If paused or stopped: just update position visually (no auto-play).
+  Future<void> _seekToMs(int ms) async {
+    if (!_playerInitialized) return;
+    final audioPath = _selectedSession?.audioPath;
+    if (audioPath == null) return;
+
+    final target = Duration(milliseconds: ms);
+
+    if (_isPlaying) {
+      // Currently playing — seek and continue
+      await _player.seekToPlayer(target);
+    } else if (_player.isPaused) {
+      // Paused — seek but stay paused, update UI
+      await _player.seekToPlayer(target);
+      setState(() => _position = target);
+    } else {
+      // Stopped — just update position visually; will seek on next play
+      setState(() => _position = target);
+    }
   }
 
   Future<void> _shareAudio() async {
@@ -472,6 +538,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                     label: 'TRANSCRIPTION',
                     lines: koreanLines,
                     fullText: session.koreanFull,
+                    timestamps: hasAudio ? _parsedTimestamps : null,
                   ),
                   const SizedBox(height: 5),
                   _buildTextBox(
@@ -617,6 +684,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     required String label,
     required List<String> lines,
     required String fullText,
+    List<List<WordTimestamp>>? timestamps,
   }) {
     final hasText = fullText.trim().isNotEmpty;
     return Container(
@@ -653,8 +721,23 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
             ],
           ),
           const SizedBox(height: 12),
-          ...lines.map(
-            (line) => Padding(
+          ...lines.asMap().entries.map((entry) {
+            final lineIdx = entry.key;
+            final line = entry.value;
+
+            // If we have timestamps for this line, build tappable word spans
+            if (timestamps != null &&
+                lineIdx < timestamps.length &&
+                timestamps[lineIdx].isNotEmpty) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text.rich(
+                  _buildTappableSpans(lineIdx, line, timestamps[lineIdx]),
+                ),
+              );
+            }
+
+            return Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 line,
@@ -664,10 +747,87 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                   height: 1.5,
                 ),
               ),
-            ),
-          ),
+            );
+          }),
         ],
       ),
     );
+  }
+
+  void _onWordTap(int lineIdx, int wordIdx, int startMs) {
+    HapticFeedback.selectionClick();
+    _seekToMs(startMs);
+    // Flash highlight
+    setState(() => _highlightedWordId = '${lineIdx}_$wordIdx');
+    _highlightTimer?.cancel();
+    _highlightTimer = Timer(const Duration(milliseconds: 350), () {
+      if (mounted) setState(() => _highlightedWordId = null);
+    });
+  }
+
+  /// Build a TextSpan where each word with a timestamp is tappable.
+  /// Words are matched sequentially: walk through the line text finding each
+  /// timestamp token, making matched portions tappable and gaps plain text.
+  TextSpan _buildTappableSpans(
+      int lineIdx, String line, List<WordTimestamp> words) {
+    final spans = <InlineSpan>[];
+    int cursor = 0;
+    int wordIdx = 0;
+
+    const baseStyle = TextStyle(
+      fontSize: AppConstants.contentFontSize,
+      color: AppConstants.textPrimary,
+      height: 1.5,
+    );
+
+    const highlightStyle = TextStyle(
+      fontSize: AppConstants.contentFontSize,
+      color: AppConstants.textPrimary,
+      height: 1.5,
+      backgroundColor: Color(0x30000000),
+    );
+
+    for (final wt in words) {
+      final token = wt.text;
+      if (token.isEmpty) continue;
+
+      // Find this token in the remaining line text
+      final idx = line.indexOf(token, cursor);
+      if (idx < 0) continue;
+
+      // Add any text before this token as plain text
+      if (idx > cursor) {
+        spans.add(TextSpan(
+          text: line.substring(cursor, idx),
+          style: baseStyle,
+        ));
+      }
+
+      // Add the tappable word with highlight support
+      final currentWordIdx = wordIdx;
+      final isHighlighted = _highlightedWordId == '${lineIdx}_$currentWordIdx';
+      final recognizer = TapGestureRecognizer()
+        ..onTap = () => _onWordTap(lineIdx, currentWordIdx, wt.startMs);
+      _tapRecognizers.add(recognizer);
+
+      spans.add(TextSpan(
+        text: token,
+        style: isHighlighted ? highlightStyle : baseStyle,
+        recognizer: recognizer,
+      ));
+
+      cursor = idx + token.length;
+      wordIdx++;
+    }
+
+    // Add any remaining text after the last matched token
+    if (cursor < line.length) {
+      spans.add(TextSpan(
+        text: line.substring(cursor),
+        style: baseStyle,
+      ));
+    }
+
+    return TextSpan(children: spans);
   }
 }

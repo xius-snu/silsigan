@@ -6,6 +6,7 @@ class TranscriptSession {
   final String koreanPreview;
   final String vietnamesePreview;
   final String? audioPath;
+  final String? timestampsJson;
 
   const TranscriptSession({
     this.id,
@@ -15,6 +16,7 @@ class TranscriptSession {
     required this.koreanPreview,
     required this.vietnamesePreview,
     this.audioPath,
+    this.timestampsJson,
   });
 
   Map<String, dynamic> toMap() {
@@ -26,6 +28,7 @@ class TranscriptSession {
       'korean_preview': koreanPreview,
       'vietnamese_preview': vietnamesePreview,
       'audio_path': audioPath,
+      'timestamps_json': timestampsJson,
     };
   }
 
@@ -38,6 +41,7 @@ class TranscriptSession {
       koreanPreview: map['korean_preview'] as String,
       vietnamesePreview: map['vietnamese_preview'] as String,
       audioPath: map['audio_path'] as String?,
+      timestampsJson: map['timestamps_json'] as String?,
     );
   }
 }

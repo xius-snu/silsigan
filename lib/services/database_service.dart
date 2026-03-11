@@ -20,7 +20,7 @@ class DatabaseService {
     final fullPath = '$dbPath/silsigan.db';
     return openDatabase(
       fullPath,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE sessions (
@@ -30,7 +30,8 @@ class DatabaseService {
             vietnamese_full TEXT NOT NULL,
             korean_preview TEXT NOT NULL,
             vietnamese_preview TEXT NOT NULL,
-            audio_path TEXT
+            audio_path TEXT,
+            timestamps_json TEXT
           )
         ''');
       },
@@ -38,6 +39,11 @@ class DatabaseService {
         if (oldVersion < 2) {
           await db.execute(
             'ALTER TABLE sessions ADD COLUMN audio_path TEXT',
+          );
+        }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE sessions ADD COLUMN timestamps_json TEXT',
           );
         }
       },
