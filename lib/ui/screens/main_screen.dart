@@ -67,6 +67,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
 
+  // Autosave: periodic timer + session start timestamp
+  Timer? _autosaveTimer;
+  String? _sessionCreatedAt;
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +83,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     };
+    // Restore any autosaved draft from a previous session
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _restoreAutosaveDraft();
+    });
   }
 
   @override
@@ -87,6 +95,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     _ttsDraftTimer?.cancel();
+    _autosaveTimer?.cancel();
     _incomingPollTimer?.cancel();
     _outgoingPollTimer?.cancel();
     _audioService.dispose();
@@ -102,6 +111,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final recordingState = ref.read(recordingStateProvider);
       if (recordingState == RecordingState.recording) {
         _sonioxService.ensureConnected();
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      // App going to background — autosave immediately if session in progress
+      final recordingState = ref.read(recordingStateProvider);
+      if (recordingState != RecordingState.idle) {
+        _autosave();
       }
     }
   }
@@ -495,6 +511,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
+      // Start periodic autosave (every 15 seconds)
+      _sessionCreatedAt ??= DateTime.now().toIso8601String();
+      _autosaveTimer?.cancel();
+      _autosaveTimer =
+          Timer.periodic(const Duration(seconds: 15), (_) => _autosave());
       UserService.instance.reportActivity('recording_start');
     } catch (e) {
       await BackgroundService.stopRecordingService();
@@ -538,9 +559,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Don't stop TTS here — let queued segments finish playing
     _isStopping = false;
+    _autosaveTimer?.cancel();
     if (mounted) {
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.postRecording;
+      // Autosave immediately when recording stops
+      _autosave();
     }
   }
 
@@ -763,7 +787,121 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
+  // ── Autosave ───────────────────────────────────────────────────────
+
+  Future<void> _autosave() async {
+    final koreanHistory = ref.read(koreanHistoryProvider);
+    final vietnameseHistory = ref.read(vietnameseHistoryProvider);
+
+    // Don't save empty sessions
+    if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
+
+    _sessionCreatedAt ??= DateTime.now().toIso8601String();
+
+    try {
+      await DatabaseService.instance.saveAutosaveDraft({
+        'korean_history': jsonEncode(koreanHistory),
+        'vietnamese_history': jsonEncode(vietnameseHistory),
+        'transcription_speakers':
+            jsonEncode(ref.read(transcriptionSpeakersProvider)),
+        'translation_speakers':
+            jsonEncode(ref.read(translationSpeakersProvider)),
+        'word_timestamps': jsonEncode(
+          _wordTimestampsPerLine
+              .map((line) => line.map((w) => w.toJson()).toList())
+              .toList(),
+        ),
+        'target_language': ref.read(targetLanguageProvider).code,
+        'created_at': _sessionCreatedAt!,
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+    } catch (_) {
+      // Silently ignore autosave failures — don't disrupt the user
+    }
+  }
+
+  Future<void> _restoreAutosaveDraft() async {
+    try {
+      final draft = await DatabaseService.instance.getAutosaveDraft();
+      if (draft == null) return;
+
+      final koreanHistory =
+          (jsonDecode(draft['korean_history'] as String) as List)
+              .cast<String>();
+      final vietnameseHistory =
+          (jsonDecode(draft['vietnamese_history'] as String) as List)
+              .cast<String>();
+
+      // Don't restore empty drafts
+      if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) {
+        await DatabaseService.instance.clearAutosaveDraft();
+        return;
+      }
+
+      ref.read(koreanHistoryProvider.notifier).state = koreanHistory;
+      ref.read(vietnameseHistoryProvider.notifier).state = vietnameseHistory;
+
+      // Restore speakers
+      if (draft['transcription_speakers'] != null) {
+        ref.read(transcriptionSpeakersProvider.notifier).state =
+            (jsonDecode(draft['transcription_speakers'] as String) as List)
+                .map((e) => e as String?)
+                .toList();
+      }
+      if (draft['translation_speakers'] != null) {
+        ref.read(translationSpeakersProvider.notifier).state =
+            (jsonDecode(draft['translation_speakers'] as String) as List)
+                .map((e) => e as String?)
+                .toList();
+      }
+
+      // Restore word timestamps
+      if (draft['word_timestamps'] != null) {
+        final tsData = jsonDecode(draft['word_timestamps'] as String) as List;
+        _wordTimestampsPerLine.clear();
+        for (final line in tsData) {
+          _wordTimestampsPerLine.add(
+            (line as List)
+                .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
+                .toList(),
+          );
+        }
+      }
+
+      // Restore target language
+      final targetCode = draft['target_language'] as String;
+      final targetLang = TargetLanguage.values.where(
+        (l) => l.code == targetCode,
+      );
+      if (targetLang.isNotEmpty) {
+        ref.read(targetLanguageProvider.notifier).state = targetLang.first;
+      }
+
+      _sessionCreatedAt = draft['created_at'] as String;
+
+      // Set state to postRecording so user sees save/discard buttons
+      ref.read(recordingStateProvider.notifier).state =
+          RecordingState.postRecording;
+
+      // Show recovery notification
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Recovered unsaved session'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (_) {
+      // If restore fails, clear the draft and continue normally
+      await DatabaseService.instance.clearAutosaveDraft();
+    }
+  }
+
   void _resetState() {
+    _autosaveTimer?.cancel();
+    _sessionCreatedAt = null;
+    DatabaseService.instance.clearAutosaveDraft();
     ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
     ref.read(koreanDraftProvider.notifier).state = '';
     ref.read(koreanHistoryProvider.notifier).state = [];

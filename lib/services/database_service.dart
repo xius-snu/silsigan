@@ -20,7 +20,7 @@ class DatabaseService {
     final fullPath = '$dbPath/silsigan.db';
     return openDatabase(
       fullPath,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE sessions (
@@ -32,6 +32,19 @@ class DatabaseService {
             vietnamese_preview TEXT NOT NULL,
             audio_path TEXT,
             timestamps_json TEXT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE autosave_draft (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            korean_history TEXT NOT NULL,
+            vietnamese_history TEXT NOT NULL,
+            transcription_speakers TEXT,
+            translation_speakers TEXT,
+            word_timestamps TEXT,
+            target_language TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
           )
         ''');
       },
@@ -46,8 +59,51 @@ class DatabaseService {
             'ALTER TABLE sessions ADD COLUMN timestamps_json TEXT',
           );
         }
+        if (oldVersion < 4) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS autosave_draft (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              korean_history TEXT NOT NULL,
+              vietnamese_history TEXT NOT NULL,
+              transcription_speakers TEXT,
+              translation_speakers TEXT,
+              word_timestamps TEXT,
+              target_language TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+          ''');
+        }
       },
     );
+  }
+
+  // ── Autosave draft ──────────────────────────────────────────────────
+
+  Future<void> saveAutosaveDraft(Map<String, dynamic> draft) async {
+    final db = await database;
+    draft['id'] = 1;
+    await db.insert(
+      'autosave_draft',
+      draft,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<Map<String, dynamic>?> getAutosaveDraft() async {
+    final db = await database;
+    final maps = await db.query(
+      'autosave_draft',
+      where: 'id = ?',
+      whereArgs: [1],
+    );
+    if (maps.isEmpty) return null;
+    return maps.first;
+  }
+
+  Future<void> clearAutosaveDraft() async {
+    final db = await database;
+    await db.delete('autosave_draft');
   }
 
   Future<List<TranscriptSession>> getAllSessions() async {
@@ -87,8 +143,7 @@ class DatabaseService {
               })
           .toList(),
     };
-    final jsonString =
-        const JsonEncoder.withIndent('  ').convert(exportData);
+    final jsonString = const JsonEncoder.withIndent('  ').convert(exportData);
     final dir = await getTemporaryDirectory();
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final filePath = '${dir.path}/silsigan_export_$timestamp.json';
