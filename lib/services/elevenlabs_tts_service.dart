@@ -16,7 +16,7 @@ class ElevenLabsTtsService {
 
   /// Voice IDs per language code.
   static const _voices = <String, String>{
-    'vi': 'A5w1fw5x0uXded1LDvZp',
+    'vi': 'jpmnSYDOADVEpZksbLmc',
     'ko': 'QPFsEL6IBxlT15xfiD6C',
     'en': '21m00Tcm4TlvDq8ikWAM',
     'tr': 'ErXwobaYiN019PkySvjV',
