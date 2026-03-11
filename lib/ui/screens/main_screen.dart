@@ -859,7 +859,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final draft = await DatabaseService.instance.getAutosaveDraft();
       if (draft == null) return;
 
-      // Re-check after async gap — user may have tapped mic during DB read
+      // Re-check after async gap — widget may be disposed or user tapped mic
+      if (!mounted) return;
       if (ref.read(recordingStateProvider) != RecordingState.idle) return;
 
       final koreanHistory =

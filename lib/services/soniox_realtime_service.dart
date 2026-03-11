@@ -161,10 +161,12 @@ class SonioxRealtimeService {
     _subscription = null;
     _channel = null;
 
-    // Clear rotation flag so reconnection can proceed even if the
-    // disconnect happened during a rotation attempt.
-    _isRotating = false;
-    _tryReconnect();
+    if (!_isRotating) {
+      _tryReconnect();
+    }
+    // If _isRotating is true, _rotateSession handles its own reconnection.
+    // The fallback at the end of _rotateSession covers the case where
+    // _doConnect fails synchronously during rotation.
   }
 
   // ─── Session rotation ───
@@ -209,6 +211,14 @@ class SonioxRealtimeService {
 
     // Reconnect (audio buffered automatically during this gap)
     await _doConnect();
+
+    // If _doConnect threw synchronously, _handleDisconnect skipped
+    // reconnection (because _isRotating was true). Fall back to
+    // normal reconnection so the service doesn't get stuck.
+    if (_isRotating) {
+      _isRotating = false;
+      _tryReconnect();
+    }
   }
 
   /// Flush accumulated pending tokens to callbacks without losing data.
