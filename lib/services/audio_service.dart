@@ -40,7 +40,11 @@ class AudioService {
     _isInitialized = true;
   }
 
+  bool get isRecording => _chunkTimer != null;
+
   Future<void> start() async {
+    // Stop any existing capture first (safe to call if already stopped)
+    if (isRecording) await stop();
     if (!_isInitialized) await init();
     _audioBuffer.clear();
 
@@ -49,7 +53,8 @@ class AudioService {
       _tempRaf = await File(_tempFilePath!).open(mode: FileMode.append);
     } else {
       final tempDir = await getTemporaryDirectory();
-      _tempFilePath = '${tempDir.path}/silsigan_recording_${DateTime.now().millisecondsSinceEpoch}.pcm';
+      _tempFilePath =
+          '${tempDir.path}/silsigan_recording_${DateTime.now().millisecondsSinceEpoch}.pcm';
       _tempRaf = await File(_tempFilePath!).open(mode: FileMode.write);
       _pcmBytesWritten = 0;
     }

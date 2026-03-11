@@ -107,10 +107,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // App came back to foreground — reconnect WebSocket if recording
+      // App came back to foreground — restart recording pipeline if active
       final recordingState = ref.read(recordingStateProvider);
       if (recordingState == RecordingState.recording) {
-        _sonioxService.ensureConnected();
+        _resumeRecording();
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
@@ -118,6 +118,25 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final recordingState = ref.read(recordingStateProvider);
       if (recordingState != RecordingState.idle) {
         _autosave();
+      }
+    }
+  }
+
+  /// Restart both WebSocket and audio capture after returning from background.
+  /// On iOS (no foreground service), the OS kills audio and network when
+  /// suspended — so we must restart both, not just the WebSocket.
+  Future<void> _resumeRecording() async {
+    try {
+      await _sonioxService.ensureConnected();
+    } catch (_) {}
+    try {
+      // Restart audio capture (appends to existing temp PCM file)
+      await _audioService.start();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to resume microphone: $e')),
+        );
       }
     }
   }
