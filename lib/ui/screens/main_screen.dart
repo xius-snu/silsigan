@@ -44,6 +44,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
 
+  // Auto-TTS: fire TTS on draft text if source endpoint is slow
+  Timer? _ttsDraftTimer;
+  bool _ttsFiredForSegment = false;
+
   // Session invite state
   Map<String, dynamic>? _outgoingInvite;
   Map<String, dynamic>? _incomingInvite;
@@ -72,6 +76,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     WidgetsBinding.instance.removeObserver(this);
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _ttsDraftTimer?.cancel();
     _incomingPollTimer?.cancel();
     _outgoingPollTimer?.cancel();
     _audioService.dispose();
@@ -313,17 +318,36 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Set up Soniox translation callbacks (used when target != Korean)
     _sonioxService.onTranslationDraft = (draft) {
       ref.read(vietnameseDraftProvider.notifier).state = draft;
+
+      // Auto-TTS: debounce — if draft text settles for 1.5s without a source
+      // endpoint firing, speak it now rather than waiting.
+      _ttsDraftTimer?.cancel();
+      if (draft.isNotEmpty &&
+          !_ttsFiredForSegment &&
+          _ttsService.enabled &&
+          ElevenLabsTtsService.supportsLanguage(targetLanguage.code)) {
+        _ttsDraftTimer = Timer(const Duration(milliseconds: 1500), () {
+          final currentDraft = ref.read(vietnameseDraftProvider);
+          if (currentDraft.isNotEmpty && !_ttsFiredForSegment) {
+            _ttsFiredForSegment = true;
+            _ttsService.speak(currentDraft);
+          }
+        });
+      }
     };
 
     _sonioxService.onTranslationCompleted = (translation) {
+      _ttsDraftTimer?.cancel();
       _newLineTimerTranslation?.cancel();
 
-      // Send to TTS if enabled and target is Vietnamese
+      // Send to TTS if enabled and not already fired from draft timer
       if (translation.isNotEmpty &&
+          !_ttsFiredForSegment &&
           _ttsService.enabled &&
-          targetLanguage == TargetLanguage.vietnamese) {
+          ElevenLabsTtsService.supportsLanguage(targetLanguage.code)) {
         _ttsService.speak(translation);
       }
+      _ttsFiredForSegment = false;
 
       final isLineByLine =
           ref.read(displayModeProvider) == DisplayMode.lineByLine;
@@ -412,6 +436,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Future<void> _stopRecording() async {
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _ttsDraftTimer?.cancel();
+    _ttsFiredForSegment = false;
     await _audioService.stop();
     _sonioxService.finalize();
     await _sonioxService.disconnect();
@@ -621,11 +647,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final ttsEnabled = ref.watch(ttsEnabledProvider);
 
     // Sync TTS service state with provider
+    _ttsService.setLanguageCode(targetLanguage.code);
     _ttsService.setEnabled(ttsEnabled);
 
-    // Only show speaker toggle for Vietnamese with a valid API key
-    final showTtsToggle = targetLanguage == TargetLanguage.vietnamese &&
-        ElevenLabsTtsService.hasApiKey;
+    // Show speaker toggle for languages with TTS support + valid API key
+    final showTtsToggle =
+        ElevenLabsTtsService.supportsLanguage(targetLanguage.code) &&
+            ElevenLabsTtsService.hasApiKey;
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||

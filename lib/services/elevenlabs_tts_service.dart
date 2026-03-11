@@ -10,10 +10,18 @@ import 'package:path_provider/path_provider.dart';
 enum TtsLineStatus { idle, loading, playing }
 
 class ElevenLabsTtsService {
-  static const _voiceId = 'A5w1fw5x0uXded1LDvZp';
   static const _modelId = 'eleven_flash_v2_5';
   static const _apiUrl = 'https://api.elevenlabs.io/v1/text-to-speech';
   static const _apiKey = String.fromEnvironment('ELEVENLABS_API_KEY');
+
+  /// Voice IDs per language code.
+  static const _voices = <String, String>{
+    'vi': 'A5w1fw5x0uXded1LDvZp',
+    'ko': 'QPFsEL6IBxlT15xfiD6C',
+  };
+
+  /// The language code currently used for TTS (determines voice + language_code).
+  String _languageCode = 'vi';
 
   final AudioPlayer _player = AudioPlayer();
   final Queue<String> _queue = Queue();
@@ -37,6 +45,13 @@ class ElevenLabsTtsService {
       }
     });
   }
+
+  void setLanguageCode(String code) {
+    _languageCode = code;
+  }
+
+  /// Whether TTS is supported for the given language code.
+  static bool supportsLanguage(String code) => _voices.containsKey(code);
 
   void setEnabled(bool value) {
     _enabled = value;
@@ -69,8 +84,9 @@ class ElevenLabsTtsService {
   }
 
   Future<void> _synthesizeAndPlay(String text) async {
+    final voiceId = _voices[_languageCode] ?? _voices['vi']!;
     final url = Uri.parse(
-        '$_apiUrl/$_voiceId?optimize_streaming_latency=3&output_format=mp3_22050_32');
+        '$_apiUrl/$voiceId?optimize_streaming_latency=3&output_format=mp3_22050_32');
     final response = await http.post(
       url,
       headers: {
@@ -80,7 +96,7 @@ class ElevenLabsTtsService {
       body: jsonEncode({
         'text': text,
         'model_id': _modelId,
-        'language_code': 'vi',
+        'language_code': _languageCode,
         'voice_settings': {
           'stability': 0.5,
           'similarity_boost': 0.75,
