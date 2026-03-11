@@ -71,6 +71,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Timer? _autosaveTimer;
   String? _sessionCreatedAt;
 
+  // Track whether app actually went to paused (background), so we only
+  // restart audio after a real suspension — not after Control Center, etc.
+  bool _wasPaused = false;
+
   @override
   void initState() {
     super.initState();
@@ -107,14 +111,22 @@ class _MainScreenState extends ConsumerState<MainScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // App came back to foreground — restart recording pipeline if active
       final recordingState = ref.read(recordingStateProvider);
-      if (recordingState == RecordingState.recording) {
+      if (recordingState == RecordingState.recording && _wasPaused) {
+        // Only restart audio after a real background suspension (paused),
+        // not after Control Center, notification banner, etc. (inactive).
         _resumeRecording();
       }
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      // App going to background — autosave immediately if session in progress
+      _wasPaused = false;
+    } else if (state == AppLifecycleState.paused) {
+      _wasPaused = true;
+      final recordingState = ref.read(recordingStateProvider);
+      if (recordingState != RecordingState.idle) {
+        _autosave();
+      }
+    } else if (state == AppLifecycleState.inactive) {
+      // Transient state (Control Center, notification, app switcher animation).
+      // Autosave defensively but don't restart audio on resume.
       final recordingState = ref.read(recordingStateProvider);
       if (recordingState != RecordingState.idle) {
         _autosave();
@@ -841,8 +853,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   Future<void> _restoreAutosaveDraft() async {
     try {
+      // Only restore if still idle (user hasn't started recording already)
+      if (ref.read(recordingStateProvider) != RecordingState.idle) return;
+
       final draft = await DatabaseService.instance.getAutosaveDraft();
       if (draft == null) return;
+
+      // Re-check after async gap — user may have tapped mic during DB read
+      if (ref.read(recordingStateProvider) != RecordingState.idle) return;
 
       final koreanHistory =
           (jsonDecode(draft['korean_history'] as String) as List)

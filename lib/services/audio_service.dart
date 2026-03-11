@@ -48,6 +48,12 @@ class AudioService {
     if (!_isInitialized) await init();
     _audioBuffer.clear();
 
+    // Close any lingering file handle before (re)opening
+    try {
+      _tempRaf?.closeSync();
+    } catch (_) {}
+    _tempRaf = null;
+
     // Open temp file for PCM recording on disk (append if resuming same session)
     if (_tempFilePath != null && await File(_tempFilePath!).exists()) {
       _tempRaf = await File(_tempFilePath!).open(mode: FileMode.append);

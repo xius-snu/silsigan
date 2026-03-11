@@ -161,9 +161,10 @@ class SonioxRealtimeService {
     _subscription = null;
     _channel = null;
 
-    if (!_isRotating) {
-      _tryReconnect();
-    }
+    // Clear rotation flag so reconnection can proceed even if the
+    // disconnect happened during a rotation attempt.
+    _isRotating = false;
+    _tryReconnect();
   }
 
   // ─── Session rotation ───
