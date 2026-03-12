@@ -26,6 +26,8 @@ import '../widgets/save_discard_row.dart';
 import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
+import '../widgets/conversation_panel.dart';
+import '../../providers/conversation_provider.dart';
 import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
 import '../../services/user_service.dart';
@@ -936,6 +938,153 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
+  // ── Conversation Mode Recording ──────────────────────────────────
+
+  Future<void> _startConversationRecording(ConversationSpeaker speaker) async {
+    final needsPermission = Platform.isAndroid || Platform.isIOS;
+    final status = needsPermission
+        ? await Permission.microphone.request()
+        : PermissionStatus.granted;
+    if (!status.isGranted) return;
+
+    ref.read(activeConversationSpeakerProvider.notifier).state = speaker;
+    ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+
+    // Determine source and target language based on who is speaking
+    final myLang = ref.read(myLanguageProvider);
+    final theirLang = ref.read(theirLanguageProvider);
+    // Bottom person speaks myLang → translate to theirLang
+    // Top person speaks theirLang → translate to myLang
+    final sourceLang =
+        speaker == ConversationSpeaker.bottom ? myLang : theirLang;
+    final targetLang =
+        speaker == ConversationSpeaker.bottom ? theirLang : myLang;
+
+    // Set up Soniox callbacks for conversation mode
+    _sonioxService.onTranscriptionDraft = (draft, spk) {
+      ref.read(conversationDraftOriginalProvider.notifier).state = draft;
+    };
+
+    _sonioxService.onTranscriptionCompleted = (transcript, spk) {
+      if (transcript.isNotEmpty) {
+        // Add message with original text, translation will be filled by onTranslationCompleted
+        final msg = ConversationMessage(
+          speaker: speaker,
+          originalText: transcript,
+        );
+        ref.read(conversationMessagesProvider.notifier).update(
+              (state) => [...state, msg],
+            );
+      }
+      ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    };
+
+    _sonioxService.onTranslationDraft = (draft) {
+      ref.read(conversationDraftTranslatedProvider.notifier).state = draft;
+    };
+
+    _sonioxService.onTranslationCompleted = (translation, spk) {
+      if (translation.isNotEmpty) {
+        // Fill translation on the last message from this speaker that has no translation
+        ref.read(conversationMessagesProvider.notifier).update((state) {
+          final updated = List<ConversationMessage>.from(state);
+          for (int i = updated.length - 1; i >= 0; i--) {
+            if (updated[i].speaker == speaker &&
+                updated[i].translatedText.isEmpty) {
+              updated[i] = updated[i].copyWith(translatedText: translation);
+              break;
+            }
+          }
+          return updated;
+        });
+      }
+      ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+    };
+
+    _sonioxService.onLanguageDetected = (language) {
+      ref.read(detectedLanguageProvider.notifier).state = language;
+    };
+
+    _sonioxService.onError = (error) {
+      if (!mounted) return;
+      final now = DateTime.now();
+      if (_lastErrorShown != null &&
+          now.difference(_lastErrorShown!).inSeconds < 10) {
+        return;
+      }
+      _lastErrorShown = now;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Transcription error: $error')),
+      );
+    };
+
+    _audioService.onAudioChunk = (bytes) {
+      _sonioxService.sendAudio(bytes);
+    };
+
+    try {
+      await BackgroundService.startRecordingService();
+      await _sonioxService.connect(
+        targetLanguageCode: targetLang.code,
+        forceTranslation: true,
+        languageHint: sourceLang.code,
+      );
+      await _audioService.start();
+      ref.read(recordingStateProvider.notifier).state =
+          RecordingState.recording;
+    } catch (e) {
+      await BackgroundService.stopRecordingService();
+      ref.read(activeConversationSpeakerProvider.notifier).state = null;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopConversationRecording() async {
+    if (_isStopping) return;
+    _isStopping = true;
+
+    ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
+
+    try {
+      await _audioService.stop().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    try {
+      _sonioxService.finalize();
+      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      await BackgroundService.stopRecordingService()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    _isStopping = false;
+    _audioService.clearRecording();
+    ref.read(activeConversationSpeakerProvider.notifier).state = null;
+    if (mounted) {
+      ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
+    }
+  }
+
+  void _clearConversation() {
+    ref.read(conversationMessagesProvider.notifier).state = [];
+    ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+  }
+
+  void _swapConversationLanguages() {
+    final myLang = ref.read(myLanguageProvider);
+    final theirLang = ref.read(theirLanguageProvider);
+    ref.read(myLanguageProvider.notifier).state = theirLang;
+    ref.read(theirLanguageProvider.notifier).state = myLang;
+  }
+
   void _resetState() {
     _autosaveTimer?.cancel();
     _sessionCreatedAt = null;
@@ -952,6 +1101,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _wordTimestampsPerLine.clear();
     _sonioxService.contextText = null;
     _ttsService.stop();
+    // Conversation state
+    ref.read(conversationMessagesProvider.notifier).state = [];
+    ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+    ref.read(activeConversationSpeakerProvider.notifier).state = null;
   }
 
   @override
@@ -1062,6 +1216,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             ],
                           ),
                         ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.conversation,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Conversation')),
+                              if (current == DisplayMode.conversation)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
                       ];
                     },
                     child: const Icon(
@@ -1074,205 +1238,232 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
             ),
 
-            // Content area: Split or Line-by-Line
-            if (displayMode == DisplayMode.split) ...[
+            // Content area: Conversation / Split / Line-by-Line
+            if (displayMode == DisplayMode.conversation) ...[
               Expanded(
-                child: TranscriptPanel(
-                  history: koreanHistory,
-                  draft: koreanDraft,
-                  label: 'Transcription',
-                  showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
-                  roundedTop: true,
-                  speakers: transcriptionSpeakers,
-                  draftSpeaker: draftSpeaker,
+                child: ConversationPanel(
+                  messages: ref.watch(conversationMessagesProvider),
+                  draftOriginal: ref.watch(conversationDraftOriginalProvider),
+                  draftTranslated: ref.watch(conversationDraftTranslatedProvider),
+                  activeSpeaker: ref.watch(activeConversationSpeakerProvider),
+                  recordingState: recordingState,
+                  myLanguage: ref.watch(myLanguageProvider),
+                  theirLanguage: ref.watch(theirLanguageProvider),
+                  onBottomMicStart: () =>
+                      _startConversationRecording(ConversationSpeaker.bottom),
+                  onBottomMicStop: _stopConversationRecording,
+                  onTopMicStart: () =>
+                      _startConversationRecording(ConversationSpeaker.top),
+                  onTopMicStop: _stopConversationRecording,
+                  onSwapLanguages: _swapConversationLanguages,
+                  onClear: _clearConversation,
+                  onMyLanguageChanged: (lang) =>
+                      ref.read(myLanguageProvider.notifier).state = lang,
+                  onTheirLanguageChanged: (lang) =>
+                      ref.read(theirLanguageProvider.notifier).state = lang,
                 ),
               ),
+            ] else ...[
+              if (displayMode == DisplayMode.split) ...[
+                Expanded(
+                  child: TranscriptPanel(
+                    history: koreanHistory,
+                    draft: koreanDraft,
+                    label: 'Transcription',
+                    showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                    roundedTop: true,
+                    speakers: transcriptionSpeakers,
+                    draftSpeaker: draftSpeaker,
+                  ),
+                ),
+                Container(
+                  height: 5,
+                  color: AppConstants.dividerColor,
+                ),
+                Expanded(
+                  child: TranscriptPanel(
+                    history: vietnameseHistory,
+                    draft: vietnameseDraft,
+                    label: 'Translation',
+                    showEllipsis:
+                        isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
+                    showSpeakerToggle: showTtsToggle,
+                    speakerEnabled: ttsEnabled,
+                    onSpeakerToggle: _toggleTts,
+                    speakers: translationSpeakers,
+                    draftSpeaker: draftSpeaker,
+                  ),
+                ),
+              ] else
+                Expanded(
+                  child: LineByLinePanel(
+                    transcriptionHistory: koreanHistory,
+                    transcriptionDraft: koreanDraft,
+                    translationHistory: vietnameseHistory,
+                    translationDraft: vietnameseDraft,
+                    isRecording: isRecordingOrProcessing,
+                    showSpeakerToggle: showTtsToggle,
+                    speakerEnabled: ttsEnabled,
+                    onSpeakerToggle: _toggleTts,
+                    onSpeakLine: (text) => _ttsService.speakOnce(text),
+                    ttsLineState: showTtsToggle ? _ttsService.lineState : null,
+                    speakers: transcriptionSpeakers,
+                    draftSpeaker: draftSpeaker,
+                  ),
+                ),
+
+              // Bottom Controls Area (only for non-conversation modes)
               Container(
-                height: 5,
-                color: AppConstants.dividerColor,
-              ),
-              Expanded(
-                child: TranscriptPanel(
-                  history: vietnameseHistory,
-                  draft: vietnameseDraft,
-                  label: 'Translation',
-                  showEllipsis:
-                      isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
-                  showSpeakerToggle: showTtsToggle,
-                  speakerEnabled: ttsEnabled,
-                  onSpeakerToggle: _toggleTts,
-                  speakers: translationSpeakers,
-                  draftSpeaker: draftSpeaker,
-                ),
-              ),
-            ] else
-              Expanded(
-                child: LineByLinePanel(
-                  transcriptionHistory: koreanHistory,
-                  transcriptionDraft: koreanDraft,
-                  translationHistory: vietnameseHistory,
-                  translationDraft: vietnameseDraft,
-                  isRecording: isRecordingOrProcessing,
-                  showSpeakerToggle: showTtsToggle,
-                  speakerEnabled: ttsEnabled,
-                  onSpeakerToggle: _toggleTts,
-                  onSpeakLine: (text) => _ttsService.speakOnce(text),
-                  ttsLineState: showTtsToggle ? _ttsService.lineState : null,
-                  speakers: transcriptionSpeakers,
-                  draftSpeaker: draftSpeaker,
-                ),
-              ),
-
-            // Bottom Controls Area
-            Container(
-              color: AppConstants.bgColor,
-              padding: const EdgeInsets.only(top: 20),
-              child: Column(
-                children: [
-                  // Language Selector Row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 200),
-                        child: Container(
-                          key: ValueKey(detectedLanguage ?? 'any'),
-                          width: AppConstants.langBoxWidth,
-                          height: AppConstants.langBoxHeight,
-                          decoration: BoxDecoration(
-                            color: AppConstants.panelColor,
-                            borderRadius: BorderRadius.circular(
-                              AppConstants.langBoxRadius,
-                            ),
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            detectedLanguage != null
-                                ? languageDisplayName(detectedLanguage)
-                                : 'Any',
-                            style: const TextStyle(
-                              fontSize: AppConstants.langFontSize,
-                              color: AppConstants.textPrimary,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 12),
-                        child: Icon(
-                          Icons.arrow_forward,
-                          size: 27,
-                          color: AppConstants.textPrimary,
-                        ),
-                      ),
-                      PopupMenuButton<TargetLanguage>(
-                        enabled: !isRecordingOrProcessing,
-                        onSelected: (lang) {
-                          ref.read(targetLanguageProvider.notifier).state =
-                              lang;
-                        },
-                        offset: const Offset(0, -160),
-                        itemBuilder: (context) => TargetLanguage.values
-                            .map(
-                              (lang) => PopupMenuItem<TargetLanguage>(
-                                value: lang,
-                                child: Row(
-                                  children: [
-                                    Expanded(child: Text(lang.displayName)),
-                                    if (lang == targetLanguage)
-                                      const Icon(Icons.check, size: 18),
-                                  ],
-                                ),
+                color: AppConstants.bgColor,
+                padding: const EdgeInsets.only(top: 20),
+                child: Column(
+                  children: [
+                    // Language Selector Row
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 200),
+                          child: Container(
+                            key: ValueKey(detectedLanguage ?? 'any'),
+                            width: AppConstants.langBoxWidth,
+                            height: AppConstants.langBoxHeight,
+                            decoration: BoxDecoration(
+                              color: AppConstants.panelColor,
+                              borderRadius: BorderRadius.circular(
+                                AppConstants.langBoxRadius,
                               ),
-                            )
-                            .toList(),
-                        child: Container(
-                          width: AppConstants.langBoxWidth,
-                          height: AppConstants.langBoxHeight,
-                          decoration: BoxDecoration(
-                            color: AppConstants.panelColor,
-                            borderRadius: BorderRadius.circular(
-                              AppConstants.langBoxRadius,
                             ),
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            targetLanguage.displayName,
-                            style: const TextStyle(
-                              fontSize: AppConstants.langFontSize,
-                              color: AppConstants.textPrimary,
+                            alignment: Alignment.center,
+                            child: Text(
+                              detectedLanguage != null
+                                  ? languageDisplayName(detectedLanguage)
+                                  : 'Any',
+                              style: const TextStyle(
+                                fontSize: AppConstants.langFontSize,
+                                color: AppConstants.textPrimary,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 32),
-
-                  // Action Buttons Row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      // Left button: History (idle) / hidden (recording) / Trash (post)
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 120),
-                        child: isRecordingOrProcessing
-                            ? SizedBox(
-                                key: const ValueKey('left-hidden'),
-                                width: AppConstants.sideButtonSize,
-                              )
-                            : isPostRecording
-                                ? BottomSideButton(
-                                    key: const ValueKey('left-trash'),
-                                    icon: Icons.delete_outline,
-                                    backgroundColor: Colors.red,
-                                    onTap: _discardSession,
-                                  )
-                                : BottomSideButton(
-                                    key: const ValueKey('left-history'),
-                                    icon: Icons.history,
-                                    backgroundColor:
-                                        AppConstants.historyButtonColor,
-                                    onTap: () =>
-                                        _showHistorySheet(context, ref),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 12),
+                          child: Icon(
+                            Icons.arrow_forward,
+                            size: 27,
+                            color: AppConstants.textPrimary,
+                          ),
+                        ),
+                        PopupMenuButton<TargetLanguage>(
+                          enabled: !isRecordingOrProcessing,
+                          onSelected: (lang) {
+                            ref.read(targetLanguageProvider.notifier).state =
+                                lang;
+                          },
+                          offset: const Offset(0, -160),
+                          itemBuilder: (context) => TargetLanguage.values
+                              .map(
+                                (lang) => PopupMenuItem<TargetLanguage>(
+                                  value: lang,
+                                  child: Row(
+                                    children: [
+                                      Expanded(child: Text(lang.displayName)),
+                                      if (lang == targetLanguage)
+                                        const Icon(Icons.check, size: 18),
+                                    ],
                                   ),
-                      ),
-                      const SizedBox(width: 40),
-
-                      // Center button: Mic (idle/post) / Stop (recording)
-                      RecordButton(
-                        state: recordingState,
-                        onStart: _startRecording,
-                        onStop: _stopRecording,
-                      ),
-                      const SizedBox(width: 40),
-
-                      // Right button: Check (idle/post) / hidden (recording)
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 120),
-                        child: isRecordingOrProcessing
-                            ? SizedBox(
-                                key: const ValueKey('right-hidden'),
-                                width: AppConstants.sideButtonSize,
+                                ),
                               )
-                            : BottomSideButton(
-                                key: ValueKey('right-check-${isPostRecording}'),
-                                icon: Icons.check,
-                                backgroundColor: isPostRecording
-                                    ? AppConstants.saveButtonActiveColor
-                                    : AppConstants.saveButtonColor,
-                                onTap: isPostRecording ? _saveSession : null,
+                              .toList(),
+                          child: Container(
+                            width: AppConstants.langBoxWidth,
+                            height: AppConstants.langBoxHeight,
+                            decoration: BoxDecoration(
+                              color: AppConstants.panelColor,
+                              borderRadius: BorderRadius.circular(
+                                AppConstants.langBoxRadius,
                               ),
-                      ),
-                    ],
-                  ),
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              targetLanguage.displayName,
+                              style: const TextStyle(
+                                fontSize: AppConstants.langFontSize,
+                                color: AppConstants.textPrimary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
 
-                  const SizedBox(height: 30),
-                ],
+                    const SizedBox(height: 32),
+
+                    // Action Buttons Row
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        // Left button: History (idle) / hidden (recording) / Trash (post)
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 120),
+                          child: isRecordingOrProcessing
+                              ? SizedBox(
+                                  key: const ValueKey('left-hidden'),
+                                  width: AppConstants.sideButtonSize,
+                                )
+                              : isPostRecording
+                                  ? BottomSideButton(
+                                      key: const ValueKey('left-trash'),
+                                      icon: Icons.delete_outline,
+                                      backgroundColor: Colors.red,
+                                      onTap: _discardSession,
+                                    )
+                                  : BottomSideButton(
+                                      key: const ValueKey('left-history'),
+                                      icon: Icons.history,
+                                      backgroundColor:
+                                          AppConstants.historyButtonColor,
+                                      onTap: () =>
+                                          _showHistorySheet(context, ref),
+                                    ),
+                        ),
+                        const SizedBox(width: 40),
+
+                        // Center button: Mic (idle/post) / Stop (recording)
+                        RecordButton(
+                          state: recordingState,
+                          onStart: _startRecording,
+                          onStop: _stopRecording,
+                        ),
+                        const SizedBox(width: 40),
+
+                        // Right button: Check (idle/post) / hidden (recording)
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 120),
+                          child: isRecordingOrProcessing
+                              ? SizedBox(
+                                  key: const ValueKey('right-hidden'),
+                                  width: AppConstants.sideButtonSize,
+                                )
+                              : BottomSideButton(
+                                  key: ValueKey(
+                                      'right-check-${isPostRecording}'),
+                                  icon: Icons.check,
+                                  backgroundColor: isPostRecording
+                                      ? AppConstants.saveButtonActiveColor
+                                      : AppConstants.saveButtonColor,
+                                  onTap: isPostRecording ? _saveSession : null,
+                                ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 30),
+                  ],
+                ),
               ),
-            ),
+            ],
           ],
         ),
       ),
