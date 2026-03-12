@@ -86,28 +86,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   }
 
   @override
-  void didUpdateWidget(ConversationPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.messages.length != oldWidget.messages.length ||
-        widget.draftOriginal != oldWidget.draftOriginal) {
-      _scrollToBottom(_bottomScrollController);
-      _scrollToBottom(_topScrollController);
-    }
-  }
-
-  void _scrollToBottom(ScrollController controller) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (controller.hasClients) {
-        controller.animateTo(
-          controller.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 100),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  @override
   void dispose() {
     _ellipsisTimer?.cancel();
     _bottomScrollController.dispose();
@@ -336,19 +314,24 @@ class _ConversationPanelState extends State<ConversationPanel> {
     ConversationSpeaker perspective,
     ScrollController scrollController,
   ) {
+    // Build items in normal order, then reverse for the reversed ListView
+    final items = <Widget>[
+      for (final msg in widget.messages)
+        _buildMessageBubble(msg, perspective),
+      if (_isRecording && widget.activeSpeaker != null)
+        _buildDraftBubble(perspective),
+    ];
+    final reversed = items.reversed.toList();
+
     return SelectionArea(
       child: ListView(
         controller: scrollController,
+        reverse: true,
         padding: const EdgeInsets.symmetric(
           horizontal: AppConstants.panelPaddingH,
           vertical: 12,
         ),
-        children: [
-          for (final msg in widget.messages)
-            _buildMessageBubble(msg, perspective),
-          if (_isRecording && widget.activeSpeaker != null)
-            _buildDraftBubble(perspective),
-        ],
+        children: reversed,
       ),
     );
   }
