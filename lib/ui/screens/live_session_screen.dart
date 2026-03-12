@@ -58,6 +58,10 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   /// picking up the partner's language, suppress the transcription.
   int _wrongLanguageStreak = 0;
 
+  /// Auto-TTS on draft: speak after draft text settles for 1s
+  Timer? _ttsDraftTimer;
+  bool _ttsFiredForSegment = false;
+
   bool get _sameLanguage => widget.partnerLanguage == widget.myLanguage;
 
   @override
@@ -71,6 +75,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   void dispose() {
     _myNewLineTimer?.cancel();
     _partnerNewLineTimer?.cancel();
+    _ttsDraftTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     _relayService.disconnect();
@@ -102,6 +107,17 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   Future<void> _connectRelay() async {
     _relayService.onPartnerTranslationDraft = (text) {
       if (mounted) setState(() => _partnerDraft = text);
+      // Auto-TTS: debounce — speak draft if it settles for 1s
+      _ttsDraftTimer?.cancel();
+      if (text.isNotEmpty && !_ttsFiredForSegment && _ttsService.enabled) {
+        _ttsDraftTimer = Timer(const Duration(seconds: 1), () {
+          final currentDraft = _partnerDraft;
+          if (currentDraft.isNotEmpty && !_ttsFiredForSegment) {
+            _ttsFiredForSegment = true;
+            _ttsService.speak(currentDraft);
+          }
+        });
+      }
     };
 
     _relayService.onPartnerTranslationCompleted = (text) {
@@ -126,10 +142,12 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
         },
       );
 
-      // Auto-TTS: speak partner's translated text through earpiece
-      if (_ttsService.enabled && text.isNotEmpty) {
+      // Auto-TTS: speak completed translation if draft timer didn't already fire
+      _ttsDraftTimer?.cancel();
+      if (_ttsService.enabled && text.isNotEmpty && !_ttsFiredForSegment) {
         _ttsService.speak(text);
       }
+      _ttsFiredForSegment = false;
     };
 
     _relayService.onPartnerRecordingState = (recording) {

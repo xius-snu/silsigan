@@ -438,7 +438,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           !_ttsFiredForSegment &&
           _ttsService.enabled &&
           ElevenLabsTtsService.supportsLanguage(targetLanguage.code)) {
-        _ttsDraftTimer = Timer(const Duration(milliseconds: 1500), () {
+        _ttsDraftTimer = Timer(const Duration(seconds: 1), () {
           final currentDraft = ref.read(vietnameseDraftProvider);
           if (currentDraft.isNotEmpty && !_ttsFiredForSegment) {
             _ttsFiredForSegment = true;
