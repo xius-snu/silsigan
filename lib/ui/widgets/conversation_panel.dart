@@ -271,9 +271,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   // ── Top Half (teal, for the other person) ──
 
   Widget _buildTopHalf() {
-    final otherSideRecording = _isRecording &&
-        widget.activeSpeaker != null &&
-        widget.activeSpeaker != ConversationSpeaker.top;
     final isMyMic =
         widget.activeSpeaker == ConversationSpeaker.top && _isRecording;
 
@@ -291,7 +288,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
               isActive: isMyMic,
-              isDisabled: otherSideRecording || _isProcessing,
+              isDisabled: _isProcessing,
               onStart: widget.onTopMicStart,
               onStop: widget.onTopMicStop,
               tealTheme: true,
@@ -305,9 +302,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   // ── Bottom Half (white, for me) ──
 
   Widget _buildBottomHalf() {
-    final otherSideRecording = _isRecording &&
-        widget.activeSpeaker != null &&
-        widget.activeSpeaker != ConversationSpeaker.bottom;
     final isMyMic =
         widget.activeSpeaker == ConversationSpeaker.bottom && _isRecording;
 
@@ -325,7 +319,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
               isActive: isMyMic,
-              isDisabled: otherSideRecording || _isProcessing,
+              isDisabled: _isProcessing,
               onStart: widget.onBottomMicStart,
               onStop: widget.onBottomMicStop,
               tealTheme: false,

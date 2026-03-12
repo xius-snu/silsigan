@@ -941,6 +941,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // ── Conversation Mode Recording ──────────────────────────────────
 
   Future<void> _startConversationRecording(ConversationSpeaker speaker) async {
+    // If already recording on the other side, stop it first then flip
+    final currentSpeaker = ref.read(activeConversationSpeakerProvider);
+    if (currentSpeaker != null && currentSpeaker != speaker && !_isStopping) {
+      await _stopConversationRecordingSilent();
+    }
+
     final needsPermission = Platform.isAndroid || Platform.isIOS;
     final status = needsPermission
         ? await Permission.microphone.request()
@@ -1042,6 +1048,21 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     }
+  }
+
+  /// Stop recording without resetting to idle — used when flipping sides.
+  Future<void> _stopConversationRecordingSilent() async {
+    if (_isStopping) return;
+    _isStopping = true;
+    try {
+      await _audioService.stop().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+    try {
+      _sonioxService.finalize();
+      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    _isStopping = false;
+    _audioService.clearRecording();
   }
 
   Future<void> _stopConversationRecording() async {
