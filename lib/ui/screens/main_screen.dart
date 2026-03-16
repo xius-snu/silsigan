@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../models/transcript_session.dart';
 import '../../models/word_timestamp.dart';
 import '../../providers/recording_provider.dart';
@@ -18,7 +19,6 @@ import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
 import '../../services/elevenlabs_tts_service.dart';
 import '../../providers/tts_provider.dart';
-import '../../providers/speaker_provider.dart';
 import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
 import '../widgets/record_button.dart';
@@ -33,6 +33,7 @@ import '../widgets/session_invite_banner.dart';
 import '../../services/user_service.dart';
 import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
+import '../../services/update_service.dart';
 import 'live_session_screen.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -92,6 +93,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Restore any autosaved draft from a previous session
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoreAutosaveDraft();
+      _checkForUpdate();
     });
   }
 
@@ -343,14 +345,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     // Set up Soniox transcription callbacks
-    _sonioxService.onTranscriptionDraft = (draft, speaker) {
+    _sonioxService.onTranscriptionDraft = (draft) {
       ref.read(koreanDraftProvider.notifier).state = draft;
-      if (speaker != null) {
-        ref.read(draftSpeakerProvider.notifier).state = speaker;
-      }
     };
 
-    _sonioxService.onTranscriptionCompleted = (transcript, speaker) {
+    _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
         _newLineTimer?.cancel();
         final isLineByLine =
@@ -371,13 +370,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ref.read(vietnameseHistoryProvider.notifier).update(
                 (state) => [...state, ''],
               );
-          // Track speaker for this line
-          ref.read(transcriptionSpeakersProvider.notifier).update(
-                (state) => [...state, speaker],
-              );
-          ref.read(translationSpeakersProvider.notifier).update(
-                (state) => [...state, speaker],
-              );
           // Track word timestamps for this line
           _wordTimestampsPerLine.add(words);
           // No timer needed — segments are endpoint-delimited
@@ -387,13 +379,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
             if (state.isEmpty) return [transcript];
             final updated = List<String>.from(state);
             updated.last = '${updated.last} $transcript';
-            return updated;
-          });
-          // Track speaker for this line (first speaker wins)
-          ref.read(transcriptionSpeakersProvider.notifier).update((state) {
-            if (state.isEmpty) return [speaker];
-            final updated = List<String?>.from(state);
-            if (updated.last == null) updated.last = speaker;
             return updated;
           });
           // Merge word timestamps into last line
@@ -410,9 +395,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
             () {
               ref.read(koreanHistoryProvider.notifier).update(
                     (state) => [...state, ''],
-                  );
-              ref.read(transcriptionSpeakersProvider.notifier).update(
-                    (state) => [...state, null],
                   );
               _wordTimestampsPerLine.add([]);
             },
@@ -448,7 +430,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
     };
 
-    _sonioxService.onTranslationCompleted = (translation, speaker) {
+    _sonioxService.onTranslationCompleted = (translation) {
       _ttsDraftTimer?.cancel();
       _newLineTimerTranslation?.cancel();
 
@@ -492,21 +474,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
           updated.last = '${updated.last} $translation';
           return updated;
         });
-        // Track speaker for translation line (first speaker wins)
-        ref.read(translationSpeakersProvider.notifier).update((state) {
-          if (state.isEmpty) return [speaker];
-          final updated = List<String?>.from(state);
-          if (updated.last == null) updated.last = speaker;
-          return updated;
-        });
         _newLineTimerTranslation = Timer(
           const Duration(milliseconds: AppConstants.newLinePauseMs),
           () {
             ref.read(vietnameseHistoryProvider.notifier).update(
                   (state) => [...state, ''],
-                );
-            ref.read(translationSpeakersProvider.notifier).update(
-                  (state) => [...state, null],
                 );
           },
         );
@@ -625,8 +597,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _newLineTimerTranslation?.cancel();
     final rawKoreanHistory = ref.read(koreanHistoryProvider);
     final rawVietnameseHistory = ref.read(vietnameseHistoryProvider);
-    final tSpeakers = ref.read(transcriptionSpeakersProvider);
-    final tlSpeakers = ref.read(translationSpeakersProvider);
 
     final koreanHistory =
         rawKoreanHistory.where((s) => s.trim().isNotEmpty).toList();
@@ -635,32 +605,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
 
-    // Determine if we have multiple speakers
-    final uniqueSpeakers = tSpeakers.where((s) => s != null).toSet();
-    final hasMultiple = uniqueSpeakers.length > 1;
-
-    String formatWithSpeakers(
-        List<String> raw, List<String> filtered, List<String?> speakers) {
-      if (!hasMultiple) return filtered.join('\n');
-      final result = <String>[];
-      int filteredIdx = 0;
-      for (int i = 0; i < raw.length && filteredIdx < filtered.length; i++) {
-        if (raw[i].trim().isEmpty) continue;
-        final speaker = i < speakers.length ? speakers[i] : null;
-        if (speaker != null) {
-          result.add('${speakerLabel(speaker)}: ${filtered[filteredIdx]}');
-        } else {
-          result.add(filtered[filteredIdx]);
-        }
-        filteredIdx++;
-      }
-      return result.join('\n');
-    }
-
-    final koreanFull =
-        formatWithSpeakers(rawKoreanHistory, koreanHistory, tSpeakers);
-    final vietnameseFull =
-        formatWithSpeakers(rawVietnameseHistory, vietnameseHistory, tlSpeakers);
+    final koreanFull = koreanHistory.join('\n');
+    final vietnameseFull = vietnameseHistory.join('\n');
 
     // Serialize word timestamps (per-line, aligned with raw history)
     String? timestampsJson;
@@ -782,6 +728,42 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  Future<void> _checkForUpdate() async {
+    final update = await UpdateService.checkForUpdate();
+    if (update == null || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: !update.forceUpdate,
+      builder: (context) => PopScope(
+        canPop: !update.forceUpdate,
+        child: AlertDialog(
+          title: const Text('Update Available'),
+          content: Text(
+            'A new version (${update.latestVersion}) is available. '
+            'Please update for the best experience.',
+          ),
+          actions: [
+            if (!update.forceUpdate)
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Later'),
+              ),
+            TextButton(
+              onPressed: () async {
+                final url = Uri.parse(update.updateUrl);
+                if (await canLaunchUrl(url)) {
+                  await launchUrl(url, mode: LaunchMode.externalApplication);
+                }
+              },
+              child: const Text('Update'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showFriendDialog() async {
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -835,10 +817,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await DatabaseService.instance.saveAutosaveDraft({
         'korean_history': jsonEncode(koreanHistory),
         'vietnamese_history': jsonEncode(vietnameseHistory),
-        'transcription_speakers':
-            jsonEncode(ref.read(transcriptionSpeakersProvider)),
-        'translation_speakers':
-            jsonEncode(ref.read(translationSpeakersProvider)),
         'word_timestamps': jsonEncode(
           _wordTimestampsPerLine
               .map((line) => line.map((w) => w.toJson()).toList())
@@ -880,20 +858,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
       ref.read(koreanHistoryProvider.notifier).state = koreanHistory;
       ref.read(vietnameseHistoryProvider.notifier).state = vietnameseHistory;
-
-      // Restore speakers
-      if (draft['transcription_speakers'] != null) {
-        ref.read(transcriptionSpeakersProvider.notifier).state =
-            (jsonDecode(draft['transcription_speakers'] as String) as List)
-                .map((e) => e as String?)
-                .toList();
-      }
-      if (draft['translation_speakers'] != null) {
-        ref.read(translationSpeakersProvider.notifier).state =
-            (jsonDecode(draft['translation_speakers'] as String) as List)
-                .map((e) => e as String?)
-                .toList();
-      }
 
       // Restore word timestamps
       if (draft['word_timestamps'] != null) {
@@ -968,11 +932,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
         speaker == ConversationSpeaker.bottom ? theirLang : myLang;
 
     // Set up Soniox callbacks for conversation mode
-    _sonioxService.onTranscriptionDraft = (draft, spk) {
+    _sonioxService.onTranscriptionDraft = (draft) {
       ref.read(conversationDraftOriginalProvider.notifier).state = draft;
     };
 
-    _sonioxService.onTranscriptionCompleted = (transcript, spk) {
+    _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
         // Add message with original text, translation will be filled by onTranslationCompleted
         final msg = ConversationMessage(
@@ -990,7 +954,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       ref.read(conversationDraftTranslatedProvider.notifier).state = draft;
     };
 
-    _sonioxService.onTranslationCompleted = (translation, spk) {
+    _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
         // Fill translation on the last message from this speaker that has no translation
         ref.read(conversationMessagesProvider.notifier).update((state) {
@@ -1115,9 +1079,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(koreanHistoryProvider.notifier).state = [];
     ref.read(vietnameseDraftProvider.notifier).state = '';
     ref.read(vietnameseHistoryProvider.notifier).state = [];
-    ref.read(transcriptionSpeakersProvider.notifier).state = [];
-    ref.read(translationSpeakersProvider.notifier).state = [];
-    ref.read(draftSpeakerProvider.notifier).state = null;
     ref.read(detectedLanguageProvider.notifier).state = null;
     _wordTimestampsPerLine.clear();
     _sonioxService.contextText = null;
@@ -1140,9 +1101,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final targetLanguage = ref.watch(targetLanguageProvider);
     final displayMode = ref.watch(displayModeProvider);
     final ttsEnabled = ref.watch(ttsEnabledProvider);
-    final transcriptionSpeakers = ref.watch(transcriptionSpeakersProvider);
-    final translationSpeakers = ref.watch(translationSpeakersProvider);
-    final draftSpeaker = ref.watch(draftSpeakerProvider);
     final detectedLanguage = ref.watch(detectedLanguageProvider);
 
     // Sync TTS service state with provider
@@ -1293,8 +1251,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     label: 'Transcription',
                     showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
                     roundedTop: true,
-                    speakers: transcriptionSpeakers,
-                    draftSpeaker: draftSpeaker,
                   ),
                 ),
                 Container(
@@ -1311,8 +1267,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     showSpeakerToggle: showTtsToggle,
                     speakerEnabled: ttsEnabled,
                     onSpeakerToggle: _toggleTts,
-                    speakers: translationSpeakers,
-                    draftSpeaker: draftSpeaker,
                   ),
                 ),
               ] else
@@ -1328,8 +1282,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     onSpeakerToggle: _toggleTts,
                     onSpeakLine: (text) => _ttsService.speakOnce(text),
                     ttsLineState: showTtsToggle ? _ttsService.lineState : null,
-                    speakers: transcriptionSpeakers,
-                    draftSpeaker: draftSpeaker,
                   ),
                 ),
 

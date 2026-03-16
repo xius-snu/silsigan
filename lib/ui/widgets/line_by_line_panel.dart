@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../providers/speaker_provider.dart';
 import '../../services/elevenlabs_tts_service.dart';
 import '../../utils/constants.dart';
 
@@ -17,8 +16,6 @@ class LineByLinePanel extends StatefulWidget {
   final VoidCallback? onSpeakerToggle;
   final Function(String text)? onSpeakLine;
   final ValueNotifier<({String? text, TtsLineStatus status})>? ttsLineState;
-  final List<String?> speakers;
-  final String? draftSpeaker;
 
   const LineByLinePanel({
     super.key,
@@ -32,8 +29,6 @@ class LineByLinePanel extends StatefulWidget {
     this.onSpeakerToggle,
     this.onSpeakLine,
     this.ttsLineState,
-    this.speakers = const [],
-    this.draftSpeaker,
   });
 
   @override
@@ -99,26 +94,14 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     _userScrolledUp = (maxScroll - currentScroll) > 50;
   }
 
-  bool get _hasMultipleSpeakers {
-    final unique = widget.speakers.where((s) => s != null).toSet();
-    return unique.length > 1;
-  }
-
   String get _allText {
     final buffer = StringBuffer();
     final count = max(
         widget.transcriptionHistory.length, widget.translationHistory.length);
-    final showSpeakers = _hasMultipleSpeakers;
     for (int i = 0; i < count; i++) {
       if (i < widget.transcriptionHistory.length &&
           widget.transcriptionHistory[i].trim().isNotEmpty) {
-        final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
-        if (showSpeakers && speaker != null) {
-          buffer.writeln(
-              '${speakerLabel(speaker)}: ${widget.transcriptionHistory[i]}');
-        } else {
-          buffer.writeln(widget.transcriptionHistory[i]);
-        }
+        buffer.writeln(widget.transcriptionHistory[i]);
       }
       if (i < widget.translationHistory.length &&
           widget.translationHistory[i].trim().isNotEmpty) {
@@ -126,12 +109,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       }
     }
     if (widget.transcriptionDraft.isNotEmpty) {
-      if (showSpeakers && widget.draftSpeaker != null) {
-        buffer.writeln(
-            '${speakerLabel(widget.draftSpeaker!)}: ${widget.transcriptionDraft}');
-      } else {
-        buffer.writeln(widget.transcriptionDraft);
-      }
+      buffer.writeln(widget.transcriptionDraft);
     }
     if (widget.translationDraft.isNotEmpty) {
       buffer.writeln(widget.translationDraft);
@@ -163,7 +141,6 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         widget.transcriptionHistory.length, widget.translationHistory.length);
     bool addedAny = false;
     bool translationDraftPlaced = false;
-    final showSpeakers = _hasMultipleSpeakers;
 
     for (int i = 0; i < rawCount; i++) {
       final hasTranscript = i < widget.transcriptionHistory.length &&
@@ -178,10 +155,8 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       if (addedAny) widgets.add(const SizedBox(height: 12));
 
       if (hasTranscript) {
-        final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
         widgets.add(_buildTranscriptionBlock(
           widget.transcriptionHistory[i],
-          speaker: showSpeakers ? speaker : null,
         ));
       }
 
@@ -214,7 +189,6 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
   @override
   Widget build(BuildContext context) {
     final (:widgets, :translationDraftPlaced) = _buildPairedWidgets();
-    final showSpeakers = _hasMultipleSpeakers;
 
     return Container(
       decoration: BoxDecoration(
@@ -297,7 +271,6 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                     _buildTranscriptionBlock(
                       widget.transcriptionDraft,
                       isDraft: true,
-                      speaker: showSpeakers ? widget.draftSpeaker : null,
                     ),
                   ],
                   // Translation draft at bottom only if not already shown in-place
@@ -316,8 +289,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     );
   }
 
-  Widget _buildTranscriptionBlock(String text,
-      {bool isDraft = false, String? speaker}) {
+  Widget _buildTranscriptionBlock(String text, {bool isDraft = false}) {
     final baseStyle = TextStyle(
       fontSize: AppConstants.contentFontSize,
       color: isDraft
@@ -333,17 +305,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         color: const Color(0xFFF0F0F0),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: speaker != null
-          ? Text.rich(
-              TextSpan(children: [
-                TextSpan(
-                  text: '${speakerLabel(speaker)}: ',
-                  style: baseStyle.copyWith(fontWeight: FontWeight.w600),
-                ),
-                TextSpan(text: text, style: baseStyle),
-              ]),
-            )
-          : Text(text, style: baseStyle),
+      child: Text(text, style: baseStyle),
     );
   }
 

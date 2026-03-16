@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../providers/speaker_provider.dart';
 import '../../utils/constants.dart';
 
 class TranscriptPanel extends StatefulWidget {
@@ -14,8 +13,6 @@ class TranscriptPanel extends StatefulWidget {
   final bool showSpeakerToggle;
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
-  final List<String?> speakers;
-  final String? draftSpeaker;
 
   const TranscriptPanel({
     super.key,
@@ -28,8 +25,6 @@ class TranscriptPanel extends StatefulWidget {
     this.showSpeakerToggle = false,
     this.speakerEnabled = false,
     this.onSpeakerToggle,
-    this.speakers = const [],
-    this.draftSpeaker,
   });
 
   @override
@@ -103,27 +98,14 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     _userScrolledUp = (maxScroll - currentScroll) > 50;
   }
 
-  bool get _hasMultipleSpeakers {
-    final unique = widget.speakers.where((s) => s != null).toSet();
-    return unique.length > 1;
-  }
-
-  String _formatLine(String text, String? speaker) {
-    if (!_hasMultipleSpeakers || speaker == null || text.trim().isEmpty) {
-      return text;
-    }
-    return '${speakerLabel(speaker)}: $text';
-  }
-
   String get _allText {
     final lines = <String>[];
     for (int i = 0; i < widget.history.length; i++) {
       if (widget.history[i].trim().isEmpty) continue;
-      final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
-      lines.add(_formatLine(widget.history[i], speaker));
+      lines.add(widget.history[i]);
     }
     if (widget.draft.isNotEmpty) {
-      lines.add(_formatLine(widget.draft, widget.draftSpeaker));
+      lines.add(widget.draft);
     }
     return lines.join('\n');
   }
@@ -143,8 +125,6 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final showSpeakers = _hasMultipleSpeakers;
-
     return Container(
       decoration: BoxDecoration(
         color: AppConstants.panelColor,
@@ -225,18 +205,28 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                     if (widget.history[i].trim().isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
-                        child: _buildHistoryLine(
+                        child: Text(
                           widget.history[i],
-                          i < widget.speakers.length
-                              ? widget.speakers[i]
-                              : null,
-                          showSpeakers,
+                          style: TextStyle(
+                            fontSize: AppConstants.contentFontSize,
+                            color: AppConstants.textPrimary
+                                .withOpacity(AppConstants.historyOpacity),
+                            height: 1.5,
+                          ),
                         ),
                       ),
                   if (widget.draft.isNotEmpty || widget.showEllipsis)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
-                      child: _buildDraftWidget(showSpeakers),
+                      child: Text(
+                        _buildDraftText(),
+                        style: const TextStyle(
+                          fontSize: AppConstants.contentFontSize,
+                          color: AppConstants.textPrimary,
+                          fontWeight: FontWeight.w400,
+                          height: 1.5,
+                        ),
+                      ),
                     ),
                 ],
               ),
@@ -244,52 +234,6 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildHistoryLine(String text, String? speaker, bool showSpeakers) {
-    final historyStyle = TextStyle(
-      fontSize: AppConstants.contentFontSize,
-      color: AppConstants.textPrimary.withOpacity(AppConstants.historyOpacity),
-      height: 1.5,
-    );
-
-    if (!showSpeakers || speaker == null) {
-      return Text(text, style: historyStyle);
-    }
-
-    return Text.rich(
-      TextSpan(children: [
-        TextSpan(
-          text: '${speakerLabel(speaker)}: ',
-          style: historyStyle.copyWith(fontWeight: FontWeight.w600),
-        ),
-        TextSpan(text: text, style: historyStyle),
-      ]),
-    );
-  }
-
-  Widget _buildDraftWidget(bool showSpeakers) {
-    final draftText = _buildDraftText();
-    const draftStyle = TextStyle(
-      fontSize: AppConstants.contentFontSize,
-      color: AppConstants.textPrimary,
-      fontWeight: FontWeight.w400,
-      height: 1.5,
-    );
-
-    if (!showSpeakers || widget.draftSpeaker == null || widget.draft.isEmpty) {
-      return Text(draftText, style: draftStyle);
-    }
-
-    return Text.rich(
-      TextSpan(children: [
-        TextSpan(
-          text: '${speakerLabel(widget.draftSpeaker!)}: ',
-          style: draftStyle.copyWith(fontWeight: FontWeight.w600),
-        ),
-        TextSpan(text: draftText, style: draftStyle),
-      ]),
     );
   }
 

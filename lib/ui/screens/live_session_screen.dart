@@ -188,13 +188,13 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
       }
     };
 
-    _sonioxService.onTranscriptionDraft = (draft, _) {
+    _sonioxService.onTranscriptionDraft = (draft) {
       // Suppress if TTS is playing or wrong language detected
       if (_ttsMuting || _wrongLanguageStreak >= 2) return;
       if (mounted) setState(() => _myDraft = draft);
     };
 
-    _sonioxService.onTranscriptionCompleted = (transcript, _) {
+    _sonioxService.onTranscriptionCompleted = (transcript) {
       // Suppress if TTS is playing or wrong language streak
       if (_ttsMuting || _wrongLanguageStreak >= 2) {
         // Reset draft silently
@@ -233,7 +233,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
       _relayService.sendTranslationDraft(draft);
     };
 
-    _sonioxService.onTranslationCompleted = (translation, _) {
+    _sonioxService.onTranslationCompleted = (translation) {
       if (_ttsMuting || _wrongLanguageStreak >= 2) return;
       if (translation.isNotEmpty) {
         _relayService.sendTranslationCompleted(translation);

@@ -28,9 +28,6 @@ class SonioxRealtimeService {
   // Stored for reconnect
   String? _targetLanguageCode;
 
-  // Speaker diarization
-  String? _currentSpeaker;
-
   // Language identification
   String? _lastDetectedLanguage;
 
@@ -54,10 +51,10 @@ class SonioxRealtimeService {
   static const _rotationIntervalMinutes = 10;
 
   // Callbacks
-  Function(String draft, String? speaker)? onTranscriptionDraft;
-  Function(String transcript, String? speaker)? onTranscriptionCompleted;
+  Function(String draft)? onTranscriptionDraft;
+  Function(String transcript)? onTranscriptionCompleted;
   Function(String draft)? onTranslationDraft;
-  Function(String translation, String? speaker)? onTranslationCompleted;
+  Function(String translation)? onTranslationCompleted;
   Function(String error)? onError;
   Function()? onConnected;
   Function(String language)? onLanguageDetected;
@@ -98,7 +95,6 @@ class SonioxRealtimeService {
         'num_channels': AppConstants.numChannels,
         'enable_endpoint_detection': true,
         'max_endpoint_delay_ms': AppConstants.endpointDelayMs,
-        'enable_speaker_diarization': true,
         'enable_language_identification': true,
       };
 
@@ -227,7 +223,7 @@ class SonioxRealtimeService {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
       // Only emit if it's not garbage (passes repetition check)
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text, _currentSpeaker);
+        onTranslationCompleted?.call(text);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -236,7 +232,7 @@ class SonioxRealtimeService {
       final text = _pendingUtterance.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         lastCompletedWords = List.from(_pendingWords);
-        onTranscriptionCompleted?.call(text, _currentSpeaker);
+        onTranscriptionCompleted?.call(text);
       }
       _pendingUtterance = '';
       _pendingWords.clear();
@@ -319,9 +315,7 @@ class SonioxRealtimeService {
     for (final token in tokens) {
       final text = token['text'] as String? ?? '';
       final isFinal = token['is_final'] as bool? ?? false;
-      final speaker = token['speaker'] as String?;
       final language = token['language'] as String?;
-      if (speaker != null) _currentSpeaker = speaker;
       if (language != null && language != _lastDetectedLanguage) {
         _lastDetectedLanguage = language;
         onLanguageDetected?.call(language);
@@ -346,7 +340,7 @@ class SonioxRealtimeService {
       final text = _pendingUtterance.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         lastCompletedWords = List.from(_pendingWords);
-        onTranscriptionCompleted?.call(text, _currentSpeaker);
+        onTranscriptionCompleted?.call(text);
       }
       _pendingUtterance = '';
       _provisionalText = '';
@@ -355,7 +349,7 @@ class SonioxRealtimeService {
       return;
     }
 
-    onTranscriptionDraft?.call(_provisionalText, _currentSpeaker);
+    onTranscriptionDraft?.call(_provisionalText);
 
     if (hadProvisional &&
         _provisionalText.isEmpty &&
@@ -377,13 +371,13 @@ class SonioxRealtimeService {
 
       // Always signal translation completion at endpoint (even if empty)
       // so line-by-line slot alignment stays in sync.
-      onTranslationCompleted?.call(fullTranslation, _currentSpeaker);
+      onTranslationCompleted?.call(fullTranslation);
       _pendingTranslation = '';
       _provisionalTranslation = '';
 
       lastCompletedWords = List.from(_pendingWords);
       _pendingWords.clear();
-      onTranscriptionCompleted?.call(_pendingUtterance.trim(), _currentSpeaker);
+      onTranscriptionCompleted?.call(_pendingUtterance.trim());
       _pendingUtterance = '';
     }
   }
@@ -419,7 +413,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.length > 2000) {
       final text = _pendingTranslation.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text, _currentSpeaker);
+        onTranslationCompleted?.call(text);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -535,7 +529,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.isNotEmpty) {
       final text = _pendingTranslation.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text, _currentSpeaker);
+        onTranslationCompleted?.call(text);
       }
       _pendingTranslation = '';
     }
@@ -544,7 +538,7 @@ class SonioxRealtimeService {
     if (_pendingUtterance.isNotEmpty) {
       lastCompletedWords = List.from(_pendingWords);
       _pendingWords.clear();
-      onTranscriptionCompleted?.call(_pendingUtterance.trim(), _currentSpeaker);
+      onTranscriptionCompleted?.call(_pendingUtterance.trim());
       _pendingUtterance = '';
     }
 
