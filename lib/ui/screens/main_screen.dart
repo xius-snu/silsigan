@@ -90,8 +90,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     };
-    // Restore any autosaved draft from a previous session
+    // Restore saved languages and autosaved draft
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _restoreSavedLanguages();
       _restoreAutosaveDraft();
       _checkForUpdate();
     });
@@ -834,6 +835,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
+  Future<void> _restoreSavedLanguages() async {
+    final targetLang = await loadSavedTargetLanguage();
+    ref.read(targetLanguageProvider.notifier).state = targetLang;
+    final convLangs = await loadSavedConversationLanguages();
+    ref.read(myLanguageProvider.notifier).state = convLangs.my;
+    ref.read(theirLanguageProvider.notifier).state = convLangs.their;
+  }
+
   Future<void> _restoreAutosaveDraft() async {
     try {
       // Only restore if still idle (user hasn't started recording already)
@@ -1074,6 +1083,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final theirLang = ref.read(theirLanguageProvider);
     ref.read(myLanguageProvider.notifier).state = theirLang;
     ref.read(theirLanguageProvider.notifier).state = myLang;
+    saveConversationLanguages(theirLang, myLang);
   }
 
   void _resetState() {
@@ -1242,10 +1252,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onTopMicStop: _stopConversationRecording,
                   onSwapLanguages: _swapConversationLanguages,
                   onClear: _clearConversation,
-                  onMyLanguageChanged: (lang) =>
-                      ref.read(myLanguageProvider.notifier).state = lang,
-                  onTheirLanguageChanged: (lang) =>
-                      ref.read(theirLanguageProvider.notifier).state = lang,
+                  onMyLanguageChanged: (lang) {
+                    ref.read(myLanguageProvider.notifier).state = lang;
+                    saveConversationLanguages(
+                        lang, ref.read(theirLanguageProvider));
+                  },
+                  onTheirLanguageChanged: (lang) {
+                    ref.read(theirLanguageProvider.notifier).state = lang;
+                    saveConversationLanguages(
+                        ref.read(myLanguageProvider), lang);
+                  },
                 ),
               ),
             ] else ...[
@@ -1338,6 +1354,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           onSelected: (lang) {
                             ref.read(targetLanguageProvider.notifier).state =
                                 lang;
+                            saveTargetLanguage(lang);
                           },
                           offset: const Offset(0, -160),
                           itemBuilder: (context) => TargetLanguage.values

@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'target_language_provider.dart';
 
 enum ConversationSpeaker { bottom, top }
@@ -46,3 +47,27 @@ final myLanguageProvider =
 /// Top person's language (defaults to Vietnamese)
 final theirLanguageProvider =
     StateProvider<TargetLanguage>((ref) => TargetLanguage.vietnamese);
+
+/// Load saved conversation languages on app start
+Future<({TargetLanguage my, TargetLanguage their})>
+    loadSavedConversationLanguages() async {
+  final prefs = await SharedPreferences.getInstance();
+  final myCode = prefs.getString('conv_my_language');
+  final theirCode = prefs.getString('conv_their_language');
+  return (
+    my: myCode != null
+        ? TargetLanguage.fromCode(myCode)
+        : TargetLanguage.korean,
+    their: theirCode != null
+        ? TargetLanguage.fromCode(theirCode)
+        : TargetLanguage.vietnamese,
+  );
+}
+
+/// Persist conversation language selection
+Future<void> saveConversationLanguages(
+    TargetLanguage my, TargetLanguage their) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('conv_my_language', my.code);
+  await prefs.setString('conv_their_language', their.code);
+}
