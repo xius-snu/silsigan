@@ -70,6 +70,10 @@ class ConversationPanel extends StatefulWidget {
 class _ConversationPanelState extends State<ConversationPanel> {
   final ScrollController _bottomScrollController = ScrollController();
   final ScrollController _topScrollController = ScrollController();
+  bool _bottomUserScrolled = false;
+  bool _topUserScrolled = false;
+  Timer? _bottomResumeTimer;
+  Timer? _topResumeTimer;
   Timer? _ellipsisTimer;
   int _ellipsisCount = 3;
 
@@ -77,6 +81,41 @@ class _ConversationPanelState extends State<ConversationPanel> {
   void initState() {
     super.initState();
     _startEllipsisTimer();
+    _bottomScrollController.addListener(_onBottomScroll);
+    _topScrollController.addListener(_onTopScroll);
+  }
+
+  @override
+  void didUpdateWidget(ConversationPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Auto-scroll when new messages or drafts change
+    final contentChanged = widget.messages.length != oldWidget.messages.length ||
+        widget.draftOriginal != oldWidget.draftOriginal ||
+        widget.draftTranslated != oldWidget.draftTranslated;
+    if (!contentChanged) return;
+
+    if (!_bottomUserScrolled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_bottomScrollController.hasClients) {
+          _bottomScrollController.animateTo(
+            0,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+    if (!_topUserScrolled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_topScrollController.hasClients) {
+          _topScrollController.animateTo(
+            0,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
   }
 
   void _startEllipsisTimer() {
@@ -88,9 +127,64 @@ class _ConversationPanelState extends State<ConversationPanel> {
   @override
   void dispose() {
     _ellipsisTimer?.cancel();
+    _bottomResumeTimer?.cancel();
+    _topResumeTimer?.cancel();
+    _bottomScrollController.removeListener(_onBottomScroll);
+    _topScrollController.removeListener(_onTopScroll);
     _bottomScrollController.dispose();
     _topScrollController.dispose();
     super.dispose();
+  }
+
+  // Reversed ListView: offset 0 = newest (bottom), offset > 0 = scrolled away
+  void _onBottomScroll() {
+    if (!_bottomScrollController.hasClients) return;
+    if (_bottomScrollController.offset > 50) {
+      _bottomUserScrolled = true;
+      _bottomResumeTimer?.cancel();
+      _bottomResumeTimer =
+          Timer(const Duration(seconds: 3), _resumeBottomAutoScroll);
+    } else {
+      _bottomUserScrolled = false;
+      _bottomResumeTimer?.cancel();
+    }
+  }
+
+  void _onTopScroll() {
+    if (!_topScrollController.hasClients) return;
+    if (_topScrollController.offset > 50) {
+      _topUserScrolled = true;
+      _topResumeTimer?.cancel();
+      _topResumeTimer =
+          Timer(const Duration(seconds: 3), _resumeTopAutoScroll);
+    } else {
+      _topUserScrolled = false;
+      _topResumeTimer?.cancel();
+    }
+  }
+
+  void _resumeBottomAutoScroll() {
+    if (!mounted) return;
+    _bottomUserScrolled = false;
+    if (_bottomScrollController.hasClients) {
+      _bottomScrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _resumeTopAutoScroll() {
+    if (!mounted) return;
+    _topUserScrolled = false;
+    if (_topScrollController.hasClients) {
+      _topScrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   bool get _isRecording =>

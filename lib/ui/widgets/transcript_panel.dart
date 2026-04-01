@@ -34,6 +34,7 @@ class TranscriptPanel extends StatefulWidget {
 class _TranscriptPanelState extends State<TranscriptPanel> {
   final ScrollController _scrollController = ScrollController();
   bool _userScrolledUp = false;
+  Timer? _resumeTimer;
   Timer? _cursorTimer;
   bool _cursorVisible = true;
   Timer? _ellipsisTimer;
@@ -86,6 +87,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
   void dispose() {
     _cursorTimer?.cancel();
     _ellipsisTimer?.cancel();
+    _resumeTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
@@ -95,7 +97,28 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     if (!_scrollController.hasClients) return;
     final maxScroll = _scrollController.position.maxScrollExtent;
     final currentScroll = _scrollController.offset;
-    _userScrolledUp = (maxScroll - currentScroll) > 50;
+    final isAway = (maxScroll - currentScroll) > 50;
+
+    if (isAway) {
+      _userScrolledUp = true;
+      _resumeTimer?.cancel();
+      _resumeTimer = Timer(const Duration(seconds: 3), _resumeAutoScroll);
+    } else {
+      _userScrolledUp = false;
+      _resumeTimer?.cancel();
+    }
+  }
+
+  void _resumeAutoScroll() {
+    if (!mounted) return;
+    _userScrolledUp = false;
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   String get _allText {

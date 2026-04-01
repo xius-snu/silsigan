@@ -15,7 +15,13 @@ class SonioxRealtimeService {
   bool _intentionallyClosed = false;
   bool _isReconnecting = false;
   bool _isRotating = false;
-  static const _apiKey = String.fromEnvironment('SONIOX_API_KEY');
+
+  // Auth credentials for proxy — set before calling connect()
+  String? userId;
+  String? authToken;
+
+  // Private Soniox key mode — set via --dart-define=SONIOX_PRIVATE=true
+  static const _isPrivate = String.fromEnvironment('SONIOX_PRIVATE');
 
   // Transcription token state
   String _pendingUtterance = '';
@@ -82,13 +88,19 @@ class SonioxRealtimeService {
 
   Future<void> _doConnect() async {
     try {
+      final proxyUrl = Uri.parse(AppConstants.sonioxProxyUrl).replace(
+        queryParameters: {
+          if (userId != null) 'userId': userId!,
+          if (authToken != null) 'token': authToken!,
+          if (_isPrivate == 'true') 'private': '1',
+        },
+      );
       _channel = IOWebSocketChannel.connect(
-        Uri.parse(AppConstants.sonioxRealtimeUrl),
+        proxyUrl,
         pingInterval: const Duration(seconds: 15),
       );
 
       final config = <String, dynamic>{
-        'api_key': _apiKey,
         'model': AppConstants.sonioxModel,
         'audio_format': AppConstants.audioFormat,
         'sample_rate': AppConstants.sampleRate,

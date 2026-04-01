@@ -4,9 +4,8 @@ class AppConstants {
   // Server
   static const serverBaseUrl = 'https://silsigan.onrender.com';
 
-  // Soniox
-  static const sonioxRealtimeUrl =
-      'wss://stt-rt.soniox.com/transcribe-websocket';
+  // Soniox (proxied through our server)
+  static const sonioxProxyUrl = 'wss://silsigan.onrender.com/ws/soniox';
   static const sonioxModel = 'stt-rt-v4';
   static const transcriptionLanguage = 'ko';
 

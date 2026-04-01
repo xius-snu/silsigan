@@ -256,6 +256,9 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
 
     try {
       await BackgroundService.startRecordingService();
+      await UserService.instance.ensureAuthenticated();
+      _sonioxService.userId = UserService.instance.userId;
+      _sonioxService.authToken = UserService.instance.authToken;
       await _sonioxService.connect(
         targetLanguageCode: widget.partnerLanguage,
         forceTranslation: true,

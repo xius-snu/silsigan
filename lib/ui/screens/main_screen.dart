@@ -508,6 +508,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     try {
       // Start foreground service first (Android) to prevent OS killing the app
       await BackgroundService.startRecordingService();
+      await UserService.instance.ensureAuthenticated();
+      _sonioxService.userId = UserService.instance.userId;
+      _sonioxService.authToken = UserService.instance.authToken;
       await _sonioxService.connect(
         targetLanguageCode: targetLanguage.code,
         forceTranslation: targetLanguage == TargetLanguage.korean,
@@ -995,6 +998,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     try {
       await BackgroundService.startRecordingService();
+      await UserService.instance.ensureAuthenticated();
+      _sonioxService.userId = UserService.instance.userId;
+      _sonioxService.authToken = UserService.instance.authToken;
       await _sonioxService.connect(
         targetLanguageCode: targetLang.code,
         forceTranslation: true,
