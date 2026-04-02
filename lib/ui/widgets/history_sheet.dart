@@ -12,6 +12,7 @@ import '../../models/word_timestamp.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
 import '../../services/sync_service.dart';
+import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 import 'session_card.dart';
 
@@ -341,6 +342,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       await DatabaseService.instance.deleteSession(_selectedSession!.id!);
       // Delete from server (fire-and-forget)
       SyncService.instance.deleteFromServer(createdAt);
+      UserService.instance.reportActivity('session_delete');
       ref.invalidate(sessionHistoryProvider);
       _goBackToList();
     }
@@ -357,9 +359,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       text.writeln();
       text.writeln('── TRANSCRIPTION ──');
       text.writeln(session.koreanFull);
-      text.writeln();
-      text.writeln('── TRANSLATION ──');
-      text.writeln(session.vietnameseFull);
+      if (session.vietnameseFull.trim().isNotEmpty) {
+        text.writeln();
+        text.writeln('── TRANSLATION ──');
+        text.writeln(session.vietnameseFull);
+      }
 
       await Share.share(
         text.toString(),
@@ -610,12 +614,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                     fullText: session.koreanFull,
                     timestamps: hasAudio ? _parsedTimestamps : null,
                   ),
-                  const SizedBox(height: 5),
-                  _buildTextBox(
-                    label: 'TRANSLATION',
-                    lines: vietnameseLines,
-                    fullText: session.vietnameseFull,
-                  ),
+                  if (session.vietnameseFull.trim().isNotEmpty) ...[
+                    const SizedBox(height: 5),
+                    _buildTextBox(
+                      label: 'TRANSLATION',
+                      lines: vietnameseLines,
+                      fullText: session.vietnameseFull,
+                    ),
+                  ],
                   const SizedBox(height: 16),
                 ],
               ),

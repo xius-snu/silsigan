@@ -254,13 +254,14 @@ class SonioxRealtimeService {
       _pendingTranslation = '';
       _provisionalTranslation = '';
     }
-    if (_pendingUtterance.isNotEmpty) {
-      final text = _pendingUtterance.trim();
+    if (_pendingUtterance.isNotEmpty || _provisionalText.isNotEmpty) {
+      final text = (_pendingUtterance + _provisionalText).trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         lastCompletedWords = List.from(_pendingWords);
         onTranscriptionCompleted?.call(text);
       }
       _pendingUtterance = '';
+      _provisionalText = '';
       _pendingWords.clear();
     }
   }
@@ -375,7 +376,7 @@ class SonioxRealtimeService {
       return;
     }
 
-    onTranscriptionDraft?.call(_provisionalText);
+    onTranscriptionDraft?.call(_pendingUtterance + _provisionalText);
 
     if (hadProvisional &&
         _provisionalText.isEmpty &&
@@ -552,20 +553,26 @@ class SonioxRealtimeService {
     _subscription = null;
 
     // Flush translation first (fills the last segment's empty slot)
-    if (_pendingTranslation.isNotEmpty) {
-      final text = _pendingTranslation.trim();
+    if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
+      final text = (_pendingTranslation + _provisionalTranslation).trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         onTranslationCompleted?.call(text);
       }
       _pendingTranslation = '';
+      _provisionalTranslation = '';
     }
 
-    // Then flush any remaining pending utterance
-    if (_pendingUtterance.isNotEmpty) {
-      lastCompletedWords = List.from(_pendingWords);
-      _pendingWords.clear();
-      onTranscriptionCompleted?.call(_pendingUtterance.trim());
+    // Then flush any remaining pending utterance (include provisional
+    // text since user intentionally stopped — they saw it on screen)
+    if (_pendingUtterance.isNotEmpty || _provisionalText.isNotEmpty) {
+      final text = (_pendingUtterance + _provisionalText).trim();
+      if (text.isNotEmpty) {
+        lastCompletedWords = List.from(_pendingWords);
+        _pendingWords.clear();
+        onTranscriptionCompleted?.call(text);
+      }
       _pendingUtterance = '';
+      _provisionalText = '';
     }
 
     try {

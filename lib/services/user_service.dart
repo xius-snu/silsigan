@@ -41,7 +41,8 @@ class UserService {
     // Invalidate token if userId changed (e.g., upgrade from old device ID logic)
     final storedUserId = prefs.getString('auth_user_id');
     if (storedUserId != null && storedUserId != _userId) {
-      debugPrint('UserService: userId changed ($storedUserId → $_userId), clearing stale token');
+      debugPrint(
+          'UserService: userId changed ($storedUserId → $_userId), clearing stale token');
       _authToken = null;
       await prefs.remove('auth_token');
       await prefs.remove('auth_user_id');
@@ -62,7 +63,8 @@ class UserService {
     }
 
     _initialized = true;
-    debugPrint('UserService: init complete, userId=$_userId, hasToken=${_authToken != null}');
+    debugPrint(
+        'UserService: init complete, userId=$_userId, hasToken=${_authToken != null}');
   }
 
   Future<void> _register() async {
@@ -149,13 +151,15 @@ class UserService {
   }
 
   /// Fire-and-forget activity ping to server.
-  void reportActivity(String event) {
+  void reportActivity(String event, [Map<String, dynamic>? meta]) {
     if (_userId == null) return;
+    final body = <String, dynamic>{'userId': _userId, 'event': event};
+    if (meta != null) body['meta'] = meta;
     http
         .post(
           Uri.parse('$_baseUrl/api/user/activity'),
           headers: {'Content-Type': 'application/json'},
-          body: json.encode({'userId': _userId, 'event': event}),
+          body: json.encode(body),
         )
         .timeout(const Duration(seconds: 10))
         .catchError((_) => http.Response('', 500));

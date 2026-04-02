@@ -83,16 +83,18 @@ class SessionCard extends StatelessWidget {
                   color: AppConstants.textPrimary,
                 ),
               ),
-              const SizedBox(height: 3),
-              Text(
-                session.vietnamesePreview,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: AppConstants.textPrimary.withOpacity(0.7),
+              if (session.vietnamesePreview.trim().isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Text(
+                  session.vietnamesePreview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: AppConstants.textPrimary.withOpacity(0.7),
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
