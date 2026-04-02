@@ -129,6 +129,18 @@ async function start() {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_recorded_at TIMESTAMP`);
 
+    // Activity log table for analytics
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            event TEXT NOT NULL,
+            meta JSONB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_activity_log_user_date ON activity_log(user_id, created_at)`);
+
     // Saved sessions table (cloud sync)
     await pool.query(`
         CREATE TABLE IF NOT EXISTS saved_sessions (
@@ -218,9 +230,16 @@ async function start() {
     });
 
     fastify.post('/api/user/activity', async (req, reply) => {
-        const { userId, event } = req.body;
+        const { userId, event, meta } = req.body;
         if (!userId || !event) return reply.code(400).send({ error: 'Missing fields' });
         try {
+            // Log the event
+            await pool.query(
+                'INSERT INTO activity_log (user_id, event, meta) VALUES ($1, $2, $3)',
+                [userId, event, meta ? JSON.stringify(meta) : null]
+            );
+
+            // Update user timestamps
             if (event === 'app_open') {
                 await pool.query(
                     'UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE user_id = $1',
