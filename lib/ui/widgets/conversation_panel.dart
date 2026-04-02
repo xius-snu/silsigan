@@ -89,9 +89,10 @@ class _ConversationPanelState extends State<ConversationPanel> {
   void didUpdateWidget(ConversationPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Auto-scroll when new messages or drafts change
-    final contentChanged = widget.messages.length != oldWidget.messages.length ||
-        widget.draftOriginal != oldWidget.draftOriginal ||
-        widget.draftTranslated != oldWidget.draftTranslated;
+    final contentChanged =
+        widget.messages.length != oldWidget.messages.length ||
+            widget.draftOriginal != oldWidget.draftOriginal ||
+            widget.draftTranslated != oldWidget.draftTranslated;
     if (!contentChanged) return;
 
     if (!_bottomUserScrolled) {
@@ -155,8 +156,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
     if (_topScrollController.offset > 50) {
       _topUserScrolled = true;
       _topResumeTimer?.cancel();
-      _topResumeTimer =
-          Timer(const Duration(seconds: 3), _resumeTopAutoScroll);
+      _topResumeTimer = Timer(const Duration(seconds: 3), _resumeTopAutoScroll);
     } else {
       _topUserScrolled = false;
       _topResumeTimer?.cancel();
@@ -191,8 +191,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
       widget.recordingState == RecordingState.recording ||
       widget.recordingState == RecordingState.processing;
 
-  bool get _isProcessing =>
-      widget.recordingState == RecordingState.processing;
+  bool get _isProcessing => widget.recordingState == RecordingState.processing;
 
   String _bottomText(ConversationMessage msg) {
     if (msg.speaker == ConversationSpeaker.bottom) {
@@ -343,9 +342,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   // ── Top Half (teal, for the other person) ──
 
   Widget _buildTopHalf() {
-    final isMyMic =
-        widget.activeSpeaker == ConversationSpeaker.top && _isRecording;
-
     return Container(
       color: _ConvColors.topBg,
       child: Column(
@@ -359,7 +355,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
-              isActive: isMyMic,
+              isActive: _isRecording,
               isDisabled: _isProcessing,
               onStart: widget.onTopMicStart,
               onStop: widget.onTopMicStop,
@@ -374,9 +370,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   // ── Bottom Half (white, for me) ──
 
   Widget _buildBottomHalf() {
-    final isMyMic =
-        widget.activeSpeaker == ConversationSpeaker.bottom && _isRecording;
-
     return Container(
       color: _ConvColors.bottomBg,
       child: Column(
@@ -390,7 +383,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
-              isActive: isMyMic,
+              isActive: _isRecording,
               isDisabled: _isProcessing,
               onStart: widget.onBottomMicStart,
               onStop: widget.onBottomMicStop,
@@ -410,8 +403,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
   ) {
     // Build items in normal order, then reverse for the reversed ListView
     final items = <Widget>[
-      for (final msg in widget.messages)
-        _buildMessageBubble(msg, perspective),
+      for (final msg in widget.messages) _buildMessageBubble(msg, perspective),
       if (_isRecording && widget.activeSpeaker != null)
         _buildDraftBubble(perspective),
     ];
@@ -441,8 +433,9 @@ class _ConversationPanelState extends State<ConversationPanel> {
     Color bubbleColor;
     Color textColor;
     if (isTop) {
-      bubbleColor =
-          isMine ? _ConvColors.topMySpeechBubble : _ConvColors.topTheirSpeechBubble;
+      bubbleColor = isMine
+          ? _ConvColors.topMySpeechBubble
+          : _ConvColors.topTheirSpeechBubble;
       textColor =
           isMine ? _ConvColors.topMySpeechText : _ConvColors.topTheirSpeechText;
     } else {
@@ -567,16 +560,14 @@ class _ConversationPanelState extends State<ConversationPanel> {
         height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: tealTheme
-              ? Colors.white.withOpacity(0.2)
-              : Colors.grey.shade300,
+          color:
+              tealTheme ? Colors.white.withOpacity(0.2) : Colors.grey.shade300,
         ),
         child: Icon(
           Icons.mic_off,
           size: 28,
-          color: tealTheme
-              ? Colors.white.withOpacity(0.4)
-              : Colors.grey.shade500,
+          color:
+              tealTheme ? Colors.white.withOpacity(0.4) : Colors.grey.shade500,
         ),
       );
     }

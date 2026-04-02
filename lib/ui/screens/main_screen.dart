@@ -597,6 +597,50 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
     if (confirmed != true) return;
 
+    // Get next session number for default title
+    final sessionCount = await DatabaseService.instance.getSessionCount();
+    final defaultTitle = 'Session ${sessionCount + 1}';
+
+    if (!mounted) return;
+
+    // Show title input dialog
+    final titleController = TextEditingController(text: defaultTitle);
+    var firstTap = true;
+    final title = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Name This Session'),
+          content: TextField(
+            controller: titleController,
+            autofocus: false,
+            decoration: const InputDecoration(
+              hintText: 'Enter session name',
+            ),
+            onTap: () {
+              if (firstTap) {
+                firstTap = false;
+                titleController.selection = TextSelection(
+                  baseOffset: 0,
+                  extentOffset: titleController.text.length,
+                );
+              }
+            },
+            onSubmitted: (_) => Navigator.pop(ctx, titleController.text.trim()),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, titleController.text.trim()),
+              child: const Text('Done'),
+            ),
+          ],
+        );
+      },
+    );
+
+    final sessionTitle =
+        (title != null && title.isNotEmpty) ? title : defaultTitle;
+
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     final rawKoreanHistory = ref.read(koreanHistoryProvider);
@@ -647,6 +691,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           : vietnameseFull,
       audioPath: audioPath,
       timestampsJson: timestampsJson,
+      title: sessionTitle,
     );
 
     try {
@@ -916,12 +961,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // ── Conversation Mode Recording ──────────────────────────────────
 
-  Future<void> _startConversationRecording(ConversationSpeaker speaker) async {
-    // If already recording on the other side, stop it first then flip
-    final currentSpeaker = ref.read(activeConversationSpeakerProvider);
-    if (currentSpeaker != null && currentSpeaker != speaker && !_isStopping) {
-      await _stopConversationRecordingSilent();
-    }
+  Future<void> _startConversationRecording() async {
+    // If already recording, ignore (both buttons do the same thing)
+    if (ref.read(recordingStateProvider) == RecordingState.recording) return;
 
     final needsPermission = Platform.isAndroid || Platform.isIOS;
     final status = needsPermission
@@ -929,19 +971,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
         : PermissionStatus.granted;
     if (!status.isGranted) return;
 
-    ref.read(activeConversationSpeakerProvider.notifier).state = speaker;
+    ref.read(activeConversationSpeakerProvider.notifier).state =
+        ConversationSpeaker.bottom;
     ref.read(conversationDraftOriginalProvider.notifier).state = '';
     ref.read(conversationDraftTranslatedProvider.notifier).state = '';
 
-    // Determine source and target language based on who is speaking
     final myLang = ref.read(myLanguageProvider);
     final theirLang = ref.read(theirLanguageProvider);
-    // Bottom person speaks myLang → translate to theirLang
-    // Top person speaks theirLang → translate to myLang
-    final sourceLang =
-        speaker == ConversationSpeaker.bottom ? myLang : theirLang;
-    final targetLang =
-        speaker == ConversationSpeaker.bottom ? theirLang : myLang;
 
     // Set up Soniox callbacks for conversation mode
     _sonioxService.onTranscriptionDraft = (draft) {
@@ -950,9 +986,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
-        // Add message with original text, translation will be filled by onTranslationCompleted
+        // Use the current detected speaker (set by onLanguageDetected)
+        final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
+            ConversationSpeaker.bottom;
         final msg = ConversationMessage(
-          speaker: speaker,
+          speaker: currentSpeaker,
           originalText: transcript,
         );
         ref.read(conversationMessagesProvider.notifier).update(
@@ -968,11 +1006,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
-        // Fill translation on the last message from this speaker that has no translation
+        final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
+            ConversationSpeaker.bottom;
         ref.read(conversationMessagesProvider.notifier).update((state) {
           final updated = List<ConversationMessage>.from(state);
           for (int i = updated.length - 1; i >= 0; i--) {
-            if (updated[i].speaker == speaker &&
+            if (updated[i].speaker == currentSpeaker &&
                 updated[i].translatedText.isEmpty) {
               updated[i] = updated[i].copyWith(translatedText: translation);
               break;
@@ -986,6 +1025,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onLanguageDetected = (language) {
       ref.read(detectedLanguageProvider.notifier).state = language;
+      // Route speech to correct side based on detected language
+      if (language == myLang.code) {
+        ref.read(activeConversationSpeakerProvider.notifier).state =
+            ConversationSpeaker.bottom;
+      } else if (language == theirLang.code) {
+        ref.read(activeConversationSpeakerProvider.notifier).state =
+            ConversationSpeaker.top;
+      }
     };
 
     _sonioxService.onError = (error) {
@@ -1011,9 +1058,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
       await _sonioxService.connect(
-        targetLanguageCode: targetLang.code,
-        forceTranslation: true,
-        languageHint: sourceLang.code,
+        twoWayLanguageCodes: [myLang.code, theirLang.code],
       );
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
@@ -1027,21 +1072,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     }
-  }
-
-  /// Stop recording without resetting to idle — used when flipping sides.
-  Future<void> _stopConversationRecordingSilent() async {
-    if (_isStopping) return;
-    _isStopping = true;
-    try {
-      await _audioService.stop().timeout(const Duration(seconds: 5));
-    } catch (_) {}
-    try {
-      _sonioxService.finalize();
-      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
-    } catch (_) {}
-    _isStopping = false;
-    _audioService.clearRecording();
   }
 
   Future<void> _stopConversationRecording() async {
@@ -1239,16 +1269,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 child: ConversationPanel(
                   messages: ref.watch(conversationMessagesProvider),
                   draftOriginal: ref.watch(conversationDraftOriginalProvider),
-                  draftTranslated: ref.watch(conversationDraftTranslatedProvider),
+                  draftTranslated:
+                      ref.watch(conversationDraftTranslatedProvider),
                   activeSpeaker: ref.watch(activeConversationSpeakerProvider),
                   recordingState: recordingState,
                   myLanguage: ref.watch(myLanguageProvider),
                   theirLanguage: ref.watch(theirLanguageProvider),
-                  onBottomMicStart: () =>
-                      _startConversationRecording(ConversationSpeaker.bottom),
+                  onBottomMicStart: _startConversationRecording,
                   onBottomMicStop: _stopConversationRecording,
-                  onTopMicStart: () =>
-                      _startConversationRecording(ConversationSpeaker.top),
+                  onTopMicStart: _startConversationRecording,
                   onTopMicStop: _stopConversationRecording,
                   onSwapLanguages: _swapConversationLanguages,
                   onClear: _clearConversation,
@@ -1271,7 +1300,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     history: koreanHistory,
                     draft: koreanDraft,
                     label: 'Transcription',
-                    showCursor: isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                    showCursor:
+                        isRecordingOrProcessing && koreanDraft.isNotEmpty,
                     roundedTop: true,
                   ),
                 ),

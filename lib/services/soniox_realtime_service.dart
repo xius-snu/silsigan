@@ -33,6 +33,7 @@ class SonioxRealtimeService {
 
   // Stored for reconnect
   String? _targetLanguageCode;
+  List<String>? _twoWayLanguageCodes;
 
   // Language identification
   String? _lastDetectedLanguage;
@@ -72,12 +73,14 @@ class SonioxRealtimeService {
 
   Future<void> connect({
     String? targetLanguageCode,
+    List<String>? twoWayLanguageCodes,
     bool forceTranslation = false,
     String? languageHint,
   }) async {
     _intentionallyClosed = false;
     _reconnectAttempts = 0;
     _targetLanguageCode = targetLanguageCode;
+    _twoWayLanguageCodes = twoWayLanguageCodes;
     _forceTranslation = forceTranslation;
     _languageHint = languageHint;
     _resetTokenState();
@@ -110,13 +113,24 @@ class SonioxRealtimeService {
         'enable_language_identification': true,
       };
 
-      // Only send language hint if provided (empty = let Soniox auto-detect)
-      final hint = _languageHint ?? AppConstants.transcriptionLanguage;
-      if (hint.isNotEmpty) {
-        config['language_hints'] = [hint];
+      // Language hints
+      if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
+        config['language_hints'] = _twoWayLanguageCodes;
+      } else {
+        final hint = _languageHint ?? AppConstants.transcriptionLanguage;
+        if (hint.isNotEmpty) {
+          config['language_hints'] = [hint];
+        }
       }
 
-      if (_targetLanguageCode != null &&
+      // Translation config
+      if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
+        config['translation'] = {
+          'type': 'two_way',
+          'language_a': _twoWayLanguageCodes![0],
+          'language_b': _twoWayLanguageCodes![1],
+        };
+      } else if (_targetLanguageCode != null &&
           (_forceTranslation ||
               _targetLanguageCode != AppConstants.transcriptionLanguage)) {
         config['translation'] = {

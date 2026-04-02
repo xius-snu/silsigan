@@ -20,7 +20,7 @@ class DatabaseService {
     final fullPath = '$dbPath/silsigan.db';
     return openDatabase(
       fullPath,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE sessions (
@@ -31,7 +31,8 @@ class DatabaseService {
             korean_preview TEXT NOT NULL,
             vietnamese_preview TEXT NOT NULL,
             audio_path TEXT,
-            timestamps_json TEXT
+            timestamps_json TEXT,
+            title TEXT
           )
         ''');
         await db.execute('''
@@ -69,6 +70,11 @@ class DatabaseService {
               updated_at TEXT NOT NULL
             )
           ''');
+        }
+        if (oldVersion < 5) {
+          await db.execute(
+            'ALTER TABLE sessions ADD COLUMN title TEXT',
+          );
         }
       },
     );
@@ -122,6 +128,22 @@ class DatabaseService {
   Future<int> insertSession(TranscriptSession session) async {
     final db = await database;
     return db.insert('sessions', session.toMap());
+  }
+
+  Future<int> getSessionCount() async {
+    final db = await database;
+    final result = await db.rawQuery('SELECT COUNT(*) as cnt FROM sessions');
+    return (result.first['cnt'] as int?) ?? 0;
+  }
+
+  Future<void> updateSessionTitle(int id, String title) async {
+    final db = await database;
+    await db.update(
+      'sessions',
+      {'title': title},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<String> exportAllSessionsAsJson() async {

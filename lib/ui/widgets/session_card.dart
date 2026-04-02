@@ -16,8 +16,18 @@ class SessionCard extends StatelessWidget {
     try {
       final dt = DateTime.parse(isoDate);
       final months = [
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
       ];
       final hour = dt.hour.toString().padLeft(2, '0');
       final minute = dt.minute.toString().padLeft(2, '0');
@@ -45,11 +55,22 @@ class SessionCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
+                session.title ?? _formatDate(session.createdAt),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: AppConstants.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
                 _formatDate(session.createdAt),
                 style: TextStyle(
-                  fontSize: 13,
-                  color: AppConstants.textSecondary.withOpacity(0.6),
-                  fontWeight: FontWeight.w500,
+                  fontSize: 12,
+                  color: AppConstants.textSecondary.withOpacity(0.5),
+                  fontWeight: FontWeight.w400,
                 ),
               ),
               const SizedBox(height: 10),
@@ -58,17 +79,17 @@ class SessionCard extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  fontSize: 15,
+                  fontSize: 14,
                   color: AppConstants.textPrimary,
                 ),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 3),
               Text(
                 session.vietnamesePreview,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 15,
+                  fontSize: 14,
                   color: AppConstants.textPrimary.withOpacity(0.7),
                 ),
               ),

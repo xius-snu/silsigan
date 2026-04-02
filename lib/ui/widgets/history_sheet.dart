@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../models/transcript_session.dart';
 import '../../models/word_timestamp.dart';
@@ -47,6 +48,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   String? _highlightedWordId; // "lineIdx_wordIdx"
   Timer? _highlightTimer;
 
+  // Inline title editing
+  bool _isEditingTitle = false;
+  final TextEditingController _titleController = TextEditingController();
+  final FocusNode _titleFocusNode = FocusNode();
+
   @override
   void initState() {
     super.initState();
@@ -55,6 +61,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _loadInitialSession(widget.initialSessionId!);
     }
     _syncFromServer();
+    _titleFocusNode.addListener(_onTitleFocusChanged);
   }
 
   Future<void> _syncFromServer() async {
@@ -91,6 +98,9 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   void dispose() {
     _highlightTimer?.cancel();
     _clearTapRecognizers();
+    _titleFocusNode.removeListener(_onTitleFocusChanged);
+    _titleFocusNode.dispose();
+    _titleController.dispose();
     if (_playerInitialized) {
       _player.closePlayer();
     }
@@ -156,9 +166,51 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _selectedSession = null;
       _parsedTimestamps = null;
       _isPlaying = false;
+      _isEditingTitle = false;
       _position = Duration.zero;
       _duration = Duration.zero;
     });
+  }
+
+  void _startEditingTitle() {
+    final currentTitle =
+        _selectedSession?.title ?? _formatDate(_selectedSession!.createdAt);
+    _titleController.text = currentTitle;
+    setState(() => _isEditingTitle = true);
+    // Request focus after the frame so the TextField is built
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _titleFocusNode.requestFocus();
+    });
+  }
+
+  void _onTitleFocusChanged() {
+    if (!_titleFocusNode.hasFocus && _isEditingTitle) {
+      _saveTitle();
+    }
+  }
+
+  Future<void> _saveTitle() async {
+    if (!_isEditingTitle || _selectedSession == null) return;
+    final newTitle = _titleController.text.trim();
+    if (newTitle.isEmpty) {
+      setState(() => _isEditingTitle = false);
+      return;
+    }
+    final id = _selectedSession!.id;
+    if (id != null) {
+      await DatabaseService.instance.updateSessionTitle(id, newTitle);
+      // Reload the session to get updated data
+      final updated = await DatabaseService.instance.getSession(id);
+      if (updated != null && mounted) {
+        setState(() {
+          _selectedSession = updated;
+          _isEditingTitle = false;
+        });
+        ref.invalidate(sessionHistoryProvider);
+      }
+    } else {
+      setState(() => _isEditingTitle = false);
+    }
   }
 
   Future<void> _playPause() async {
@@ -295,13 +347,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     }
   }
 
-  Future<void> _shareSession() async {
+  Future<void> _downloadSession() async {
     if (_selectedSession == null) return;
     try {
       final session = _selectedSession!;
       final date = _formatDate(session.createdAt);
+      final sessionTitle = session.title ?? date;
       final text = StringBuffer();
-      text.writeln('Silsigan — $date');
+      text.writeln('$sessionTitle — $date');
       text.writeln();
       text.writeln('── TRANSCRIPTION ──');
       text.writeln(session.koreanFull);
@@ -309,17 +362,35 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       text.writeln('── TRANSLATION ──');
       text.writeln(session.vietnameseFull);
 
-      final dir = Directory.systemTemp;
-      final file = File('${dir.path}/silsigan_session.txt');
-      await file.writeAsString(text.toString());
-      await Share.shareXFiles(
-        [XFile(file.path, mimeType: 'text/plain')],
-        subject: 'Silsigan Session — $date',
+      // Write to temp file first
+      final safeTitle = sessionTitle
+          .replaceAll(RegExp(r'[^\w\s-]'), '')
+          .trim()
+          .replaceAll(RegExp(r'\s+'), '_');
+      final fileName = '$safeTitle.txt';
+      final tempFile = File('${Directory.systemTemp.path}/$fileName');
+      await tempFile.writeAsString(text.toString());
+
+      // Open native "Save As" dialog
+      final savedPath = await FlutterFileDialog.saveFile(
+        params: SaveFileDialogParams(
+          sourceFilePath: tempFile.path,
+          fileName: fileName,
+        ),
       );
+
+      if (savedPath != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Saved!'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Share failed: $e')),
+          SnackBar(content: Text('Save failed: $e')),
         );
       }
     }
@@ -492,7 +563,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       key: const ValueKey('history-detail'),
       children: [
         _buildDragHandle(),
-        // Header with back, date, delete
+        // Header with back, title, download, delete
         Padding(
           padding: const EdgeInsets.only(left: 4, right: 4, bottom: 4),
           child: Row(
@@ -503,20 +574,41 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                 onPressed: _goBackToList,
               ),
               Expanded(
-                child: Text(
-                  _formatDate(session.createdAt),
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppConstants.textPrimary,
-                  ),
-                ),
+                child: _isEditingTitle
+                    ? TextField(
+                        controller: _titleController,
+                        focusNode: _titleFocusNode,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: AppConstants.textPrimary,
+                        ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(vertical: 4),
+                          border: InputBorder.none,
+                        ),
+                        onSubmitted: (_) => _saveTitle(),
+                      )
+                    : GestureDetector(
+                        onTap: _startEditingTitle,
+                        child: Text(
+                          session.title ?? _formatDate(session.createdAt),
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: AppConstants.textPrimary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
               ),
               IconButton(
-                icon: const Icon(Icons.ios_share),
+                icon: const Icon(Icons.file_download_outlined),
                 color: AppConstants.textSecondary,
                 iconSize: 22,
-                onPressed: _shareSession,
+                onPressed: _downloadSession,
               ),
               IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
