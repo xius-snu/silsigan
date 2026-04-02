@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_sound/flutter_sound.dart';
-import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../models/transcript_session.dart';
 import '../../models/word_timestamp.dart';
@@ -347,7 +346,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     }
   }
 
-  Future<void> _downloadSession() async {
+  Future<void> _sendToNotes() async {
     if (_selectedSession == null) return;
     try {
       final session = _selectedSession!;
@@ -362,35 +361,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       text.writeln('── TRANSLATION ──');
       text.writeln(session.vietnameseFull);
 
-      // Write to temp file first
-      final safeTitle = sessionTitle
-          .replaceAll(RegExp(r'[^\w\s-]'), '')
-          .trim()
-          .replaceAll(RegExp(r'\s+'), '_');
-      final fileName = '$safeTitle.txt';
-      final tempFile = File('${Directory.systemTemp.path}/$fileName');
-      await tempFile.writeAsString(text.toString());
-
-      // Open native "Save As" dialog
-      final savedPath = await FlutterFileDialog.saveFile(
-        params: SaveFileDialogParams(
-          sourceFilePath: tempFile.path,
-          fileName: fileName,
-        ),
+      await Share.share(
+        text.toString(),
+        subject: sessionTitle,
       );
-
-      if (savedPath != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Saved!'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: $e')),
+          SnackBar(content: Text('Failed: $e')),
         );
       }
     }
@@ -605,10 +583,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                       ),
               ),
               IconButton(
-                icon: const Icon(Icons.file_download_outlined),
+                icon: const Icon(Icons.note_add_outlined),
                 color: AppConstants.textSecondary,
                 iconSize: 22,
-                onPressed: _downloadSession,
+                onPressed: _sendToNotes,
               ),
               IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
