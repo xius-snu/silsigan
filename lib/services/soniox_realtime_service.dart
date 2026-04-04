@@ -91,7 +91,10 @@ class SonioxRealtimeService {
 
   Future<void> _doConnect() async {
     try {
-      final proxyUrl = Uri.parse(AppConstants.sonioxProxyUrl).replace(
+      final wsPath = _isPrivate == 'true'
+          ? AppConstants.sonioxProxyUrl
+          : AppConstants.sonioxLimitedProxyUrl;
+      final proxyUrl = Uri.parse(wsPath).replace(
         queryParameters: {
           if (userId != null) 'userId': userId!,
           if (authToken != null) 'token': authToken!,

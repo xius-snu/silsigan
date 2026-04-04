@@ -6,6 +6,8 @@ class AppConstants {
 
   // Soniox (proxied through our server)
   static const sonioxProxyUrl = 'wss://silsigan.onrender.com/ws/soniox';
+  static const sonioxLimitedProxyUrl =
+      'wss://silsigan.onrender.com/ws/soniox-limited';
   static const sonioxModel = 'stt-rt-v4';
   static const transcriptionLanguage = 'ko';
 

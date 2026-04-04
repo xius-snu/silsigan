@@ -20,6 +20,18 @@ function nextSonioxKey() {
     _sonioxKeyIndex = (_sonioxKeyIndex + 1) % SONIOX_API_KEYS.length;
     return key;
 }
+// Limited keys — separate pool for limited/public clients
+const LIMITED_SONIOX_API_KEYS = (process.env.LIMITED_SONIOX_API_KEYS || '')
+    .split(',')
+    .map(k => k.trim())
+    .filter(k => k.length > 0);
+let _limitedKeyIndex = 0;
+function nextLimitedSonioxKey() {
+    if (LIMITED_SONIOX_API_KEYS.length === 0) return null;
+    const key = LIMITED_SONIOX_API_KEYS[_limitedKeyIndex];
+    _limitedKeyIndex = (_limitedKeyIndex + 1) % LIMITED_SONIOX_API_KEYS.length;
+    return key;
+}
 // Private key — used when client requests private=1
 const SONIOX_PRIVATE_KEY = process.env.SONIOX_PRIVATE_KEY || null;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
@@ -1056,6 +1068,126 @@ async function start() {
                 pendingMessages.push({ data, binary: isBinary });
             }
             // If Soniox is closing/closed, drop the message silently
+        });
+
+        socket.on('close', () => {
+            clientClosed = true;
+            if (sonioxWs && sonioxWs.readyState !== WebSocket.CLOSED) {
+                sonioxWs.close();
+            }
+            sonioxWs = null;
+        });
+    });
+
+    // ==================
+    // SONIOX LIMITED WEBSOCKET PROXY
+    // ==================
+
+    fastify.get('/ws/soniox-limited', { websocket: true }, async (socket, req) => {
+        const { userId, token } = req.query;
+
+        if (!userId || !token) {
+            socket.close(4000, 'Missing userId or token');
+            return;
+        }
+
+        if (LIMITED_SONIOX_API_KEYS.length === 0) {
+            fastify.log.error('No LIMITED_SONIOX_API_KEYS configured');
+            socket.close(4002, 'Server misconfigured');
+            return;
+        }
+
+        // Verify auth token
+        const tokenHash = hashToken(token);
+        try {
+            const res = await pool.query(
+                'SELECT auth_token_hash FROM users WHERE user_id = $1',
+                [userId]
+            );
+            if (res.rows.length === 0 || res.rows[0].auth_token_hash !== tokenHash) {
+                socket.close(4001, 'Invalid credentials');
+                return;
+            }
+        } catch (e) {
+            fastify.log.error('Soniox limited proxy auth error: ' + e.message);
+            socket.close(4002, 'Auth check failed');
+            return;
+        }
+
+        // Check usage limit
+        try {
+            const usageRes = await pool.query(
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+            if (usageRes.rows.length > 0) {
+                const { used_seconds, limit_minutes } = usageRes.rows[0];
+                if (parseInt(used_seconds) >= parseInt(limit_minutes) * 60) {
+                    socket.close(4005, 'Usage limit reached');
+                    return;
+                }
+            }
+        } catch (e) {
+            fastify.log.error('Usage check error: ' + e.message);
+        }
+
+        const apiKey = nextLimitedSonioxKey();
+        let sonioxWs = null;
+        let configReceived = false;
+        const pendingMessages = [];
+        let clientClosed = false;
+
+        socket.on('message', (data, isBinary) => {
+            if (clientClosed) return;
+
+            if (!configReceived) {
+                try {
+                    const config = JSON.parse(data.toString());
+                    config.api_key = apiKey;
+                    configReceived = true;
+
+                    sonioxWs = new WebSocket(SONIOX_WS_URL, {
+                        perMessageDeflate: false,
+                    });
+
+                    sonioxWs.on('open', () => {
+                        sonioxWs.send(JSON.stringify(config));
+                        for (const msg of pendingMessages) {
+                            if (sonioxWs.readyState === WebSocket.OPEN) {
+                                sonioxWs.send(msg.data, { binary: msg.binary });
+                            }
+                        }
+                        pendingMessages.length = 0;
+                    });
+
+                    sonioxWs.on('message', (sData, sIsBinary) => {
+                        if (socket.readyState === WebSocket.OPEN) {
+                            socket.send(sData, { binary: sIsBinary });
+                        }
+                    });
+
+                    sonioxWs.on('close', () => {
+                        if (socket.readyState === WebSocket.OPEN) {
+                            socket.close(1000, 'Soniox closed');
+                        }
+                    });
+
+                    sonioxWs.on('error', (err) => {
+                        fastify.log.error(`Soniox limited WS error (user ${userId}): ${err.message}`);
+                        if (socket.readyState === WebSocket.OPEN) {
+                            socket.close(4003, 'Soniox connection error');
+                        }
+                    });
+                } catch (e) {
+                    fastify.log.error('Invalid config from client: ' + e.message);
+                    socket.close(4004, 'Invalid config');
+                    return;
+                }
+            } else if (sonioxWs && sonioxWs.readyState === WebSocket.OPEN) {
+                sonioxWs.send(data, { binary: isBinary });
+            } else if (sonioxWs && sonioxWs.readyState === WebSocket.CONNECTING) {
+                pendingMessages.push({ data, binary: isBinary });
+            }
         });
 
         socket.on('close', () => {
