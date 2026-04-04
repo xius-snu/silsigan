@@ -178,6 +178,67 @@ class UserService {
   }
 
   // ==================
+  // Usage tracking
+  // ==================
+
+  /// Fetch current usage from server. Returns {usedSeconds, limitMinutes}.
+  Future<Map<String, int>?> fetchUsage() async {
+    if (_userId == null) return null;
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/api/user/usage'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({'userId': _userId}),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'usedSeconds': (data['used_seconds'] as num).toInt(),
+          'limitMinutes': (data['limit_minutes'] as num).toInt(),
+        };
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Fetch usage error: $e');
+      return null;
+    }
+  }
+
+  /// Redeem a premium code. Returns {success, addedMinutes, usedSeconds, limitMinutes} or error string.
+  Future<Map<String, dynamic>> redeemCode(String code) async {
+    if (_userId == null) return {'error': 'Not authenticated'};
+    try {
+      await ensureAuthenticated();
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/api/user/redeem-code'),
+            headers: _authHeaders,
+            body: json.encode({'userId': _userId, 'code': code.trim()}),
+          )
+          .timeout(const Duration(seconds: 10));
+      final data = json.decode(response.body);
+      if (response.statusCode == 200) {
+        return {
+          'success': true,
+          'addedMinutes': (data['added_minutes'] as num).toInt(),
+          'usedSeconds': (data['used_seconds'] as num).toInt(),
+          'limitMinutes': (data['limit_minutes'] as num).toInt(),
+        };
+      } else if (response.statusCode == 404) {
+        return {'error': 'Invalid code'};
+      } else if (response.statusCode == 409) {
+        return {'error': 'Code already used'};
+      }
+      return {'error': data['error'] ?? 'Unknown error'};
+    } catch (e) {
+      debugPrint('Redeem code error: $e');
+      return {'error': 'Network error'};
+    }
+  }
+
+  // ==================
   // Friend operations
   // ==================
 

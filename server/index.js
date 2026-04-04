@@ -62,6 +62,7 @@ const PUBLIC_ROUTES = new Set([
     'GET:/api/session/status/:inviteId',
     'GET:/ws/session',
     'POST:/api/user/activity',
+    'POST:/api/user/usage',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -128,6 +129,21 @@ async function start() {
     // Add activity tracking columns (safe for existing tables)
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_recorded_at TIMESTAMP`);
+
+    // Usage limit columns
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS usage_limit_minutes INT DEFAULT 50`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS used_seconds INT DEFAULT 0`);
+
+    // Premium codes table
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS premium_codes (
+            code TEXT PRIMARY KEY,
+            minutes INT NOT NULL,
+            used BOOLEAN DEFAULT FALSE,
+            used_by TEXT REFERENCES users(user_id),
+            used_at TIMESTAMP
+        )
+    `);
 
     // Activity log table for analytics
     await pool.query(`
@@ -250,11 +266,101 @@ async function start() {
                     'UPDATE users SET last_seen_at = CURRENT_TIMESTAMP, last_recorded_at = CURRENT_TIMESTAMP WHERE user_id = $1',
                     [userId]
                 );
+            } else if (event === 'recording_stop' && meta && meta.duration_seconds) {
+                const secs = Math.max(0, Math.round(meta.duration_seconds));
+                if (secs > 0) {
+                    await pool.query(
+                        'UPDATE users SET used_seconds = COALESCE(used_seconds, 0) + $2 WHERE user_id = $1',
+                        [userId, secs]
+                    );
+                }
             }
             return { success: true };
         } catch (e) {
             fastify.log.error('Activity update error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // ==================
+    // USAGE ENDPOINTS
+    // ==================
+
+    fastify.post('/api/user/usage', async (req, reply) => {
+        const { userId } = req.body;
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            const res = await pool.query(
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+            if (res.rows.length === 0) return reply.code(404).send({ error: 'User not found' });
+            return {
+                used_seconds: parseInt(res.rows[0].used_seconds),
+                limit_minutes: parseInt(res.rows[0].limit_minutes),
+            };
+        } catch (e) {
+            fastify.log.error('Usage query error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    fastify.post('/api/user/redeem-code', async (req, reply) => {
+        const { userId, code } = req.body;
+        if (!userId || !code) return reply.code(400).send({ error: 'Missing fields' });
+
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            // Lock the code row to prevent race conditions
+            const codeRes = await client.query(
+                'SELECT code, minutes, used FROM premium_codes WHERE code = $1 FOR UPDATE',
+                [code.trim()]
+            );
+            if (codeRes.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return reply.code(404).send({ error: 'Invalid code' });
+            }
+            if (codeRes.rows[0].used) {
+                await client.query('ROLLBACK');
+                return reply.code(409).send({ error: 'Code already used' });
+            }
+
+            const bonusMinutes = codeRes.rows[0].minutes;
+
+            // Mark code as used
+            await client.query(
+                'UPDATE premium_codes SET used = TRUE, used_by = $2, used_at = CURRENT_TIMESTAMP WHERE code = $1',
+                [code.trim(), userId]
+            );
+
+            // Add minutes to user's limit
+            await client.query(
+                'UPDATE users SET usage_limit_minutes = COALESCE(usage_limit_minutes, 50) + $2 WHERE user_id = $1',
+                [userId, bonusMinutes]
+            );
+
+            await client.query('COMMIT');
+
+            // Fetch updated values
+            const updated = await pool.query(
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+
+            return {
+                success: true,
+                added_minutes: bonusMinutes,
+                used_seconds: parseInt(updated.rows[0].used_seconds),
+                limit_minutes: parseInt(updated.rows[0].limit_minutes),
+            };
+        } catch (e) {
+            await client.query('ROLLBACK');
+            fastify.log.error('Redeem code error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        } finally {
+            client.release();
         }
     });
 
@@ -866,6 +972,26 @@ async function start() {
             fastify.log.error('Soniox proxy auth error: ' + e.message);
             socket.close(4002, 'Auth check failed');
             return;
+        }
+
+        // Check usage limit (skip for private mode)
+        if (!wantsPrivate) {
+            try {
+                const usageRes = await pool.query(
+                    'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                    [userId]
+                );
+                if (usageRes.rows.length > 0) {
+                    const { used_seconds, limit_minutes } = usageRes.rows[0];
+                    if (parseInt(used_seconds) >= parseInt(limit_minutes) * 60) {
+                        socket.close(4005, 'Usage limit reached');
+                        return;
+                    }
+                }
+            } catch (e) {
+                fastify.log.error('Usage check error: ' + e.message);
+                // Allow connection on usage check failure (fail-open)
+            }
         }
 
         const apiKey = wantsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();

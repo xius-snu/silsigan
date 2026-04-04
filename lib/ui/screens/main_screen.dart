@@ -81,6 +81,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // restart audio after a real suspension — not after Control Center, etc.
   bool _wasPaused = false;
 
+  // Usage limit tracking
+  int _usedSeconds = 0;
+  int _limitMinutes = 50;
+  Timer? _usageLimitTimer;
+  static const _isPrivateMode =
+      String.fromEnvironment('SONIOX_PRIVATE') == 'true';
+
   @override
   void initState() {
     super.initState();
@@ -98,6 +105,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _restoreSavedLanguages();
       _restoreAutosaveDraft();
       _checkForUpdate();
+      _fetchUsage();
     });
   }
 
@@ -110,6 +118,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _autosaveTimer?.cancel();
     _incomingPollTimer?.cancel();
     _outgoingPollTimer?.cancel();
+    _usageLimitTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     _ttsService.dispose();
@@ -296,7 +305,162 @@ class _MainScreenState extends ConsumerState<MainScreen>
     });
   }
 
+  // ── Usage Limit ─────────────��──────────────────────────────────
+
+  Future<void> _fetchUsage() async {
+    if (_isPrivateMode) return;
+    final usage = await UserService.instance.fetchUsage();
+    if (usage != null && mounted) {
+      setState(() {
+        // Only accept server value if >= local (avoids race where
+        // _fetchUsage returns before reportActivity is processed)
+        final serverUsed = usage['usedSeconds']!;
+        if (serverUsed >= _usedSeconds) {
+          _usedSeconds = serverUsed;
+        }
+        _limitMinutes = usage['limitMinutes']!;
+      });
+    }
+  }
+
+  int get _remainingSeconds {
+    final remaining = _limitMinutes * 60 - _usedSeconds;
+    return remaining < 0 ? 0 : remaining;
+  }
+
+  bool get _usageLimitReached => !_isPrivateMode && _remainingSeconds <= 0;
+
+  void _startUsageLimitTimer() {
+    _usageLimitTimer?.cancel();
+    if (_isPrivateMode) return;
+    // Check every 10 seconds during recording
+    _usageLimitTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_recordingStartedAt == null) return;
+      final elapsed =
+          DateTime.now().difference(_recordingStartedAt!).inSeconds;
+      final totalUsed = _usedSeconds + elapsed;
+      if (totalUsed >= _limitMinutes * 60) {
+        _usageLimitTimer?.cancel();
+        _forceStopForUsageLimit();
+      }
+    });
+  }
+
+  Future<void> _forceStopForUsageLimit() async {
+    final recordingState = ref.read(recordingStateProvider);
+    if (recordingState == RecordingState.recording) {
+      final displayMode = ref.read(displayModeProvider);
+      if (displayMode == DisplayMode.conversation) {
+        await _stopConversationRecording();
+      } else {
+        await _stopRecording();
+      }
+    }
+    if (mounted) {
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Usage Limit Reached'),
+          content: const Text(
+            'You have used all your available minutes. '
+            'Enter a premium code to add more time.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<void> _showPremiumCodeDialog() async {
+    final controller = TextEditingController();
+    String? errorText;
+    bool isLoading = false;
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Premium Code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Enter a premium code to add more minutes.'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                decoration: InputDecoration(
+                  hintText: 'Enter code',
+                  errorText: errorText,
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: isLoading
+                  ? null
+                  : () async {
+                      final code = controller.text.trim();
+                      if (code.isEmpty) return;
+                      setDialogState(() {
+                        isLoading = true;
+                        errorText = null;
+                      });
+                      final res =
+                          await UserService.instance.redeemCode(code);
+                      if (!ctx.mounted) return;
+                      if (res['success'] == true) {
+                        setState(() {
+                          _usedSeconds = res['usedSeconds'] as int;
+                          _limitMinutes = res['limitMinutes'] as int;
+                        });
+                        Navigator.pop(ctx, true);
+                      } else {
+                        setDialogState(() {
+                          isLoading = false;
+                          errorText = res['error'] as String?;
+                        });
+                      }
+                    },
+              child: isLoading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Redeem'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (result == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Premium code redeemed!')),
+      );
+    }
+  }
+
   Future<void> _startRecording() async {
+    // Check usage limit before starting
+    if (_usageLimitReached) {
+      _forceStopForUsageLimit();
+      return;
+    }
+
     final needsPermission = Platform.isAndroid || Platform.isIOS;
     final status = needsPermission
         ? await Permission.microphone.request()
@@ -538,6 +702,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _autosaveTimer =
           Timer.periodic(const Duration(seconds: 15), (_) => _autosave());
       _recordingStartedAt = DateTime.now();
+      _startUsageLimitTimer();
       UserService.instance.reportActivity('recording_start', {
         'mode': ref.read(displayModeProvider).name,
       });
@@ -563,6 +728,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _newLineTimerTranslation?.cancel();
     _ttsDraftTimer?.cancel();
     _ttsFiredForSegment = false;
+    _usageLimitTimer?.cancel();
 
     // Stop audio capture (timeout in case recorder is stuck after background)
     try {
@@ -593,7 +759,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
         'duration_seconds': durationSecs,
         'mode': ref.read(displayModeProvider).name,
       });
+      // Update local usage estimate immediately
+      _usedSeconds += durationSecs;
       _recordingStartedAt = null;
+      // Refresh from server (fire-and-forget)
+      _fetchUsage();
     }
 
     if (mounted) {
@@ -999,6 +1169,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // If already recording, ignore (both buttons do the same thing)
     if (ref.read(recordingStateProvider) == RecordingState.recording) return;
 
+    // Check usage limit before starting
+    if (_usageLimitReached) {
+      _forceStopForUsageLimit();
+      return;
+    }
+
     final needsPermission = Platform.isAndroid || Platform.isIOS;
     final status = needsPermission
         ? await Permission.microphone.request()
@@ -1096,6 +1272,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       );
       await _audioService.start();
       _recordingStartedAt = DateTime.now();
+      _startUsageLimitTimer();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
       UserService.instance.reportActivity('recording_start', {
@@ -1117,6 +1294,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _isStopping = true;
 
     ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
+    _usageLimitTimer?.cancel();
 
     try {
       await _audioService.stop().timeout(const Duration(seconds: 5));
@@ -1142,7 +1320,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
         'duration_seconds': durationSecs,
         'mode': 'conversation',
       });
+      _usedSeconds += durationSecs;
       _recordingStartedAt = null;
+      _fetchUsage();
     }
 
     ref.read(activeConversationSpeakerProvider.notifier).state = null;
@@ -1269,6 +1449,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     offset: const Offset(0, 40),
                     itemBuilder: (context) {
                       final current = ref.read(displayModeProvider);
+                      // Usage stats for the popup
+                      final usedMin = _usedSeconds ~/ 60;
+                      final pct = _limitMinutes > 0
+                          ? ((usedMin / _limitMinutes) * 100)
+                              .clamp(0, 100)
+                              .round()
+                          : 0;
                       return [
                         PopupMenuItem<DisplayMode>(
                           value: DisplayMode.lineByLine,
@@ -1308,6 +1495,79 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               if (current == DisplayMode.conversation)
                                 const Icon(Icons.check, size: 18),
                             ],
+                          ),
+                        ),
+                        const PopupMenuDivider(),
+                        PopupMenuItem<DisplayMode>(
+                          value: current, // keep current mode unchanged
+                          onTap: () {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              _showPremiumCodeDialog();
+                            });
+                          },
+                          child: SizedBox(
+                            width: 200,
+                            child: _isPrivateMode
+                                ? Row(
+                                    children: [
+                                      Icon(Icons.all_inclusive,
+                                          size: 16,
+                                          color: Colors.green[700]),
+                                      const SizedBox(width: 8),
+                                      const Text(
+                                        'Usage: Unlimited',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Used: $pct%  [$usedMin/$_limitMinutes min]',
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 6),
+                                      ClipRRect(
+                                        borderRadius:
+                                            BorderRadius.circular(3),
+                                        child: LinearProgressIndicator(
+                                          value: _limitMinutes > 0
+                                              ? (_usedSeconds /
+                                                      (_limitMinutes * 60))
+                                                  .clamp(0.0, 1.0)
+                                              : 0,
+                                          minHeight: 6,
+                                          backgroundColor:
+                                              Colors.grey[300],
+                                          valueColor:
+                                              AlwaysStoppedAnimation<Color>(
+                                            pct >= 90
+                                                ? Colors.red
+                                                : pct >= 70
+                                                    ? Colors.orange
+                                                    : Colors.green,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Tap to enter premium code',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey[500],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                           ),
                         ),
                       ];
