@@ -228,17 +228,49 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                     if (widget.history[i].trim().isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          widget.history[i],
-                          style: TextStyle(
-                            fontSize: AppConstants.contentFontSize,
-                            color: AppConstants.textPrimary
-                                .withOpacity(AppConstants.historyOpacity),
-                            height: 1.5,
-                          ),
-                        ),
+                        child: _isLastNonEmptyLine(i) &&
+                                (widget.draft.isNotEmpty ||
+                                    widget.showEllipsis)
+                            ? Text.rich(
+                                TextSpan(
+                                  children: [
+                                    TextSpan(
+                                      text: widget.history[i],
+                                      style: TextStyle(
+                                        fontSize:
+                                            AppConstants.contentFontSize,
+                                        color: AppConstants.textPrimary
+                                            .withOpacity(
+                                                AppConstants.historyOpacity),
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                    TextSpan(
+                                      text: ' ${_buildDraftText()}',
+                                      style: const TextStyle(
+                                        fontSize:
+                                            AppConstants.contentFontSize,
+                                        color: AppConstants.textPrimary,
+                                        fontWeight: FontWeight.w400,
+                                        height: 1.5,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : Text(
+                                widget.history[i],
+                                style: TextStyle(
+                                  fontSize: AppConstants.contentFontSize,
+                                  color: AppConstants.textPrimary
+                                      .withOpacity(
+                                          AppConstants.historyOpacity),
+                                  height: 1.5,
+                                ),
+                              ),
                       ),
-                  if (widget.draft.isNotEmpty || widget.showEllipsis)
+                  if (widget.history.every((l) => l.trim().isEmpty) &&
+                      (widget.draft.isNotEmpty || widget.showEllipsis))
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
@@ -258,6 +290,13 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
         ],
       ),
     );
+  }
+
+  bool _isLastNonEmptyLine(int index) {
+    for (int j = index + 1; j < widget.history.length; j++) {
+      if (widget.history[j].trim().isNotEmpty) return false;
+    }
+    return true;
   }
 
   String _buildDraftText() {

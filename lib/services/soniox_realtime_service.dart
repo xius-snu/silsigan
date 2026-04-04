@@ -20,8 +20,10 @@ class SonioxRealtimeService {
   String? userId;
   String? authToken;
 
-  // Private Soniox key mode — set via --dart-define=SONIOX_PRIVATE=true
-  static const _isPrivate = String.fromEnvironment('SONIOX_PRIVATE');
+  // Private Soniox key mode — compile-time or server-side flag
+  static const _isPrivateBuild = String.fromEnvironment('SONIOX_PRIVATE');
+  bool isPrivateUser = false;
+  bool get _usePrivate => _isPrivateBuild == 'true' || isPrivateUser;
 
   // Transcription token state
   String _pendingUtterance = '';
@@ -91,14 +93,14 @@ class SonioxRealtimeService {
 
   Future<void> _doConnect() async {
     try {
-      final wsPath = _isPrivate == 'true'
+      final wsPath = _usePrivate
           ? AppConstants.sonioxProxyUrl
           : AppConstants.sonioxLimitedProxyUrl;
       final proxyUrl = Uri.parse(wsPath).replace(
         queryParameters: {
           if (userId != null) 'userId': userId!,
           if (authToken != null) 'token': authToken!,
-          if (_isPrivate == 'true') 'private': '1',
+          if (_usePrivate) 'private': '1',
         },
       );
       _channel = IOWebSocketChannel.connect(

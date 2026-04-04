@@ -87,6 +87,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Timer? _usageLimitTimer;
   static const _isPrivateMode =
       String.fromEnvironment('SONIOX_PRIVATE') == 'true';
+  bool _isPrivateUser = false;
+  bool get _isPrivate => _isPrivateMode || _isPrivateUser;
 
   @override
   void initState() {
@@ -308,17 +310,18 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // ── Usage Limit ─────────────��──────────────────────────────────
 
   Future<void> _fetchUsage() async {
-    if (_isPrivateMode) return;
+    if (_isPrivateMode) return; // compile-time private skips fetch entirely
     final usage = await UserService.instance.fetchUsage();
     if (usage != null && mounted) {
       setState(() {
         // Only accept server value if >= local (avoids race where
         // _fetchUsage returns before reportActivity is processed)
-        final serverUsed = usage['usedSeconds']!;
+        final serverUsed = usage['usedSeconds'] as int;
         if (serverUsed >= _usedSeconds) {
           _usedSeconds = serverUsed;
         }
-        _limitMinutes = usage['limitMinutes']!;
+        _limitMinutes = usage['limitMinutes'] as int;
+        _isPrivateUser = usage['isPrivate'] as bool;
       });
     }
   }
@@ -328,21 +331,19 @@ class _MainScreenState extends ConsumerState<MainScreen>
     return remaining < 0 ? 0 : remaining;
   }
 
-  bool get _usageLimitReached => !_isPrivateMode && _remainingSeconds <= 0;
+  bool get _usageLimitReached => !_isPrivate && _remainingSeconds <= 0;
 
   void _startUsageLimitTimer() {
     _usageLimitTimer?.cancel();
-    if (_isPrivateMode) return;
-    // Check every 10 seconds during recording
-    _usageLimitTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_recordingStartedAt == null) return;
-      final elapsed =
-          DateTime.now().difference(_recordingStartedAt!).inSeconds;
-      final totalUsed = _usedSeconds + elapsed;
-      if (totalUsed >= _limitMinutes * 60) {
-        _usageLimitTimer?.cancel();
-        _forceStopForUsageLimit();
-      }
+    if (_isPrivate) return;
+    final remainingSecs = _limitMinutes * 60 - _usedSeconds;
+    if (remainingSecs <= 0) {
+      _forceStopForUsageLimit();
+      return;
+    }
+    // One-shot timer that fires exactly when the limit is reached
+    _usageLimitTimer = Timer(Duration(seconds: remainingSecs), () {
+      _forceStopForUsageLimit();
     });
   }
 
@@ -363,7 +364,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           title: const Text('Usage Limit Reached'),
           content: const Text(
             'You have used all your available minutes. '
-            'Enter a private code to add more time.',
+            'Purchase more time to continue.',
           ),
           actions: [
             TextButton(
@@ -378,10 +379,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   Future<void> _showPurchasePage() async {
     const packages = [
-      {'hours': 1, 'price': '20,000', 'label': '1 Hour'},
-      {'hours': 3, 'price': '55,000', 'label': '3 Hours'},
-      {'hours': 5, 'price': '85,000', 'label': '5 Hours'},
-      {'hours': 10, 'price': '150,000', 'label': '10 Hours'},
+      {'hours': 1, 'price': '15,000', 'label': '1 Hour', 'per': '15,000₫/hr'},
+      {'hours': 5, 'price': '75,000', 'label': '5 Hours', 'per': '15,000₫/hr'},
+      {'hours': 10, 'price': '139,000', 'label': '10 Hours', 'per': '13,900₫/hr', 'badge': 'POPULAR'},
+      {'hours': 30, 'price': '369,000', 'label': '30 Hours', 'per': '12,300₫/hr', 'badge': 'SAVE 18%'},
+      {'hours': 50, 'price': '599,000', 'label': '50 Hours', 'per': '11,980₫/hr', 'badge': 'BEST VALUE'},
     ];
 
     await showModalBottomSheet(
@@ -432,58 +434,119 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   const SizedBox(height: 20),
 
                   // Purchase options
-                  ...packages.map((pkg) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Material(
-                          color: Colors.grey[50],
-                          borderRadius: BorderRadius.circular(12),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () {
-                              showDialog(
-                                context: ctx,
-                                builder: (c) => AlertDialog(
-                                  title: const Text('Unavailable'),
-                                  content: const Text(
-                                    'Purchases are not available at this time.',
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(c),
-                                      child: const Text('OK'),
-                                    ),
-                                  ],
+                  ...packages.map((pkg) {
+                    final badge = pkg['badge'] as String?;
+                    final hasBadge = badge != null;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
+                            showDialog(
+                              context: ctx,
+                              builder: (c) => AlertDialog(
+                                title: const Text('Unavailable'),
+                                content: const Text(
+                                  'Purchases are not available at this time.',
                                 ),
-                              );
-                            },
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 14),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      pkg['label'] as String,
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  Text(
-                                    '${pkg['price']}₫',
-                                    style: TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                      color: Colors.green[700],
-                                    ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(c),
+                                    child: const Text('OK'),
                                   ),
                                 ],
                               ),
+                            );
+                          },
+                          child: Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: hasBadge
+                                    ? Colors.green.shade400
+                                    : Colors.grey.shade300,
+                                width: hasBadge ? 1.5 : 1,
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 14),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(
+                                            pkg['label'] as String,
+                                            style: const TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          if (hasBadge) ...[
+                                            const SizedBox(width: 8),
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: Colors.green.shade50,
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                              child: Text(
+                                                badge,
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w700,
+                                                  color:
+                                                      Colors.green.shade700,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        pkg['per'] as String,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.grey[500],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black87,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    '${pkg['price']}₫',
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                      )),
+                      ),
+                    );
+                  }),
 
                   const SizedBox(height: 8),
                   Row(
@@ -754,6 +817,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await UserService.instance.ensureAuthenticated();
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
+      _sonioxService.isPrivateUser = _isPrivateUser;
       await _sonioxService.connect(
         targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
         forceTranslation:
@@ -1159,6 +1223,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final convLangs = await loadSavedConversationLanguages();
     ref.read(myLanguageProvider.notifier).state = convLangs.my;
     ref.read(theirLanguageProvider.notifier).state = convLangs.their;
+    final displayMode = await loadSavedDisplayMode();
+    ref.read(displayModeProvider.notifier).state = displayMode;
   }
 
   Future<void> _restoreAutosaveDraft() async {
@@ -1336,6 +1402,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await UserService.instance.ensureAuthenticated();
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
+      _sonioxService.isPrivateUser = _isPrivateUser;
       await _sonioxService.connect(
         twoWayLanguageCodes: [myLang.code, theirLang.code],
       );
@@ -1514,6 +1581,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   PopupMenuButton<DisplayMode>(
                     onSelected: (mode) {
                       ref.read(displayModeProvider.notifier).state = mode;
+                      saveDisplayMode(mode);
                     },
                     offset: const Offset(0, 40),
                     itemBuilder: (context) {
@@ -1527,21 +1595,21 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           : 0;
                       return [
                         PopupMenuItem<DisplayMode>(
-                          value: DisplayMode.lineByLine,
-                          child: Row(
-                            children: [
-                              const Expanded(child: Text('Line by Line')),
-                              if (current == DisplayMode.lineByLine)
-                                const Icon(Icons.check, size: 18),
-                            ],
-                          ),
-                        ),
-                        PopupMenuItem<DisplayMode>(
                           value: DisplayMode.split,
                           child: Row(
                             children: [
                               const Expanded(child: Text('Split View')),
                               if (current == DisplayMode.split)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.lineByLine,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Line by Line')),
+                              if (current == DisplayMode.lineByLine)
                                 const Icon(Icons.check, size: 18),
                             ],
                           ),
@@ -1576,7 +1644,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           },
                           child: SizedBox(
                             width: 200,
-                            child: _isPrivateMode
+                            child: _isPrivate
                                 ? Row(
                                     children: [
                                       Icon(Icons.all_inclusive,
@@ -1629,7 +1697,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                       ),
                                       const SizedBox(height: 4),
                                       Text(
-                                        'Tap to enter private code',
+                                        'Tap to add more time',
                                         style: TextStyle(
                                           fontSize: 11,
                                           color: Colors.grey[500],

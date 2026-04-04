@@ -145,6 +145,7 @@ async function start() {
     // Usage limit columns
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS usage_limit_minutes INT DEFAULT 50`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS used_seconds INT DEFAULT 0`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT FALSE`);
 
     // Premium codes table
     await pool.query(`
@@ -303,13 +304,14 @@ async function start() {
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
         try {
             const res = await pool.query(
-                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes, COALESCE(is_private, FALSE) AS is_private FROM users WHERE user_id = $1',
                 [userId]
             );
             if (res.rows.length === 0) return reply.code(404).send({ error: 'User not found' });
             return {
                 used_seconds: parseInt(res.rows[0].used_seconds),
                 limit_minutes: parseInt(res.rows[0].limit_minutes),
+                is_private: res.rows[0].is_private,
             };
         } catch (e) {
             fastify.log.error('Usage query error: ' + e.message);

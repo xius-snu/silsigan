@@ -181,8 +181,8 @@ class UserService {
   // Usage tracking
   // ==================
 
-  /// Fetch current usage from server. Returns {usedSeconds, limitMinutes}.
-  Future<Map<String, int>?> fetchUsage() async {
+  /// Fetch current usage from server. Returns {usedSeconds, limitMinutes, isPrivate}.
+  Future<Map<String, dynamic>?> fetchUsage() async {
     if (_userId == null) return null;
     try {
       final response = await http
@@ -197,6 +197,7 @@ class UserService {
         return {
           'usedSeconds': (data['used_seconds'] as num).toInt(),
           'limitMinutes': (data['limit_minutes'] as num).toInt(),
+          'isPrivate': data['is_private'] == true,
         };
       }
       return null;
