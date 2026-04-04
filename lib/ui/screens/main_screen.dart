@@ -363,7 +363,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           title: const Text('Usage Limit Reached'),
           content: const Text(
             'You have used all your available minutes. '
-            'Enter a premium code to add more time.',
+            'Enter a private code to add more time.',
           ),
           actions: [
             TextButton(
@@ -376,82 +376,151 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
-  Future<void> _showPremiumCodeDialog() async {
-    final controller = TextEditingController();
-    String? errorText;
-    bool isLoading = false;
+  Future<void> _showPurchasePage() async {
+    const packages = [
+      {'hours': 1, 'price': '20,000', 'label': '1 Hour'},
+      {'hours': 3, 'price': '55,000', 'label': '3 Hours'},
+      {'hours': 5, 'price': '85,000', 'label': '5 Hours'},
+      {'hours': 10, 'price': '150,000', 'label': '10 Hours'},
+    ];
 
-    final result = await showDialog<bool>(
+    await showModalBottomSheet(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('Premium Code'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Enter a premium code to add more minutes.'),
-              const SizedBox(height: 16),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                textCapitalization: TextCapitalization.characters,
-                decoration: InputDecoration(
-                  hintText: 'Enter code',
-                  errorText: errorText,
-                  border: const OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel'),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+          return Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
             ),
-            TextButton(
-              onPressed: isLoading
-                  ? null
-                  : () async {
-                      final code = controller.text.trim();
-                      if (code.isEmpty) return;
-                      setDialogState(() {
-                        isLoading = true;
-                        errorText = null;
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Handle bar
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[300],
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Add More Time',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Choose a plan to extend your usage',
+                    style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Purchase options
+                  ...packages.map((pkg) => Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Material(
+                          color: Colors.grey[50],
+                          borderRadius: BorderRadius.circular(12),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () {
+                              showDialog(
+                                context: ctx,
+                                builder: (c) => AlertDialog(
+                                  title: const Text('Unavailable'),
+                                  content: const Text(
+                                    'Purchases are not available at this time.',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.pop(c),
+                                      child: const Text('OK'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 14),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      pkg['label'] as String,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                  Text(
+                                    '${pkg['price']}₫',
+                                    style: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.green[700],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      )),
+
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: Divider(color: Colors.grey[300])),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'or',
+                          style: TextStyle(
+                              fontSize: 13, color: Colors.grey[500]),
+                        ),
+                      ),
+                      Expanded(child: Divider(color: Colors.grey[300])),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Redeem code section
+                  _RedeemCodeSection(
+                    onRedeemed: (usedSec, limitMin) {
+                      setState(() {
+                        _usedSeconds = usedSec;
+                        _limitMinutes = limitMin;
                       });
-                      final res =
-                          await UserService.instance.redeemCode(code);
-                      if (!ctx.mounted) return;
-                      if (res['success'] == true) {
-                        setState(() {
-                          _usedSeconds = res['usedSeconds'] as int;
-                          _limitMinutes = res['limitMinutes'] as int;
-                        });
-                        Navigator.pop(ctx, true);
-                      } else {
-                        setDialogState(() {
-                          isLoading = false;
-                          errorText = res['error'] as String?;
-                        });
-                      }
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Code redeemed!')),
+                      );
                     },
-              child: isLoading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Redeem'),
+                  ),
+                ],
+              ),
             ),
-          ],
-        ),
-      ),
+          );
+      },
     );
-    controller.dispose();
-    if (result == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Premium code redeemed!')),
-      );
-    }
   }
 
   Future<void> _startRecording() async {
@@ -1502,7 +1571,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           value: current, // keep current mode unchanged
                           onTap: () {
                             WidgetsBinding.instance.addPostFrameCallback((_) {
-                              _showPremiumCodeDialog();
+                              _showPurchasePage();
                             });
                           },
                           child: SizedBox(
@@ -1560,7 +1629,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                       ),
                                       const SizedBox(height: 4),
                                       Text(
-                                        'Tap to enter premium code',
+                                        'Tap to enter private code',
                                         style: TextStyle(
                                           fontSize: 11,
                                           color: Colors.grey[500],
@@ -1826,6 +1895,93 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ],
         ),
       ),
+    );
+  }
+}
+
+class _RedeemCodeSection extends StatefulWidget {
+  final void Function(int usedSeconds, int limitMinutes) onRedeemed;
+
+  const _RedeemCodeSection({required this.onRedeemed});
+
+  @override
+  State<_RedeemCodeSection> createState() => _RedeemCodeSectionState();
+}
+
+class _RedeemCodeSectionState extends State<_RedeemCodeSection> {
+  final _controller = TextEditingController();
+  String? _error;
+  bool _isLoading = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _redeem() async {
+    final code = _controller.text.trim();
+    if (code.isEmpty) return;
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    final res = await UserService.instance.redeemCode(code);
+    if (!mounted) return;
+    if (res['success'] == true) {
+      widget.onRedeemed(res['usedSeconds'] as int, res['limitMinutes'] as int);
+    } else {
+      setState(() {
+        _isLoading = false;
+        _error = res['error'] as String?;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _controller,
+            textCapitalization: TextCapitalization.characters,
+            decoration: InputDecoration(
+              hintText: 'Enter private code',
+              errorText: _error,
+              isDense: true,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onSubmitted: (_) => _redeem(),
+          ),
+        ),
+        const SizedBox(width: 10),
+        SizedBox(
+          height: 44,
+          child: ElevatedButton(
+            onPressed: _isLoading ? null : _redeem,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.black87,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: _isLoading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child:
+                        CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Text('Redeem'),
+          ),
+        ),
+      ],
     );
   }
 }
