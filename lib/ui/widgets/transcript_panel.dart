@@ -229,6 +229,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _isLastNonEmptyLine(i) &&
+                                _draftInline &&
                                 (widget.draft.isNotEmpty ||
                                     widget.showEllipsis)
                             ? Text.rich(
@@ -269,7 +270,8 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                                 ),
                               ),
                       ),
-                  if (widget.history.every((l) => l.trim().isEmpty) &&
+                  // Draft standalone: no history yet, or new paragraph started (trailing empty line)
+                  if (!_draftInline &&
                       (widget.draft.isNotEmpty || widget.showEllipsis))
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
@@ -291,6 +293,11 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       ),
     );
   }
+
+  /// Draft attaches inline only if the last history entry is non-empty
+  /// (i.e. no new-paragraph timer has fired since the last confirmed text).
+  bool get _draftInline =>
+      widget.history.isNotEmpty && widget.history.last.trim().isNotEmpty;
 
   bool _isLastNonEmptyLine(int index) {
     for (int j = index + 1; j < widget.history.length; j++) {

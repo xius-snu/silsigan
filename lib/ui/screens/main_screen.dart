@@ -702,6 +702,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ref.read(koreanHistoryProvider.notifier).update(
                     (state) => [...state, ''],
                   );
+              // Keep translation panel in sync — new paragraph break for both
+              _newLineTimerTranslation?.cancel();
+              ref.read(vietnameseHistoryProvider.notifier).update(
+                    (state) => [...state, ''],
+                  );
               _wordTimestampsPerLine.add([]);
             },
           );
@@ -774,20 +779,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
         });
       } else if (translation.isNotEmpty) {
         // Split mode: append to last line (ignore empty translations)
+        // New-line timer is handled by transcription's _newLineTimer to keep panels in sync
         ref.read(vietnameseHistoryProvider.notifier).update((state) {
           if (state.isEmpty) return [translation];
           final updated = List<String>.from(state);
           updated.last = '${updated.last} $translation';
           return updated;
         });
-        _newLineTimerTranslation = Timer(
-          const Duration(milliseconds: AppConstants.newLinePauseMs),
-          () {
-            ref.read(vietnameseHistoryProvider.notifier).update(
-                  (state) => [...state, ''],
-                );
-          },
-        );
       }
       ref.read(vietnameseDraftProvider.notifier).state = '';
     };
@@ -1645,20 +1643,37 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           child: SizedBox(
                             width: 200,
                             child: _isPrivate
-                                ? Row(
-                                    children: [
-                                      Icon(Icons.all_inclusive,
-                                          size: 16,
-                                          color: Colors.green[700]),
-                                      const SizedBox(width: 8),
-                                      const Text(
-                                        'Usage: Unlimited',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w500,
+                                ? Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFD4A843),
+                                      borderRadius:
+                                          BorderRadius.circular(8),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'Private Mode',
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                            color: Color(0xFF3E2700),
+                                          ),
                                         ),
-                                      ),
-                                    ],
+                                        SizedBox(width: 8),
+                                        Text(
+                                          'UNLIMITED',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w500,
+                                            color: Color(0xFF3E2700),
+                                            letterSpacing: 0.5,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   )
                                 : Column(
                                     crossAxisAlignment:
