@@ -36,6 +36,12 @@ function nextLimitedSonioxKey() {
 const SONIOX_PRIVATE_KEY = process.env.SONIOX_PRIVATE_KEY || null;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
+// When true: reject all non-private WebSocket connections immediately
+// without hitting DB or opening a Soniox upstream. Used to shut down
+// public access cheaply — cuts per-reconnect cost from ~100 KB (audio
+// forwarded upstream) to ~250 B (just the close frame).
+const PUBLIC_ACCESS_DISABLED = process.env.PUBLIC_ACCESS_DISABLED === 'true';
+
 // ============================================
 // DATABASE
 // ============================================
@@ -954,13 +960,19 @@ async function start() {
 
     fastify.get('/ws/soniox', { websocket: true }, async (socket, req) => {
         const { userId, token } = req.query;
+        const wantsPrivate = req.query.private === '1';
+
+        // Public access is closed — reject before any DB/Soniox work.
+        if (PUBLIC_ACCESS_DISABLED && !wantsPrivate) {
+            socket.close(4010, 'Service closed');
+            return;
+        }
 
         if (!userId || !token) {
             socket.close(4000, 'Missing userId or token');
             return;
         }
 
-        const wantsPrivate = req.query.private === '1';
         if (wantsPrivate && !SONIOX_PRIVATE_KEY) {
             socket.close(4002, 'Private key not configured');
             return;
@@ -1086,6 +1098,12 @@ async function start() {
     // ==================
 
     fastify.get('/ws/soniox-limited', { websocket: true }, async (socket, req) => {
+        // Public access is closed — reject before any DB/Soniox work.
+        if (PUBLIC_ACCESS_DISABLED) {
+            socket.close(4010, 'Service closed');
+            return;
+        }
+
         const { userId, token } = req.query;
 
         if (!userId || !token) {
