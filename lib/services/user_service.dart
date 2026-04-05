@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:device_info_plus/device_info_plus.dart';
@@ -12,9 +13,13 @@ class UserService {
   static final UserService instance = UserService._();
   UserService._();
 
+  static const _hardwareIdChannel =
+      MethodChannel('com.silsigan.app/hardware_id');
+
   String? _userId;
   String? _friendCode;
   String? _authToken;
+  String? _hardwareId;
   bool _initialized = false;
 
   String? get userId => _userId;
@@ -31,6 +36,10 @@ class UserService {
 
   Future<void> init() async {
     if (_initialized) return;
+
+    // Read hardware ID first — survives app data clear (Android) and
+    // uninstall/reinstall (iOS). Null on unsupported platforms / errors.
+    _hardwareId = await _getHardwareId();
 
     _userId = await _getStableDeviceId();
 
@@ -55,6 +64,10 @@ class UserService {
     // Auto-register if no auth token
     if (_authToken == null) {
       await _register();
+    } else {
+      // Existing users with a valid token: ensure hardwareId is linked to
+      // their account on the server (one-time migration, idempotent).
+      _linkHardwareIfNeeded();
     }
 
     // Sync friend code on every launch (fire-and-forget)
@@ -64,7 +77,21 @@ class UserService {
 
     _initialized = true;
     debugPrint(
-        'UserService: init complete, userId=$_userId, hasToken=${_authToken != null}');
+        'UserService: init complete, userId=$_userId, hasToken=${_authToken != null}, hasHardwareId=${_hardwareId != null}');
+  }
+
+  Future<String?> _getHardwareId() async {
+    try {
+      if (kIsWeb) return null;
+      if (Platform.isAndroid) {
+        return await _hardwareIdChannel.invokeMethod<String>('getAndroidId');
+      } else if (Platform.isIOS) {
+        return await _hardwareIdChannel.invokeMethod<String>('getKeychainId');
+      }
+    } catch (e) {
+      debugPrint('Hardware ID lookup failed: $e');
+    }
+    return null;
   }
 
   Future<void> _register() async {
@@ -76,6 +103,7 @@ class UserService {
             body: json.encode({
               'userId': _userId,
               'friendCode': _friendCode,
+              if (_hardwareId != null) 'hardwareId': _hardwareId,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -84,13 +112,53 @@ class UserService {
         final data = json.decode(response.body);
         if (data['token'] != null) {
           _authToken = data['token'] as String;
+          // Server may resolve a different canonical userId when it matches
+          // our hardwareId to an existing account (e.g. after data clear).
+          // Adopt whatever the server returned so subsequent calls target it.
+          final resolvedUserId = data['userId'] as String?;
+          if (resolvedUserId != null && resolvedUserId.isNotEmpty) {
+            _userId = resolvedUserId;
+          }
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('auth_token', _authToken!);
           await prefs.setString('auth_user_id', _userId!);
+          // Mark hardware as synced so we don't redundantly call link-hardware
+          if (_hardwareId != null) {
+            await prefs.setBool('hardware_id_synced', true);
+          }
         }
       }
     } catch (e) {
       debugPrint('Register error: $e');
+    }
+  }
+
+  /// Fire-and-forget: links the device's hardwareId to the current user's
+  /// server row, if not already synced. Used by existing users with a valid
+  /// token who never went through the updated /register flow. Idempotent.
+  Future<void> _linkHardwareIfNeeded() async {
+    if (_hardwareId == null || _userId == null || _authToken == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('hardware_id_synced') == true) return;
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/api/user/link-hardware'),
+            headers: _authHeaders,
+            body: json.encode({
+              'userId': _userId,
+              'hardwareId': _hardwareId,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        await prefs.setBool('hardware_id_synced', true);
+        debugPrint('UserService: hardware ID linked to server');
+      } else {
+        debugPrint('Link hardware failed: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Link hardware error: $e');
     }
   }
 
@@ -126,8 +194,13 @@ class UserService {
 
     if (uniqueId == null) {
       try {
-        if (!kIsWeb && Platform.isAndroid) {
-          // Generate a random UUID — Build.ID is NOT unique per device
+        // Prefer hardware ID (ANDROID_ID / iOS keychain UUID) so the userId
+        // stays stable across app data clear and uninstall/reinstall. Falls
+        // back to platform-specific defaults if the platform channel failed.
+        if (_hardwareId != null && _hardwareId!.isNotEmpty) {
+          uniqueId = _hardwareId!;
+        } else if (!kIsWeb && Platform.isAndroid) {
+          // Fallback: random UUID — Build.ID is NOT unique per device
           uniqueId =
               '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(999999999)}';
         } else if (!kIsWeb && Platform.isIOS) {

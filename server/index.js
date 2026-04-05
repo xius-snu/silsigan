@@ -153,6 +153,12 @@ async function start() {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS used_seconds INT DEFAULT 0`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT FALSE`);
 
+    // Hardware ID — persistent per-device identifier that survives app data
+    // clear (Android ANDROID_ID) and uninstall/reinstall (iOS keychain UUID).
+    // Used to prevent usage-limit abuse via account resetting.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS hardware_id TEXT`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hardware_id ON users(hardware_id) WHERE hardware_id IS NOT NULL`);
+
     // Premium codes table
     await pool.query(`
         CREATE TABLE IF NOT EXISTS premium_codes (
@@ -218,33 +224,91 @@ async function start() {
     // ==================
 
     fastify.post('/api/user/register', async (req, reply) => {
-        const { userId, friendCode } = req.body;
+        const { userId, friendCode, hardwareId } = req.body;
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
 
         try {
-            const existing = await pool.query(
-                'SELECT auth_token_hash FROM users WHERE user_id = $1',
-                [userId]
-            );
-
             const newToken = crypto.randomUUID();
             const newTokenHash = hashToken(newToken);
 
-            if (existing.rows.length > 0) {
-                await pool.query(
-                    'UPDATE users SET auth_token_hash = $2, friend_code = COALESCE(friend_code, $3) WHERE user_id = $1',
-                    [userId, newTokenHash, friendCode || null]
+            // Priority 1: If a hardwareId is provided and matches an existing
+            // user, that user is the canonical one. This protects against
+            // account resetting via app data clear / uninstall-reinstall.
+            if (hardwareId) {
+                const byHardware = await pool.query(
+                    'SELECT user_id FROM users WHERE hardware_id = $1',
+                    [hardwareId]
                 );
-            } else {
-                await pool.query(
-                    'INSERT INTO users (user_id, auth_token_hash, friend_code) VALUES ($1, $2, $3)',
-                    [userId, newTokenHash, friendCode || null]
-                );
+                if (byHardware.rows.length > 0) {
+                    const resolvedUserId = byHardware.rows[0].user_id;
+                    await pool.query(
+                        'UPDATE users SET auth_token_hash = $2, friend_code = COALESCE(friend_code, $3) WHERE user_id = $1',
+                        [resolvedUserId, newTokenHash, friendCode || null]
+                    );
+                    return { success: true, token: newToken, userId: resolvedUserId };
+                }
             }
 
-            return { success: true, token: newToken };
+            // Priority 2: Match by the userId the client sent. This handles
+            // normal re-registration and migrates existing users by attaching
+            // the hardwareId to their row (only if it's not already set).
+            const byUserId = await pool.query(
+                'SELECT auth_token_hash, hardware_id FROM users WHERE user_id = $1',
+                [userId]
+            );
+
+            if (byUserId.rows.length > 0) {
+                await pool.query(
+                    `UPDATE users
+                     SET auth_token_hash = $2,
+                         friend_code = COALESCE(friend_code, $3),
+                         hardware_id = COALESCE(hardware_id, $4)
+                     WHERE user_id = $1`,
+                    [userId, newTokenHash, friendCode || null, hardwareId || null]
+                );
+                return { success: true, token: newToken, userId };
+            }
+
+            // Priority 3: Brand new user — create with hardwareId attached
+            await pool.query(
+                'INSERT INTO users (user_id, auth_token_hash, friend_code, hardware_id) VALUES ($1, $2, $3, $4)',
+                [userId, newTokenHash, friendCode || null, hardwareId || null]
+            );
+            return { success: true, token: newToken, userId };
         } catch (e) {
             fastify.log.error('Register error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Link a hardwareId to an existing authenticated user. This is used by
+    // existing users on first launch after the hardware-ID feature is shipped
+    // — their token is still valid, so they don't go through /register, but
+    // we still need to associate their device hardwareId with their row.
+    // Idempotent: only sets hardware_id if currently NULL. Does not roll token.
+    fastify.post('/api/user/link-hardware', async (req, reply) => {
+        const { userId, hardwareId } = req.body;
+        if (!userId || !hardwareId) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        try {
+            // Check if this hardwareId is already linked to a DIFFERENT user.
+            // If so, refuse — we can't silently overwrite account ownership.
+            const existing = await pool.query(
+                'SELECT user_id FROM users WHERE hardware_id = $1',
+                [hardwareId]
+            );
+            if (existing.rows.length > 0 && existing.rows[0].user_id !== userId) {
+                return reply.code(409).send({ error: 'Hardware already linked to another account' });
+            }
+
+            await pool.query(
+                'UPDATE users SET hardware_id = COALESCE(hardware_id, $2) WHERE user_id = $1',
+                [userId, hardwareId]
+            );
+            return { success: true };
+        } catch (e) {
+            fastify.log.error('Link hardware error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         }
     });
