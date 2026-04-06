@@ -81,6 +81,7 @@ const PUBLIC_ROUTES = new Set([
     'GET:/ws/session',
     'POST:/api/user/activity',
     'POST:/api/user/usage',
+    'POST:/api/proxy-auth',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -386,6 +387,31 @@ async function start() {
         } catch (e) {
             fastify.log.error('Usage query error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Auth endpoint for the standalone Hetzner proxy
+    fastify.post('/api/proxy-auth', async (req, reply) => {
+        const { userId, tokenHash, checkUsage, checkPrivate } = req.body;
+        if (!userId || !tokenHash) return reply.code(400).send({ valid: false });
+        try {
+            const res = await pool.query(
+                'SELECT auth_token_hash, COALESCE(is_private, FALSE) AS is_private, COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+            if (res.rows.length === 0 || res.rows[0].auth_token_hash !== tokenHash) {
+                return { valid: false };
+            }
+            const row = res.rows[0];
+            const result = { valid: true };
+            if (checkPrivate) result.isPrivate = row.is_private;
+            if (checkUsage && !row.is_private) {
+                result.usageLimitReached = parseInt(row.used_seconds) >= parseInt(row.limit_minutes) * 60;
+            }
+            return result;
+        } catch (e) {
+            fastify.log.error('Proxy auth error: ' + e.message);
+            return reply.code(500).send({ valid: false });
         }
     });
 
