@@ -17,7 +17,7 @@ class AppConstants {
   static const chunkIntervalMs = 100;
   static const audioFormat = 'pcm_s16le';
   static const endpointDelayMs = 2000;
-  static const newLinePauseMs = 4000;
+  static const newLinePauseMs = 2000;
 
   // UI — Figma design tokens
   static const Color bgColor = Color(0xFFEAEAEA);

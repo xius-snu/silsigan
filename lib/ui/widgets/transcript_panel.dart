@@ -3,6 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
 
+/// Strip leading whitespace and leading punctuation (+ trailing space) so that
+/// a displayed line never visually starts with a space or dangling punctuation.
+String _cleanLineStart(String text) {
+  text = text.trimLeft();
+  return text.replaceFirst(RegExp(r'^[,.\-;:!?、。，；：！？…·]+\s*'), '');
+}
+
 class TranscriptPanel extends StatefulWidget {
   final List<String> history;
   final String draft;
@@ -13,6 +20,12 @@ class TranscriptPanel extends StatefulWidget {
   final bool showSpeakerToggle;
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
+
+  /// When true, force the draft to render standalone (on a new line) even if
+  /// this panel's own history doesn't have a trailing empty entry. Used by
+  /// the translation panel to mirror the transcription panel's paragraph
+  /// break state, so both drafts go to a new line together after a silence.
+  final bool forceDraftStandalone;
 
   const TranscriptPanel({
     super.key,
@@ -25,6 +38,7 @@ class TranscriptPanel extends StatefulWidget {
     this.showSpeakerToggle = false,
     this.speakerEnabled = false,
     this.onSpeakerToggle,
+    this.forceDraftStandalone = false,
   });
 
   @override
@@ -230,16 +244,14 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _isLastNonEmptyLine(i) &&
                                 _draftInline &&
-                                (widget.draft.isNotEmpty ||
-                                    widget.showEllipsis)
+                                (widget.draft.isNotEmpty || widget.showEllipsis)
                             ? Text.rich(
                                 TextSpan(
                                   children: [
                                     TextSpan(
                                       text: widget.history[i],
                                       style: TextStyle(
-                                        fontSize:
-                                            AppConstants.contentFontSize,
+                                        fontSize: AppConstants.contentFontSize,
                                         color: AppConstants.textPrimary
                                             .withOpacity(
                                                 AppConstants.historyOpacity),
@@ -249,8 +261,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                                     TextSpan(
                                       text: ' ${_buildDraftText()}',
                                       style: const TextStyle(
-                                        fontSize:
-                                            AppConstants.contentFontSize,
+                                        fontSize: AppConstants.contentFontSize,
                                         color: AppConstants.textPrimary,
                                         fontWeight: FontWeight.w400,
                                         height: 1.5,
@@ -264,8 +275,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                                 style: TextStyle(
                                   fontSize: AppConstants.contentFontSize,
                                   color: AppConstants.textPrimary
-                                      .withOpacity(
-                                          AppConstants.historyOpacity),
+                                      .withOpacity(AppConstants.historyOpacity),
                                   height: 1.5,
                                 ),
                               ),
@@ -276,7 +286,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
-                        _buildDraftText(),
+                        _cleanLineStart(_buildDraftText()),
                         style: const TextStyle(
                           fontSize: AppConstants.contentFontSize,
                           color: AppConstants.textPrimary,
@@ -295,9 +305,13 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
   }
 
   /// Draft attaches inline only if the last history entry is non-empty
-  /// (i.e. no new-paragraph timer has fired since the last confirmed text).
+  /// (i.e. no new-paragraph timer has fired since the last confirmed text)
+  /// AND the parent hasn't forced standalone rendering (used by the
+  /// translation panel to mirror the transcription panel's paragraph break).
   bool get _draftInline =>
-      widget.history.isNotEmpty && widget.history.last.trim().isNotEmpty;
+      !widget.forceDraftStandalone &&
+      widget.history.isNotEmpty &&
+      widget.history.last.trim().isNotEmpty;
 
   bool _isLastNonEmptyLine(int index) {
     for (int j = index + 1; j < widget.history.length; j++) {

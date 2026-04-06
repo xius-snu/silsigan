@@ -149,7 +149,7 @@ async function start() {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_recorded_at TIMESTAMP`);
 
     // Usage limit columns
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS usage_limit_minutes INT DEFAULT 50`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS usage_limit_minutes INT DEFAULT 30`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS used_seconds INT DEFAULT 0`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT FALSE`);
 
@@ -374,7 +374,7 @@ async function start() {
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
         try {
             const res = await pool.query(
-                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes, COALESCE(is_private, FALSE) AS is_private FROM users WHERE user_id = $1',
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes, COALESCE(is_private, FALSE) AS is_private FROM users WHERE user_id = $1',
                 [userId]
             );
             if (res.rows.length === 0) return reply.code(404).send({ error: 'User not found' });
@@ -421,7 +421,7 @@ async function start() {
 
             // Add minutes to user's limit
             await client.query(
-                'UPDATE users SET usage_limit_minutes = COALESCE(usage_limit_minutes, 50) + $2 WHERE user_id = $1',
+                'UPDATE users SET usage_limit_minutes = COALESCE(usage_limit_minutes, 30) + $2 WHERE user_id = $1',
                 [userId, bonusMinutes]
             );
 
@@ -429,7 +429,7 @@ async function start() {
 
             // Fetch updated values
             const updated = await pool.query(
-                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                 [userId]
             );
 
@@ -1068,7 +1068,7 @@ async function start() {
         if (!wantsPrivate) {
             try {
                 const usageRes = await pool.query(
-                    'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                    'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                     [userId]
                 );
                 if (usageRes.rows.length > 0) {
@@ -1201,7 +1201,7 @@ async function start() {
         // Check usage limit
         try {
             const usageRes = await pool.query(
-                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 50) AS limit_minutes FROM users WHERE user_id = $1',
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                 [userId]
             );
             if (usageRes.rows.length > 0) {

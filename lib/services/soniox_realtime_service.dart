@@ -59,6 +59,13 @@ class SonioxRealtimeService {
   Timer? _rotationTimer;
   static const _rotationIntervalMinutes = 10;
 
+  // Late translation flush — debounces late-arriving translation tokens that
+  // come in AFTER the source endpoint has already fired. Without this, those
+  // tokens would get stuck in _pendingTranslation and merge with the NEXT
+  // utterance's translation, causing visual "adjacency" bugs in the draft.
+  Timer? _lateTranslationTimer;
+  static const _lateTranslationFlushMs = 800;
+
   // Callbacks
   Function(String draft)? onTranscriptionDraft;
   Function(String transcript)? onTranscriptionCompleted;
@@ -250,6 +257,7 @@ class SonioxRealtimeService {
 
   /// Flush accumulated pending tokens to callbacks without losing data.
   void _flushPendingTokens() {
+    _lateTranslationTimer?.cancel();
     if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
       // Only emit if it's not garbage (passes repetition check)
@@ -339,7 +347,33 @@ class SonioxRealtimeService {
     }
   }
 
+  /// Flushes any lingering translation buffer as a completion. Called when
+  /// new source tokens arrive for the next utterance (pre-empting the late
+  /// debounce timer) or when the debounce timer itself fires.
+  void _flushLateTranslation() {
+    _lateTranslationTimer?.cancel();
+    if (_pendingTranslation.isEmpty && _provisionalTranslation.isEmpty) return;
+    final text = (_pendingTranslation + _provisionalTranslation).trim();
+    if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
+      onTranslationCompleted?.call(text);
+    }
+    _pendingTranslation = '';
+    _provisionalTranslation = '';
+  }
+
   void _processSourceTokens(List<Map<String, dynamic>> tokens) {
+    // Flush any late-arriving translation tokens from the PREVIOUS utterance
+    // before we start accumulating source for the NEXT one. Without this,
+    // translation tokens that arrived after the previous source endpoint
+    // (because Soniox's translation lags the source) would stay in
+    // _pendingTranslation and get concatenated onto the next utterance's
+    // translation, producing a visually "stuck together" draft.
+    if (_pendingUtterance.isEmpty &&
+        _provisionalText.isEmpty &&
+        (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty)) {
+      _flushLateTranslation();
+    }
+
     final hadProvisional = _provisionalText.isNotEmpty;
     String newProvisionalText = '';
     String newFinalText = '';
@@ -454,6 +488,20 @@ class SonioxRealtimeService {
     }
 
     onTranslationDraft?.call(_pendingTranslation + _provisionalTranslation);
+
+    // Late-translation debounce: if these tokens arrived while we're between
+    // utterances (source buffers empty because the last endpoint already
+    // fired), they belong to the PREVIOUS utterance. Schedule a flush so
+    // they get confirmed into history before the next utterance starts.
+    // Cancelled/replaced if more translation tokens arrive, or pre-empted
+    // by _processSourceTokens when new source tokens arrive.
+    if (_pendingUtterance.isEmpty && _provisionalText.isEmpty) {
+      _lateTranslationTimer?.cancel();
+      _lateTranslationTimer = Timer(
+        const Duration(milliseconds: _lateTranslationFlushMs),
+        _flushLateTranslation,
+      );
+    }
   }
 
   // ─── Audio sending ───
@@ -541,6 +589,7 @@ class SonioxRealtimeService {
   }
 
   void _resetTokenState() {
+    _lateTranslationTimer?.cancel();
     _pendingUtterance = '';
     _provisionalText = '';
     _pendingTranslation = '';
@@ -553,6 +602,7 @@ class SonioxRealtimeService {
     _isReconnecting = false;
     _isRotating = false;
     _stopRotationTimer();
+    _lateTranslationTimer?.cancel();
     _clearAudioBuffer();
     _subscription?.cancel();
     _subscription = null;

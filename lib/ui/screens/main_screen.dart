@@ -36,6 +36,13 @@ import '../../services/background_service.dart';
 import '../../services/update_service.dart';
 import 'live_session_screen.dart';
 
+/// Strip leading whitespace and leading punctuation (+ trailing space) so that
+/// a displayed line never visually starts with a space or dangling punctuation.
+String _cleanLineStart(String text) {
+  text = text.trimLeft();
+  return text.replaceFirst(RegExp(r'^[,.\-;:!?、。，；：！？…·]+\s*'), '');
+}
+
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
 
@@ -50,6 +57,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
   final ElevenLabsTtsService _ttsService = ElevenLabsTtsService();
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
+  bool _translationNewLinePending = false;
 
   // Auto-TTS: fire TTS on draft text if source endpoint is slow
   Timer? _ttsDraftTimer;
@@ -83,7 +91,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Usage limit tracking
   int _usedSeconds = 0;
-  int _limitMinutes = 50;
+  int _limitMinutes = 30;
   Timer? _usageLimitTimer;
   static const _isPrivateMode =
       String.fromEnvironment('SONIOX_PRIVATE') == 'true';
@@ -381,9 +389,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
     const packages = [
       {'hours': 1, 'price': '15,000', 'label': '1 Hour', 'per': '15,000₫/hr'},
       {'hours': 5, 'price': '75,000', 'label': '5 Hours', 'per': '15,000₫/hr'},
-      {'hours': 10, 'price': '139,000', 'label': '10 Hours', 'per': '13,900₫/hr', 'badge': 'POPULAR'},
-      {'hours': 30, 'price': '369,000', 'label': '30 Hours', 'per': '12,300₫/hr', 'badge': 'SAVE 18%'},
-      {'hours': 50, 'price': '599,000', 'label': '50 Hours', 'per': '11,980₫/hr', 'badge': 'BEST VALUE'},
+      {
+        'hours': 10,
+        'price': '139,000',
+        'label': '10 Hours',
+        'per': '13,900₫/hr',
+        'badge': 'POPULAR'
+      },
+      {
+        'hours': 30,
+        'price': '369,000',
+        'label': '30 Hours',
+        'per': '12,300₫/hr',
+        'badge': 'SAVE 18%'
+      },
+      {
+        'hours': 50,
+        'price': '599,000',
+        'label': '50 Hours',
+        'per': '11,980₫/hr',
+        'badge': 'BEST VALUE'
+      },
     ];
 
     await showModalBottomSheet(
@@ -391,198 +417,155 @@ class _MainScreenState extends ConsumerState<MainScreen>
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
-          return Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(ctx).viewInsets.bottom,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Handle bar
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.grey[300],
-                        borderRadius: BorderRadius.circular(2),
-                      ),
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Handle bar
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                  const SizedBox(height: 20),
-                  const Text(
-                    'Add More Time',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Add More Time',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Choose a plan to extend your usage',
-                    style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 20),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Sign in to purchase more time',
+                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
 
-                  // Purchase options
-                  ...packages.map((pkg) {
-                    final badge = pkg['badge'] as String?;
-                    final hasBadge = badge != null;
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(14),
-                          onTap: () {
-                            showDialog(
-                              context: ctx,
-                              builder: (c) => AlertDialog(
-                                title: const Text('Unavailable'),
-                                content: const Text(
-                                  'Purchases are not available at this time.',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(c),
-                                    child: const Text('OK'),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                          child: Container(
-                            decoration: BoxDecoration(
-                              border: Border.all(
-                                color: hasBadge
-                                    ? Colors.green.shade400
-                                    : Colors.grey.shade300,
-                                width: hasBadge ? 1.5 : 1,
-                              ),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 14),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Text(
-                                            pkg['label'] as String,
-                                            style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                          if (hasBadge) ...[
-                                            const SizedBox(width: 8),
-                                            Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 6,
-                                                      vertical: 2),
-                                              decoration: BoxDecoration(
-                                                color: Colors.green.shade50,
-                                                borderRadius:
-                                                    BorderRadius.circular(4),
-                                              ),
-                                              child: Text(
-                                                badge,
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  fontWeight: FontWeight.w700,
-                                                  color:
-                                                      Colors.green.shade700,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        pkg['per'] as String,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.grey[500],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 14, vertical: 8),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black87,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    '${pkg['price']}₫',
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                // Locked sign-in buttons
+                _buildLockedSignInButton(
+                  ctx,
+                  icon: Icons.g_mobiledata,
+                  label: 'Continue with Google',
+                  color: Colors.white,
+                  textColor: Colors.black87,
+                  borderColor: Colors.grey.shade300,
+                ),
+                const SizedBox(height: 10),
+                _buildLockedSignInButton(
+                  ctx,
+                  icon: Icons.apple,
+                  label: 'Continue with Apple',
+                  color: Colors.black87,
+                  textColor: Colors.white,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Coming soon',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                  textAlign: TextAlign.center,
+                ),
+
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(child: Divider(color: Colors.grey[300])),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Text(
+                        'or',
+                        style: TextStyle(fontSize: 13, color: Colors.grey[500]),
                       ),
+                    ),
+                    Expanded(child: Divider(color: Colors.grey[300])),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // Redeem code section
+                _RedeemCodeSection(
+                  onRedeemed: (usedSec, limitMin) {
+                    setState(() {
+                      _usedSeconds = usedSec;
+                      _limitMinutes = limitMin;
+                    });
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Code redeemed!')),
                     );
-                  }),
-
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(child: Divider(color: Colors.grey[300])),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Text(
-                          'or',
-                          style: TextStyle(
-                              fontSize: 13, color: Colors.grey[500]),
-                        ),
-                      ),
-                      Expanded(child: Divider(color: Colors.grey[300])),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-
-                  // Redeem code section
-                  _RedeemCodeSection(
-                    onRedeemed: (usedSec, limitMin) {
-                      setState(() {
-                        _usedSeconds = usedSec;
-                        _limitMinutes = limitMin;
-                      });
-                      Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Code redeemed!')),
-                      );
-                    },
-                  ),
-                ],
-              ),
+                  },
+                ),
+              ],
             ),
-          );
+          ),
+        );
       },
+    );
+  }
+
+  Widget _buildLockedSignInButton(
+    BuildContext ctx, {
+    required IconData icon,
+    required String label,
+    required Color color,
+    required Color textColor,
+    Color? borderColor,
+  }) {
+    return Opacity(
+      opacity: 0.5,
+      child: Container(
+        height: 48,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+          border: borderColor != null ? Border.all(color: borderColor) : null,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () {
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(content: Text('Sign-in coming soon')),
+              );
+            },
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: textColor, size: 24),
+                const SizedBox(width: 10),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: textColor,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(Icons.lock_outline, color: textColor, size: 14),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -653,6 +636,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Set up Soniox transcription callbacks
     _sonioxService.onTranscriptionDraft = (draft) {
       ref.read(koreanDraftProvider.notifier).state = draft;
+      // Cancel the newline timer while draft text is active so the
+      // paragraph break can't fire mid-draft (which would make the
+      // draft jump from inline to a new line unexpectedly).
+      if (draft.isNotEmpty) _newLineTimer?.cancel();
     };
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
@@ -669,7 +656,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           // Line-by-line: each Soniox endpoint = one segment.
           // We always ADD a new entry (never merge with previous).
           ref.read(koreanHistoryProvider.notifier).update(
-                (state) => [...state, transcript],
+                (state) => [...state, _cleanLineStart(transcript)],
               );
           // Pre-create empty slot — will be filled by onTranslationCompleted
           // which fires immediately after (flushed at source boundary).
@@ -682,9 +669,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
         } else {
           // Split mode: append to last line, timer-based new lines
           ref.read(koreanHistoryProvider.notifier).update((state) {
-            if (state.isEmpty) return [transcript];
+            if (state.isEmpty) return [_cleanLineStart(transcript)];
             final updated = List<String>.from(state);
-            updated.last = '${updated.last} $transcript';
+            // If the last entry is empty (new-line timer just fired), replace
+            // it instead of appending with a space to avoid a leading space.
+            updated.last = updated.last.isEmpty
+                ? _cleanLineStart(transcript)
+                : '${updated.last} $transcript';
             return updated;
           });
           // Merge word timestamps into last line
@@ -704,6 +695,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   );
               // Keep translation panel in sync — new paragraph break for both
               _newLineTimerTranslation?.cancel();
+              _translationNewLinePending = true;
               ref.read(vietnameseHistoryProvider.notifier).update(
                     (state) => [...state, ''],
                   );
@@ -764,26 +756,49 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // slot counts as filled and alignment stays in sync.
         ref.read(vietnameseHistoryProvider.notifier).update((state) {
           if (state.isEmpty) {
-            return translation.isNotEmpty ? [translation] : state;
+            return translation.isNotEmpty
+                ? [_cleanLineStart(translation)]
+                : state;
           }
           final updated = List<String>.from(state);
           for (int i = 0; i < updated.length; i++) {
             if (updated[i].isEmpty) {
-              updated[i] = translation.isNotEmpty ? translation : ' ';
+              updated[i] =
+                  translation.isNotEmpty ? _cleanLineStart(translation) : ' ';
               return updated;
             }
           }
           // No empty slot — add as new entry
-          if (translation.isNotEmpty) return [...updated, translation];
+          if (translation.isNotEmpty) {
+            return [...updated, _cleanLineStart(translation)];
+          }
           return updated;
         });
       } else if (translation.isNotEmpty) {
-        // Split mode: append to last line (ignore empty translations)
-        // New-line timer is handled by transcription's _newLineTimer to keep panels in sync
+        // Split mode: append to the current paragraph line.
+        // If a paragraph break ('') was already pushed, insert before it
+        // so late-arriving translations stay with their paragraph.
         ref.read(vietnameseHistoryProvider.notifier).update((state) {
-          if (state.isEmpty) return [translation];
+          if (state.isEmpty) return [_cleanLineStart(translation)];
           final updated = List<String>.from(state);
-          updated.last = '${updated.last} $translation';
+          if (_translationNewLinePending && updated.last.isEmpty) {
+            // New paragraph — replace the '' placeholder (mirrors transcription)
+            _translationNewLinePending = false;
+            updated.last = _cleanLineStart(translation);
+          } else if (updated.last.isEmpty && updated.length >= 2) {
+            // Late-arriving translation — append to the line before the break
+            final i = updated.length - 2;
+            updated[i] = updated[i].isEmpty
+                ? _cleanLineStart(translation)
+                : '${updated[i]} $translation';
+          } else if (updated.last.isEmpty) {
+            // Single paragraph break — insert translation before it
+            updated.insert(
+                updated.length - 1, _cleanLineStart(translation));
+          } else {
+            // No paragraph break — append to last line
+            updated.last = '${updated.last} $translation';
+          }
           return updated;
         });
       }
@@ -1334,7 +1349,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
             ConversationSpeaker.bottom;
         final msg = ConversationMessage(
           speaker: currentSpeaker,
-          originalText: transcript,
+          originalText: _cleanLineStart(transcript),
         );
         ref.read(conversationMessagesProvider.notifier).update(
               (state) => [...state, msg],
@@ -1356,7 +1371,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
           for (int i = updated.length - 1; i >= 0; i--) {
             if (updated[i].speaker == currentSpeaker &&
                 updated[i].translatedText.isEmpty) {
-              updated[i] = updated[i].copyWith(translatedText: translation);
+              updated[i] = updated[i]
+                  .copyWith(translatedText: _cleanLineStart(translation));
               break;
             }
           }
@@ -1645,31 +1661,56 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             child: _isPrivate
                                 ? Container(
                                     padding: const EdgeInsets.symmetric(
-                                        horizontal: 12, vertical: 8),
+                                        horizontal: 14, vertical: 10),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFFD4A843),
-                                      borderRadius:
-                                          BorderRadius.circular(8),
+                                      gradient: const LinearGradient(
+                                        colors: [
+                                          Color(0xFF2C2C2E),
+                                          Color(0xFF1C1C1E),
+                                        ],
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                      ),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: const Color(0xFF48483A),
+                                        width: 0.5,
+                                      ),
                                     ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
+                                    child: Row(
                                       children: [
-                                        Text(
-                                          'Private Mode',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
-                                            color: Color(0xFF3E2700),
+                                        const Icon(
+                                          Icons.shield_outlined,
+                                          size: 16,
+                                          color: Color(0xFFCDB56C),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        const Expanded(
+                                          child: Text(
+                                            'Private Mode',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: Color(0xFFF5F5F7),
+                                              letterSpacing: 0.2,
+                                            ),
                                           ),
                                         ),
-                                        SizedBox(width: 8),
-                                        Text(
-                                          'UNLIMITED',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w500,
-                                            color: Color(0xFF3E2700),
-                                            letterSpacing: 0.5,
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF48483A),
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                          ),
+                                          child: const Text(
+                                            '\u221E',
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w600,
+                                              color: Color(0xFFCDB56C),
+                                            ),
                                           ),
                                         ),
                                       ],
@@ -1689,8 +1730,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                       ),
                                       const SizedBox(height: 6),
                                       ClipRRect(
-                                        borderRadius:
-                                            BorderRadius.circular(3),
+                                        borderRadius: BorderRadius.circular(3),
                                         child: LinearProgressIndicator(
                                           value: _limitMinutes > 0
                                               ? (_usedSeconds /
@@ -1698,8 +1738,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                                   .clamp(0.0, 1.0)
                                               : 0,
                                           minHeight: 6,
-                                          backgroundColor:
-                                              Colors.grey[300],
+                                          backgroundColor: Colors.grey[300],
                                           valueColor:
                                               AlwaysStoppedAnimation<Color>(
                                             pct >= 90
@@ -1801,6 +1840,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     showSpeakerToggle: showTtsToggle,
                     speakerEnabled: ttsEnabled,
                     onSpeakerToggle: _toggleTts,
+                    // Mirror the transcription panel's paragraph-break state:
+                    // if the transcription has a trailing empty entry (timer
+                    // fired after 4s silence), force the translation draft to
+                    // render on a new line too, even if the vietnamese history
+                    // hasn't caught up yet.
+                    forceDraftStandalone: koreanHistory.isNotEmpty &&
+                        koreanHistory.last.trim().isEmpty,
                   ),
                 ),
               ] else
@@ -2058,8 +2104,8 @@ class _RedeemCodeSectionState extends State<_RedeemCodeSection> {
                 ? const SizedBox(
                     width: 18,
                     height: 18,
-                    child:
-                        CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white),
                   )
                 : const Text('Redeem'),
           ),
