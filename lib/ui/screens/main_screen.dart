@@ -43,6 +43,12 @@ String _cleanLineStart(String text) {
   return text.replaceFirst(RegExp(r'^[,.\-;:!?、。，；：！？…·]+\s*'), '');
 }
 
+/// Count sentence-ending punctuation in [text].
+/// Treats ellipsis (... or …) as a single sentence boundary.
+int _countSentences(String text) {
+  return RegExp(r'\.{2,}|[.?!。…？！]').allMatches(text).length;
+}
+
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
 
@@ -57,6 +63,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
   final ElevenLabsTtsService _ttsService = ElevenLabsTtsService();
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
+  Timer? _sentenceBreakTimer;
   bool _translationNewLinePending = false;
 
   // Auto-TTS: fire TTS on draft text if source endpoint is slow
@@ -124,6 +131,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     WidgetsBinding.instance.removeObserver(this);
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _sentenceBreakTimer?.cancel();
     _ttsDraftTimer?.cancel();
     _autosaveTimer?.cancel();
     _incomingPollTimer?.cancel();
@@ -612,6 +620,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Cancel any stale timers from previous recording flush
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _sentenceBreakTimer?.cancel();
+    _sentenceBreakTimer = null;
 
     // Clear drafts but keep history (so re-pressing mic continues the session)
     ref.read(koreanDraftProvider.notifier).state = '';
@@ -687,21 +697,49 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ...words
             ];
           }
-          _newLineTimer = Timer(
-            const Duration(milliseconds: AppConstants.newLinePauseMs),
-            () {
-              ref.read(koreanHistoryProvider.notifier).update(
-                    (state) => [...state, ''],
-                  );
-              // Keep translation panel in sync — new paragraph break for both
-              _newLineTimerTranslation?.cancel();
-              _translationNewLinePending = true;
-              ref.read(vietnameseHistoryProvider.notifier).update(
-                    (state) => [...state, ''],
-                  );
-              _wordTimestampsPerLine.add([]);
-            },
-          );
+
+          // Schedule paragraph break if the current line has too many
+          // sentences. Uses a 1s deferred timer (same mechanism as the 2s
+          // silence timer) so late-arriving translations land on the
+          // correct line before the break fires.
+          final lastLine = ref.read(koreanHistoryProvider).lastOrNull ?? '';
+          if (_countSentences(lastLine) >=
+                  AppConstants.maxParagraphSentences &&
+              _sentenceBreakTimer == null) {
+            _newLineTimer?.cancel();
+            _sentenceBreakTimer = Timer(
+              const Duration(seconds: 1),
+              () {
+                _sentenceBreakTimer = null;
+                _newLineTimer?.cancel();
+                ref.read(koreanHistoryProvider.notifier).update(
+                      (state) => [...state, ''],
+                    );
+                _newLineTimerTranslation?.cancel();
+                _translationNewLinePending = true;
+                ref.read(vietnameseHistoryProvider.notifier).update(
+                      (state) => [...state, ''],
+                    );
+                _wordTimestampsPerLine.add([]);
+              },
+            );
+          } else if (_sentenceBreakTimer == null) {
+            _newLineTimer = Timer(
+              const Duration(milliseconds: AppConstants.newLinePauseMs),
+              () {
+                ref.read(koreanHistoryProvider.notifier).update(
+                      (state) => [...state, ''],
+                    );
+                // Keep translation panel in sync — new paragraph break for both
+                _newLineTimerTranslation?.cancel();
+                _translationNewLinePending = true;
+                ref.read(vietnameseHistoryProvider.notifier).update(
+                      (state) => [...state, ''],
+                    );
+                _wordTimestampsPerLine.add([]);
+              },
+            );
+          }
         }
 
         // Update context for next rotation with recent transcript
@@ -872,6 +910,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _sentenceBreakTimer?.cancel();
+    _sentenceBreakTimer = null;
     _ttsDraftTimer?.cancel();
     _ttsFiredForSegment = false;
     _usageLimitTimer?.cancel();
@@ -988,6 +1028,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
+    _sentenceBreakTimer?.cancel();
+    _sentenceBreakTimer = null;
     final rawKoreanHistory = ref.read(koreanHistoryProvider);
     final rawVietnameseHistory = ref.read(vietnameseHistoryProvider);
 
