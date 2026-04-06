@@ -1047,16 +1047,33 @@ async function start() {
             return;
         }
 
-        // Verify auth token
+        // Verify auth token and fetch user flags in one query
         const tokenHash = hashToken(token);
+        let dbIsPrivate = false;
         try {
             const res = await pool.query(
-                'SELECT auth_token_hash FROM users WHERE user_id = $1',
+                'SELECT auth_token_hash, COALESCE(is_private, FALSE) AS is_private, COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                 [userId]
             );
             if (res.rows.length === 0 || res.rows[0].auth_token_hash !== tokenHash) {
                 socket.close(4001, 'Invalid credentials');
                 return;
+            }
+            dbIsPrivate = res.rows[0].is_private;
+
+            // Client wants private key but user is not marked private in DB — reject
+            if (wantsPrivate && !dbIsPrivate) {
+                socket.close(4006, 'Private access not authorized');
+                return;
+            }
+
+            // Check usage limit (skip for DB-private users)
+            if (!dbIsPrivate) {
+                const { used_seconds, limit_minutes } = res.rows[0];
+                if (parseInt(used_seconds) >= parseInt(limit_minutes) * 60) {
+                    socket.close(4005, 'Usage limit reached');
+                    return;
+                }
             }
         } catch (e) {
             fastify.log.error('Soniox proxy auth error: ' + e.message);
@@ -1064,27 +1081,7 @@ async function start() {
             return;
         }
 
-        // Check usage limit (skip for private mode)
-        if (!wantsPrivate) {
-            try {
-                const usageRes = await pool.query(
-                    'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
-                    [userId]
-                );
-                if (usageRes.rows.length > 0) {
-                    const { used_seconds, limit_minutes } = usageRes.rows[0];
-                    if (parseInt(used_seconds) >= parseInt(limit_minutes) * 60) {
-                        socket.close(4005, 'Usage limit reached');
-                        return;
-                    }
-                }
-            } catch (e) {
-                fastify.log.error('Usage check error: ' + e.message);
-                // Allow connection on usage check failure (fail-open)
-            }
-        }
-
-        const apiKey = wantsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();
+        const apiKey = dbIsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();
         let sonioxWs = null;
         let configReceived = false;
         const pendingMessages = [];
