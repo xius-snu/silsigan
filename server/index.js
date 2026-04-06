@@ -1061,14 +1061,8 @@ async function start() {
             }
             dbIsPrivate = res.rows[0].is_private;
 
-            // Client wants private key but user is not marked private in DB — reject
-            if (wantsPrivate && !dbIsPrivate) {
-                socket.close(4006, 'Private access not authorized');
-                return;
-            }
-
-            // Check usage limit (skip for DB-private users)
-            if (!dbIsPrivate) {
+            // Check usage limit (skip for private-build clients and DB-private users)
+            if (!wantsPrivate && !dbIsPrivate) {
                 const { used_seconds, limit_minutes } = res.rows[0];
                 if (parseInt(used_seconds) >= parseInt(limit_minutes) * 60) {
                     socket.close(4005, 'Usage limit reached');
@@ -1081,7 +1075,7 @@ async function start() {
             return;
         }
 
-        const apiKey = dbIsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();
+        const apiKey = wantsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();
         let sonioxWs = null;
         let configReceived = false;
         const pendingMessages = [];
