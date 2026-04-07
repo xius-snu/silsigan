@@ -302,9 +302,12 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     }
     try {
       final date = _formatDate(_selectedSession!.createdAt);
+      final box = context.findRenderObject() as RenderBox?;
       await Share.shareXFiles(
         [XFile(audioPath, mimeType: 'audio/wav')],
         subject: 'Silsigan Audio — $date',
+        sharePositionOrigin:
+            box != null ? box.localToGlobal(Offset.zero) & box.size : null,
       );
     } catch (e) {
       if (mounted) {
@@ -365,9 +368,12 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         text.writeln(session.vietnameseFull);
       }
 
+      final box = context.findRenderObject() as RenderBox?;
       await Share.share(
         text.toString(),
         subject: sessionTitle,
+        sharePositionOrigin:
+            box != null ? box.localToGlobal(Offset.zero) & box.size : null,
       );
     } catch (e) {
       if (mounted) {
