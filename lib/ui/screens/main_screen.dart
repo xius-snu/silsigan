@@ -518,6 +518,82 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     );
                   },
                 ),
+
+                const SizedBox(height: 24),
+
+                // Restore purchases
+                Center(
+                  child: GestureDetector(
+                    onTap: () async {
+                      try {
+                        await Purchases.restorePurchases();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Purchases restored')),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Nothing to restore')),
+                          );
+                        }
+                      }
+                    },
+                    child: Text(
+                      'Restore Purchases',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey[500],
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                // Privacy Policy & Terms of Service
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    GestureDetector(
+                      onTap: () => launchUrl(
+                        Uri.parse('https://xius-snu.github.io/silsigan/privacy'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      child: Text(
+                        'Privacy Policy',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey[400],
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        '|',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[300]),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => launchUrl(
+                        Uri.parse('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      child: Text(
+                        'Terms of Use',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey[400],
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
