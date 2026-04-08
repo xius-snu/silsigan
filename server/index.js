@@ -198,6 +198,18 @@ async function start() {
         )
     `);
 
+    // Purchases table — tracks verified IAP transactions
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS purchases (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(user_id),
+            transaction_id TEXT UNIQUE,
+            product_id TEXT NOT NULL,
+            minutes INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
     // Session invites table
     await pool.query(`
         CREATE TABLE IF NOT EXISTS session_invites (
@@ -468,6 +480,119 @@ async function start() {
         } catch (e) {
             await client.query('ROLLBACK');
             fastify.log.error('Redeem code error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        } finally {
+            client.release();
+        }
+    });
+
+    // ==================
+    // PURCHASE ENDPOINT
+    // ==================
+
+    const PRODUCT_MINUTES = {
+        'com.silsigan.app.hours_1': 60,
+        'com.silsigan.app.hours_5': 300,
+        'com.silsigan.app.hours_10': 600,
+        'com.silsigan.app.hours_30': 1800,
+        'com.silsigan.app.hours_50': 3000,
+    };
+
+    const REVENUECAT_API_KEY = process.env.REVENUECAT_API_KEY || '';
+
+    fastify.post('/api/user/purchase', async (req, reply) => {
+        const { userId, minutes, productId, transactionId } = req.body;
+        if (!userId || !productId) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+
+        // Validate product and minutes
+        const expectedMinutes = PRODUCT_MINUTES[productId];
+        if (!expectedMinutes) {
+            return reply.code(400).send({ error: 'Unknown product' });
+        }
+
+        // Verify purchase with RevenueCat if API key is set
+        if (REVENUECAT_API_KEY) {
+            try {
+                const rcRes = await fetch(
+                    `https://api.revenuecat.com/v1/subscribers/${userId}`,
+                    { headers: { Authorization: `Bearer ${REVENUECAT_API_KEY}` } }
+                );
+                if (!rcRes.ok) {
+                    fastify.log.error(`RevenueCat verify failed: ${rcRes.status}`);
+                    return reply.code(403).send({ error: 'Purchase verification failed' });
+                }
+                const rcData = await rcRes.json();
+                // Check that this transaction exists in non_subscriptions
+                const purchases = rcData.subscriber?.non_subscriptions?.[productId] || [];
+                const found = transactionId
+                    ? purchases.some(p => p.store_transaction_id === transactionId)
+                    : purchases.length > 0;
+                if (!found) {
+                    return reply.code(403).send({ error: 'Transaction not found in RevenueCat' });
+                }
+            } catch (e) {
+                fastify.log.error('RevenueCat verification error: ' + e.message);
+                return reply.code(500).send({ error: 'Verification error' });
+            }
+        }
+
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            // Prevent duplicate crediting for the same transaction
+            if (transactionId) {
+                const dup = await client.query(
+                    'SELECT id FROM purchases WHERE transaction_id = $1',
+                    [transactionId]
+                );
+                if (dup.rows.length > 0) {
+                    await client.query('ROLLBACK');
+                    // Already credited — return current usage (idempotent)
+                    const cur = await pool.query(
+                        'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                        [userId]
+                    );
+                    return {
+                        success: true,
+                        added_minutes: expectedMinutes,
+                        used_seconds: parseInt(cur.rows[0].used_seconds),
+                        limit_minutes: parseInt(cur.rows[0].limit_minutes),
+                    };
+                }
+            }
+
+            // Record the purchase
+            await client.query(
+                'INSERT INTO purchases (user_id, transaction_id, product_id, minutes) VALUES ($1, $2, $3, $4)',
+                [userId, transactionId || null, productId, expectedMinutes]
+            );
+
+            // Add minutes to user's limit
+            await client.query(
+                'UPDATE users SET usage_limit_minutes = COALESCE(usage_limit_minutes, 30) + $2 WHERE user_id = $1',
+                [userId, expectedMinutes]
+            );
+
+            await client.query('COMMIT');
+
+            // Return updated usage
+            const updated = await pool.query(
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+
+            return {
+                success: true,
+                added_minutes: expectedMinutes,
+                used_seconds: parseInt(updated.rows[0].used_seconds),
+                limit_minutes: parseInt(updated.rows[0].limit_minutes),
+            };
+        } catch (e) {
+            await client.query('ROLLBACK');
+            fastify.log.error('Purchase error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         } finally {
             client.release();

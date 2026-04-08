@@ -34,6 +34,8 @@ import '../../services/user_service.dart';
 import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
 import '../../services/update_service.dart';
+import '../../services/purchase_service.dart';
+import 'package:purchases_flutter/purchases_flutter.dart';
 import 'live_session_screen.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -123,6 +125,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _restoreAutosaveDraft();
       _checkForUpdate();
       _fetchUsage();
+      PurchaseService.instance.init();
     });
   }
 
@@ -393,33 +396,39 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
-  Future<void> _showPurchasePage() async {
-    const packages = [
-      {'hours': 1, 'price': '15,000', 'label': '1 Hour', 'per': '15,000₫/hr'},
-      {'hours': 5, 'price': '75,000', 'label': '5 Hours', 'per': '15,000₫/hr'},
-      {
-        'hours': 10,
-        'price': '139,000',
-        'label': '10 Hours',
-        'per': '13,900₫/hr',
-        'badge': 'POPULAR'
-      },
-      {
-        'hours': 30,
-        'price': '369,000',
-        'label': '30 Hours',
-        'per': '12,300₫/hr',
-        'badge': 'SAVE 18%'
-      },
-      {
-        'hours': 50,
-        'price': '599,000',
-        'label': '50 Hours',
-        'per': '11,980₫/hr',
-        'badge': 'BEST VALUE'
-      },
-    ];
+  /// Metadata for each RevenueCat package identifier.
+  static const _packageMeta = {
+    'hours_1': {'label': '1 Hour', 'hours': 1},
+    'hours_5': {'label': '5 Hours', 'hours': 5, 'discount': '25% OFF'},
+    'hours_10': {
+      'label': '10 Hours',
+      'hours': 10,
+      'discount': '40% OFF',
+      'badge': 'POPULAR',
+    },
+    'hours_30': {
+      'label': '30 Hours',
+      'hours': 30,
+      'discount': '50% OFF',
+      'badge': 'SAVE 50%',
+    },
+    'hours_50': {
+      'label': '50 Hours',
+      'hours': 50,
+      'discount': '50% OFF',
+      'badge': 'BEST VALUE',
+    },
+  };
 
+  Future<void> _showPurchasePage() async {
+    final purchaseService = PurchaseService.instance;
+    if (!purchaseService.isInitialized) {
+      await purchaseService.init();
+    }
+    await purchaseService.refreshOfferings();
+    final rcPackages = purchaseService.availablePackages;
+
+    if (!mounted) return;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -461,35 +470,24 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Sign in to purchase more time',
+                  'Select a package to add more time',
                   style: TextStyle(fontSize: 14, color: Colors.grey[600]),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
 
-                // Locked sign-in buttons
-                _buildLockedSignInButton(
-                  ctx,
-                  icon: Icons.g_mobiledata,
-                  label: 'Continue with Google',
-                  color: Colors.white,
-                  textColor: Colors.black87,
-                  borderColor: Colors.grey.shade300,
-                ),
-                const SizedBox(height: 10),
-                _buildLockedSignInButton(
-                  ctx,
-                  icon: Icons.apple,
-                  label: 'Continue with Apple',
-                  color: Colors.black87,
-                  textColor: Colors.white,
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Coming soon',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[400]),
-                  textAlign: TextAlign.center,
-                ),
+                // Package cards from RevenueCat
+                if (rcPackages.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Text(
+                      'Unable to load packages. Please try again later.',
+                      style: TextStyle(fontSize: 14, color: Colors.grey[500]),
+                      textAlign: TextAlign.center,
+                    ),
+                  )
+                else
+                  ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
                 const SizedBox(height: 20),
                 Row(
@@ -525,6 +523,125 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ),
         );
       },
+    );
+  }
+
+  Widget _buildRcPackageCard(BuildContext ctx, Package rcPkg) {
+    final meta = _packageMeta[rcPkg.identifier] ?? {'label': rcPkg.identifier, 'hours': 0};
+    final label = meta['label'] as String;
+    final hours = meta['hours'] as int;
+    final badge = meta['badge'] as String?;
+    final discount = meta['discount'] as String?;
+    final hasBadge = badge != null;
+    final hasDiscount = discount != null;
+    final price = rcPkg.storeProduct.priceString;
+    final priceNum = rcPkg.storeProduct.price;
+    final perHour = hours > 0 ? '${rcPkg.storeProduct.currencyCode} ${(priceNum / hours).toStringAsFixed(2)}/hr' : '';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GestureDetector(
+        onTap: () async {
+          Navigator.pop(ctx);
+          final minutes = await PurchaseService.instance.purchase(rcPkg);
+          if (minutes != null && mounted) {
+            // Refresh usage from server
+            final usage = await UserService.instance.fetchUsage();
+            if (usage != null) {
+              setState(() {
+                _usedSeconds = usage['usedSeconds'] as int;
+                _limitMinutes = usage['limitMinutes'] as int;
+              });
+            }
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('$label added!')),
+            );
+          }
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: hasBadge ? const Color(0xFFF8F8FF) : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: hasBadge
+                  ? const Color(0xFF4A4A4A)
+                  : Colors.grey.shade300,
+              width: hasBadge ? 1.5 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          label,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (hasBadge) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2C2C2E),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              badge,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      perHour,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[500],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    price,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (hasDiscount)
+                    Text(
+                      discount,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF4CAF50),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
