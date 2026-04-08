@@ -421,12 +421,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
   };
 
   Future<void> _showPurchasePage() async {
-    final purchaseService = PurchaseService.instance;
-    if (!purchaseService.isInitialized) {
-      await purchaseService.init();
+    List<Package> rcPackages = [];
+    if (!Platform.isAndroid) {
+      final purchaseService = PurchaseService.instance;
+      if (!purchaseService.isInitialized) {
+        await purchaseService.init();
+      }
+      await purchaseService.refreshOfferings();
+      rcPackages = purchaseService.availablePackages;
     }
-    await purchaseService.refreshOfferings();
-    final rcPackages = purchaseService.availablePackages;
 
     if (!mounted) return;
     await showModalBottomSheet(
@@ -476,8 +479,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 ),
                 const SizedBox(height: 20),
 
-                // Package cards from RevenueCat
-                if (rcPackages.isEmpty)
+                // Package cards — RevenueCat on iOS, mock on Android
+                if (Platform.isAndroid)
+                  ..._androidMockPackages.map((pkg) => _buildMockPackageCard(ctx, pkg))
+                else if (rcPackages.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Text(
@@ -599,6 +604,83 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ),
         );
       },
+    );
+  }
+
+  static const _androidMockPackages = [
+    {'label': '1 Hour', 'price': '26,000₫', 'per': '26,000₫/hr', 'hours': 1},
+    {'label': '5 Hours', 'price': '79,000₫', 'per': '15,800₫/hr', 'hours': 5, 'discount': '39% OFF'},
+    {'label': '10 Hours', 'price': '159,000₫', 'per': '15,900₫/hr', 'hours': 10, 'discount': '39% OFF', 'badge': 'POPULAR'},
+    {'label': '30 Hours', 'price': '399,000₫', 'per': '13,300₫/hr', 'hours': 30, 'discount': '49% OFF', 'badge': 'SAVE 49%'},
+    {'label': '50 Hours', 'price': '659,000₫', 'per': '13,180₫/hr', 'hours': 50, 'discount': '49% OFF', 'badge': 'BEST VALUE'},
+  ];
+
+  Widget _buildMockPackageCard(BuildContext ctx, Map<String, Object> pkg) {
+    final label = pkg['label'] as String;
+    final price = pkg['price'] as String;
+    final perHour = pkg['per'] as String;
+    final badge = pkg['badge'] as String?;
+    final discount = pkg['discount'] as String?;
+    final hasBadge = badge != null;
+    final hasDiscount = discount != null;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GestureDetector(
+        onTap: () {
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            const SnackBar(content: Text('Purchases are not available on Android yet')),
+          );
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: hasBadge ? const Color(0xFFF8F8FF) : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: hasBadge ? const Color(0xFF4A4A4A) : Colors.grey.shade300,
+              width: hasBadge ? 1.5 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                        if (hasBadge) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2C2C2E),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(badge, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(perHour, style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(price, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  if (hasDiscount)
+                    Text(discount, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF4CAF50))),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
