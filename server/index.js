@@ -512,29 +512,40 @@ async function start() {
             return reply.code(400).send({ error: 'Unknown product' });
         }
 
-        // Verify purchase with RevenueCat if API key is set
+        // Verify purchase with RevenueCat if API key is set.
+        // RevenueCat may take a moment to process — retry up to 3 times.
         if (REVENUECAT_API_KEY) {
-            try {
-                const rcRes = await fetch(
-                    `https://api.revenuecat.com/v1/subscribers/${userId}`,
-                    { headers: { Authorization: `Bearer ${REVENUECAT_API_KEY}` } }
-                );
-                if (!rcRes.ok) {
-                    fastify.log.error(`RevenueCat verify failed: ${rcRes.status}`);
-                    return reply.code(403).send({ error: 'Purchase verification failed' });
+            let verified = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const rcRes = await fetch(
+                        `https://api.revenuecat.com/v1/subscribers/${userId}`,
+                        { headers: { Authorization: `Bearer ${REVENUECAT_API_KEY}` } }
+                    );
+                    if (!rcRes.ok) {
+                        fastify.log.error(`RevenueCat verify failed (attempt ${attempt}): ${rcRes.status}`);
+                    } else {
+                        const rcData = await rcRes.json();
+                        const purchases = rcData.subscriber?.non_subscriptions?.[productId] || [];
+                        const found = transactionId
+                            ? purchases.some(p => p.store_transaction_id === transactionId || p.id === transactionId)
+                            : purchases.length > 0;
+                        if (found) {
+                            verified = true;
+                            break;
+                        }
+                        fastify.log.warn(`RevenueCat: transaction not found yet (attempt ${attempt})`);
+                    }
+                } catch (e) {
+                    fastify.log.error(`RevenueCat verification error (attempt ${attempt}): ${e.message}`);
                 }
-                const rcData = await rcRes.json();
-                // Check that this transaction exists in non_subscriptions
-                const purchases = rcData.subscriber?.non_subscriptions?.[productId] || [];
-                const found = transactionId
-                    ? purchases.some(p => p.store_transaction_id === transactionId)
-                    : purchases.length > 0;
-                if (!found) {
-                    return reply.code(403).send({ error: 'Transaction not found in RevenueCat' });
+                // Wait before retrying (2s, 5s)
+                if (attempt < 2) {
+                    await new Promise(r => setTimeout(r, attempt === 0 ? 2000 : 5000));
                 }
-            } catch (e) {
-                fastify.log.error('RevenueCat verification error: ' + e.message);
-                return reply.code(500).send({ error: 'Verification error' });
+            }
+            if (!verified) {
+                return reply.code(403).send({ error: 'Purchase verification failed' });
             }
         }
 
@@ -542,7 +553,8 @@ async function start() {
         try {
             await client.query('BEGIN');
 
-            // Prevent duplicate crediting for the same transaction
+            // Prevent duplicate crediting — check by transaction_id or
+            // by (user_id, product_id) within a short window for null txn IDs.
             if (transactionId) {
                 const dup = await client.query(
                     'SELECT id FROM purchases WHERE transaction_id = $1',
@@ -550,7 +562,26 @@ async function start() {
                 );
                 if (dup.rows.length > 0) {
                     await client.query('ROLLBACK');
-                    // Already credited — return current usage (idempotent)
+                    const cur = await pool.query(
+                        'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                        [userId]
+                    );
+                    return {
+                        success: true,
+                        added_minutes: expectedMinutes,
+                        used_seconds: parseInt(cur.rows[0].used_seconds),
+                        limit_minutes: parseInt(cur.rows[0].limit_minutes),
+                    };
+                }
+            } else {
+                // No transaction ID — guard against duplicate calls within 60s
+                const dup = await client.query(
+                    `SELECT id FROM purchases WHERE user_id = $1 AND product_id = $2
+                     AND transaction_id IS NULL AND created_at > NOW() - INTERVAL '60 seconds'`,
+                    [userId, productId]
+                );
+                if (dup.rows.length > 0) {
+                    await client.query('ROLLBACK');
                     const cur = await pool.query(
                         'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                         [userId]
