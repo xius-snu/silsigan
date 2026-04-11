@@ -1926,21 +1926,21 @@ class _MainScreenState extends ConsumerState<MainScreen>
                           : 0;
                       return [
                         PopupMenuItem<DisplayMode>(
-                          value: DisplayMode.split,
-                          child: Row(
-                            children: [
-                              const Expanded(child: Text('Split View')),
-                              if (current == DisplayMode.split)
-                                const Icon(Icons.check, size: 18),
-                            ],
-                          ),
-                        ),
-                        PopupMenuItem<DisplayMode>(
                           value: DisplayMode.lineByLine,
                           child: Row(
                             children: [
                               const Expanded(child: Text('Line by Line')),
                               if (current == DisplayMode.lineByLine)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.split,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Split View')),
+                              if (current == DisplayMode.split)
                                 const Icon(Icons.check, size: 18),
                             ],
                           ),
