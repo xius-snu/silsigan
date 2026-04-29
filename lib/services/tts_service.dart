@@ -136,7 +136,8 @@ class TtsService {
       // to the closest available voice for that language.
     }
     // iOS rate is 0..1 with ~0.5 = natural; Android rate is 0..2 with 1.0 = natural.
-    final rate = defaultTargetPlatform == TargetPlatform.iOS ? 0.5 : 0.85;
+    // Slower than natural — language learners benefit from extra clarity.
+    final rate = defaultTargetPlatform == TargetPlatform.iOS ? 0.45 : 0.75;
     await _tts.setSpeechRate(rate);
     await _tts.setPitch(1.0);
     await _tts.setVolume(1.0);
