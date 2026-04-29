@@ -9,7 +9,7 @@ import '../../providers/target_language_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/claude_chat_service.dart';
 import '../../services/soniox_realtime_service.dart';
-import '../../services/soniox_tts_service.dart';
+import '../../services/tts_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 
@@ -25,7 +25,7 @@ class LearnPanel extends ConsumerStatefulWidget {
 class _LearnPanelState extends ConsumerState<LearnPanel> {
   final AudioService _audio = AudioService();
   final SonioxRealtimeService _soniox = SonioxRealtimeService();
-  final SonioxTtsService _tts = SonioxTtsService();
+  final TtsService _tts = TtsService();
   final ClaudeChatService _claude = ClaudeChatService();
   final ScrollController _scrollController = ScrollController();
 

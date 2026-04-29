@@ -1333,52 +1333,6 @@ async function start() {
         }
     });
 
-    // Soniox TTS proxy — forwards to tts-rt.soniox.com and pipes audio bytes back.
-    // Doesn't deduct minutes (the AI roundtrip already did).
-    fastify.post('/api/tts', async (req, reply) => {
-        const { userId, text, language, voice, model } = req.body || {};
-        if (!userId || !text || !language) {
-            return reply.code(400).send({ error: 'Missing fields' });
-        }
-        const apiKey = nextSonioxKey();
-        if (!apiKey) {
-            return reply.code(503).send({ error: 'TTS unavailable' });
-        }
-
-        try {
-            const upstream = await fetch('https://tts-rt.soniox.com/tts', {
-                method: 'POST',
-                headers: {
-                    'content-type': 'application/json',
-                    'authorization': `Bearer ${apiKey}`,
-                },
-                body: JSON.stringify({
-                    text,
-                    model: model || 'tts-rt-v1',
-                    language,
-                    voice: voice || 'Maya',
-                    audio_format: 'mp3',
-                    sample_rate: 24000,
-                }),
-            });
-
-            if (!upstream.ok) {
-                const errBody = await upstream.text();
-                fastify.log.error(`Soniox TTS ${upstream.status}: ${errBody.slice(0, 500)}`);
-                return reply.code(502).send({
-                    error: `Soniox ${upstream.status}: ${errBody.slice(0, 200)}`,
-                });
-            }
-
-            const buf = Buffer.from(await upstream.arrayBuffer());
-            reply.header('content-type', upstream.headers.get('content-type') || 'audio/mpeg');
-            return reply.send(buf);
-        } catch (e) {
-            fastify.log.error('tts proxy error: ' + e.message);
-            return reply.code(502).send({ error: 'TTS service unavailable' });
-        }
-    });
-
     // ==================
     // SONIOX WEBSOCKET PROXY
     // ==================

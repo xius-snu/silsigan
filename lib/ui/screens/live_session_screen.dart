@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../providers/recording_provider.dart';
 import '../../services/audio_service.dart';
-import '../../services/soniox_tts_service.dart';
+import '../../services/tts_service.dart';
 import '../../services/session_relay_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/user_service.dart';
@@ -35,7 +35,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
   final SessionRelayService _relayService = SessionRelayService();
-  final SonioxTtsService _ttsService = SonioxTtsService();
+  final TtsService _ttsService = TtsService();
 
   String _myDraft = '';
   List<String> _myHistory = [];
@@ -87,8 +87,8 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
     // TTS speaks in MY language (I hear partner's words translated to my language)
     _ttsService.setLanguageCode(widget.myLanguage);
     _ttsService.setEnabled(
-        SonioxTtsService.supportsLanguage(widget.myLanguage) &&
-            SonioxTtsService.hasApiKey);
+        TtsService.supportsLanguage(widget.myLanguage) &&
+            TtsService.hasApiKey);
 
     // Mute mic while TTS plays to prevent feedback loop
     _ttsService.onPlaybackStateChanged = (playing) {
@@ -364,8 +364,8 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   @override
   Widget build(BuildContext context) {
     final showTtsToggle =
-        SonioxTtsService.supportsLanguage(widget.myLanguage) &&
-            SonioxTtsService.hasApiKey;
+        TtsService.supportsLanguage(widget.myLanguage) &&
+            TtsService.hasApiKey;
 
     return PopScope(
       canPop: false,

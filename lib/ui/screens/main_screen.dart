@@ -17,7 +17,7 @@ import '../../providers/detected_language_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
-import '../../services/soniox_tts_service.dart';
+import '../../services/tts_service.dart';
 import '../../providers/tts_provider.dart';
 import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
@@ -65,7 +65,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     with WidgetsBindingObserver {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
-  final SonioxTtsService _ttsService = SonioxTtsService();
+  final TtsService _ttsService = TtsService();
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
   Timer? _sentenceBreakTimer;
@@ -1038,7 +1038,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (draft.isNotEmpty &&
           !_ttsFiredForSegment &&
           _ttsService.enabled &&
-          SonioxTtsService.supportsLanguage(targetLanguage.code)) {
+          TtsService.supportsLanguage(targetLanguage.code)) {
         _ttsDraftTimer = Timer(const Duration(seconds: 1), () {
           final currentDraft = ref.read(vietnameseDraftProvider);
           if (currentDraft.isNotEmpty && !_ttsFiredForSegment) {
@@ -1057,7 +1057,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (translation.isNotEmpty &&
           !_ttsFiredForSegment &&
           _ttsService.enabled &&
-          SonioxTtsService.supportsLanguage(targetLanguage.code)) {
+          TtsService.supportsLanguage(targetLanguage.code)) {
         _ttsService.speak(translation);
       }
       _ttsFiredForSegment = false;
@@ -1858,8 +1858,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Show speaker toggle for languages with TTS support + valid API key
     final showTtsToggle =
-        SonioxTtsService.supportsLanguage(targetLanguage.code) &&
-            SonioxTtsService.hasApiKey;
+        TtsService.supportsLanguage(targetLanguage.code) &&
+            TtsService.hasApiKey;
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||
