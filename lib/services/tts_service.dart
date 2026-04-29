@@ -73,7 +73,9 @@ class TtsService {
   }
 
   /// One-time iOS audio session setup so TTS playback can coexist with the
-  /// recorder without taking over the audio output.
+  /// recorder. Uses playAndRecord (NOT playback) so the mic stays enabled
+  /// during speech, with defaultToSpeaker so audio routes to the loudspeaker
+  /// instead of the earpiece.
   Future<void> _ensureInitialized() async {
     if (_isInitialized) return;
     _isInitialized = true;
@@ -81,10 +83,11 @@ class TtsService {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         await _tts.setSharedInstance(true);
         await _tts.setIosAudioCategory(
-          IosTextToSpeechAudioCategory.playback,
+          IosTextToSpeechAudioCategory.playAndRecord,
           [
             IosTextToSpeechAudioCategoryOptions.mixWithOthers,
-            IosTextToSpeechAudioCategoryOptions.duckOthers,
+            IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
+            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
           ],
           IosTextToSpeechAudioMode.defaultMode,
         );
@@ -153,9 +156,23 @@ class TtsService {
     _playbackCompleter = Completer<void>();
     final result = await _tts.speak(text);
     if (result == 1) {
-      await _playbackCompleter!.future;
+      // If the platform completion event somehow never fires (audio session
+      // glitch, plugin race, etc.), the queue would otherwise stay
+      // _isProcessing=true forever and silently drop every later utterance.
+      // Cap the wait at a generous estimate of the speech duration.
+      final maxSecs = (text.length / 4).ceil().clamp(8, 90);
+      try {
+        await _playbackCompleter!.future
+            .timeout(Duration(seconds: maxSecs));
+      } on TimeoutException {
+        debugPrint(
+            'TTS completion timeout after ${maxSecs}s for "${text.length > 40 ? '${text.substring(0, 40)}…' : text}"');
+      } finally {
+        _playbackCompleter = null;
+      }
     } else {
       _playbackCompleter = null;
+      debugPrint('TTS speak() returned $result — engine refused utterance');
     }
   }
 
