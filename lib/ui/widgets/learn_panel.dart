@@ -42,6 +42,11 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   bool _isRecording = false;
   bool _isStopping = false;
 
+  /// Set true between a backspace tap and the resulting Soniox completion
+  /// event (triggered by finalize). While true, drafts and the next
+  /// completion are ignored — they reflect the pre-deletion state.
+  bool _pendingFinalize = false;
+
   String get _displayedTranscript =>
       ('$_finalizedText $_liveDraft').replaceAll(RegExp(r'\s+'), ' ').trim();
 
@@ -67,11 +72,18 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
     _soniox.onTranscriptionDraft = (draft) {
       if (!mounted) return;
+      // Ignore drafts produced from the pre-deletion utterance.
+      if (_pendingFinalize) return;
       setState(() => _liveDraft = draft);
     };
 
     _soniox.onTranscriptionCompleted = (text) {
       if (!mounted) return;
+      // Swallow the post-finalize completion that flushes the deleted text.
+      if (_pendingFinalize) {
+        _pendingFinalize = false;
+        return;
+      }
       // Move the finalized utterance into _finalizedText. The draft callback
       // will replace _liveDraft on the next utterance — don't touch it here.
       setState(() {
@@ -171,40 +183,70 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     final speakingLang = ref.read(targetLanguageProvider).code;
     final nativeLang = ref.read(nativeLanguageProvider).code;
 
-    final updated = [...messages, LearnMessage(role: 'user', text: userText)];
+    final userMsg = LearnMessage(role: 'user', text: userText);
+    final updated = [...messages, userMsg];
     ref.read(learnMessagesProvider.notifier).state = updated;
     ref.read(learnLoadingProvider.notifier).state = true;
     _scrollToBottom();
 
+    // Reply + grade run in parallel — separate Claude calls.
+    final replyFuture = _claude.sendMessage(
+      history: updated,
+      speakingLang: speakingLang,
+      nativeLang: nativeLang,
+    );
+    final gradeFuture = _claude.grade(
+      history: updated,
+      speakingLang: speakingLang,
+      nativeLang: nativeLang,
+    );
+
+    String? reply;
+    GradeResult? grade;
+    Object? replyError;
+    Object? gradeError;
+
     try {
-      final reply = await _claude.sendMessage(
-        history: updated,
-        speakingLang: speakingLang,
-        nativeLang: nativeLang,
-      );
-
-      final withReply = [
-        ...updated,
-        LearnMessage(role: 'assistant', text: reply),
-      ];
-      ref.read(learnMessagesProvider.notifier).state = withReply;
-      _scrollToBottom();
-
-      if (ref.read(learnAutoTtsProvider)) {
-        _tts.setLanguageCode(speakingLang);
-        _tts.setEnabled(true);
-        _tts.speak(reply);
-      }
+      reply = await replyFuture;
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e')),
-        );
-      }
-    } finally {
-      if (mounted) {
-        ref.read(learnLoadingProvider.notifier).state = false;
-      }
+      replyError = e;
+    }
+    try {
+      grade = await gradeFuture;
+    } catch (e) {
+      gradeError = e;
+    }
+
+    if (!mounted) return;
+
+    // Apply grade to the user message we just appended.
+    final current = ref.read(learnMessagesProvider);
+    final newList = [...current];
+    final userIdx = newList.lastIndexWhere((m) => identical(m, userMsg));
+    if (userIdx >= 0 && grade != null) {
+      newList[userIdx].gradeStatus = grade.status;
+      newList[userIdx].gradeExplanation =
+          grade.status == GradeStatus.incorrect ? grade.explanation : null;
+    }
+    if (reply != null) {
+      newList.add(LearnMessage(role: 'assistant', text: reply));
+    }
+    ref.read(learnMessagesProvider.notifier).state = newList;
+    ref.read(learnLoadingProvider.notifier).state = false;
+    _scrollToBottom();
+
+    if (reply != null && ref.read(learnAutoTtsProvider)) {
+      _tts.setLanguageCode(speakingLang);
+      _tts.setEnabled(true);
+      _tts.speak(reply);
+    }
+
+    if (replyError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$replyError')),
+      );
+    } else if (gradeError != null) {
+      debugPrint('Grade error: $gradeError');
     }
   }
 
@@ -238,6 +280,40 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
         ref.read(learnMessagesProvider.notifier).state =
             [...ref.read(learnMessagesProvider)];
       }
+    }
+  }
+
+  /// Remove the last word from [text]. Whitespace is the word boundary.
+  /// Trailing punctuation is stripped before AND after the cut so a single
+  /// tap removes "world." entirely, not just ".".
+  static String _deleteLastWord(String text) {
+    final endStrip = RegExp(
+      r'''[\s.,;:!?。、，；：！？・…\-—–"'\)\]\}»」』]+$''',
+      unicode: true,
+    );
+    var t = text.replaceAll(endStrip, '');
+    if (t.isEmpty) return '';
+    final lastSpace = t.lastIndexOf(RegExp(r'\s'));
+    // No whitespace boundary in the remaining text → the entire chunk is a
+    // single "word" (e.g. CJK text without spaces). Wipe it.
+    if (lastSpace < 0) return '';
+    t = t.substring(0, lastSpace);
+    return t.replaceAll(endStrip, '');
+  }
+
+  void _backspace() {
+    final current = _displayedTranscript;
+    if (current.isEmpty) return;
+    final next = _deleteLastWord(current);
+    setState(() {
+      _finalizedText = next;
+      _liveDraft = '';
+    });
+    // While recording, force Soniox to flush its mid-utterance state so the
+    // deleted suffix doesn't keep coming back via subsequent draft events.
+    if (_isRecording && !_pendingFinalize) {
+      _pendingFinalize = true;
+      _soniox.finalize();
     }
   }
 
@@ -486,7 +562,13 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
       children: [
         _buildBubble(text: m.text, isUser: isUser),
         if (!isUser) _buildAssistantActions(m, index),
-        if (m.explanation != null)
+        if (isUser && m.gradeStatus != null && m.gradeStatus != GradeStatus.na)
+          _buildGradeIndicator(m),
+        if (isUser &&
+            m.gradeStatus == GradeStatus.incorrect &&
+            (m.gradeExplanation?.isNotEmpty ?? false))
+          _buildGradeExplanation(m.gradeExplanation!),
+        if (!isUser && m.explanation != null)
           Container(
             margin: const EdgeInsets.only(top: 4, right: 40, bottom: 4),
             padding: const EdgeInsets.all(10),
@@ -505,6 +587,59 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
           ),
         const SizedBox(height: 8),
       ],
+    );
+  }
+
+  Widget _buildGradeIndicator(LearnMessage m) {
+    final isCorrect = m.gradeStatus == GradeStatus.correct;
+    final color = isCorrect ? const Color(0xFF2E7D32) : const Color(0xFFC62828);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, right: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isCorrect ? Icons.check_circle : Icons.cancel,
+            size: 14,
+            color: color,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isCorrect ? 'Correct' : 'Incorrect',
+            style: TextStyle(
+              fontSize: 11,
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGradeExplanation(String text) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.only(top: 4, left: 40),
+        padding: const EdgeInsets.all(10),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.78,
+        ),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFEBEE),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFFFCDD2)),
+        ),
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontSize: 13,
+            color: AppConstants.textPrimary,
+            height: 1.4,
+          ),
+        ),
+      ),
     );
   }
 
@@ -625,8 +760,57 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     return Container(
       color: AppConstants.bgColor,
       padding: const EdgeInsets.symmetric(vertical: 24),
-      child: Center(
-        child: _buildMicButton(isLoading),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Left placeholder for symmetry with the right-side backspace.
+          const SizedBox(
+              width: AppConstants.sideButtonSize, height: AppConstants.sideButtonSize),
+          const SizedBox(width: 40),
+          _buildMicButton(isLoading),
+          const SizedBox(width: 40),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 120),
+            child: _isRecording
+                ? _buildBackspaceButton(key: const ValueKey('backspace'))
+                : const SizedBox(
+                    key: ValueKey('backspace-hidden'),
+                    width: AppConstants.sideButtonSize,
+                    height: AppConstants.sideButtonSize,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBackspaceButton({Key? key}) {
+    final hasText = _displayedTranscript.isNotEmpty;
+    return GestureDetector(
+      key: key,
+      onTap: hasText ? _backspace : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: AppConstants.sideButtonSize,
+        height: AppConstants.sideButtonSize,
+        decoration: BoxDecoration(
+          color: hasText
+              ? AppConstants.historyButtonColor
+              : AppConstants.saveButtonColor,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.10),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.backspace_outlined,
+          color: Colors.white,
+          size: 22,
+        ),
       ),
     );
   }

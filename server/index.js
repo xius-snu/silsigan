@@ -1235,7 +1235,7 @@ async function start() {
         );
     }
 
-    async function callClaude({ system, messages }) {
+    async function callClaude({ system, messages, maxTokens }) {
         if (!ANTHROPIC_API_KEY) {
             throw new Error('Server misconfigured: ANTHROPIC_API_KEY missing');
         }
@@ -1248,7 +1248,7 @@ async function start() {
             },
             body: JSON.stringify({
                 model: ANTHROPIC_MODEL,
-                max_tokens: 1024,
+                max_tokens: maxTokens || 1024,
                 system,
                 messages,
             }),
@@ -1260,6 +1260,29 @@ async function start() {
         const data = await res.json();
         const block = (data.content || []).find((b) => b.type === 'text');
         return (block?.text || '').trim();
+    }
+
+    /// Strip common markdown so the app receives plain text only.
+    function stripMarkdown(text) {
+        if (!text) return text;
+        return text
+            .replace(/\*\*(.+?)\*\*/gs, '$1')
+            .replace(/__(.+?)__/gs, '$1')
+            .replace(/(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)/gs, '$1')
+            .replace(/(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)/gs, '$1')
+            .replace(/`(.+?)`/gs, '$1')
+            .replace(/^#{1,6}\s+/gm, '')
+            .replace(/^\s*[-*+]\s+/gm, '')
+            .replace(/^\s*\d+\.\s+/gm, '');
+    }
+
+    /// Try to parse Claude's JSON, tolerating ``` fences.
+    function parseClaudeJson(text) {
+        let t = (text || '').trim();
+        if (t.startsWith('```')) {
+            t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+        }
+        return JSON.parse(t);
     }
 
     fastify.post('/api/learn/message', async (req, reply) => {
@@ -1283,7 +1306,8 @@ async function start() {
             `End each reply with a natural follow-up question to keep the conversation going. ` +
             `If the user makes a small grammatical error, gently model the correct phrasing in your reply rather than calling it out. ` +
             `Maintain consistent pronouns and politeness levels across the entire conversation. ` +
-            `For ${speakingName} specifically, once you have established the speaker relationship (e.g. for Vietnamese: anh/em or chị/em pairings; for Korean: 반말/존댓말 level; for Japanese: です/ます vs casual), do not switch mid-conversation unless the user does first.`;
+            `For ${speakingName} specifically, once you have established the speaker relationship (e.g. for Vietnamese: anh/em or chị/em pairings; for Korean: 반말/존댓말 level; for Japanese: です/ます vs casual), do not switch mid-conversation unless the user does first. ` +
+            `Use plain text only — no markdown, no asterisks, no headers, no bullet points.`;
 
         try {
             const sanitized = messages
@@ -1295,9 +1319,71 @@ async function start() {
             // Deduct AFTER success — failed roundtrips shouldn't burn user minutes.
             await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
 
-            return { reply: reply_text };
+            return { reply: stripMarkdown(reply_text) };
         } catch (e) {
             fastify.log.error('learn/message error: ' + e.message);
+            return reply.code(502).send({ error: 'AI service unavailable' });
+        }
+    });
+
+    fastify.post('/api/learn/grade', async (req, reply) => {
+        const { userId, speaking_language, native_language, messages } = req.body || {};
+        if (!userId || !speaking_language || !native_language || !Array.isArray(messages)) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        if (messages.length === 0) {
+            return reply.code(400).send({ error: 'Empty conversation' });
+        }
+
+        const usage = await checkUsageLimit(userId);
+        if (!usage.ok) return reply.code(402).send({ error: usage.reason });
+
+        const speakingName = langName(speaking_language);
+        const nativeName = langName(native_language);
+
+        const system =
+            `You are a strict but fair language tutor evaluating a learner's most recent ${speakingName} message. ` +
+            `Look at the conversation up to and including the user's last message. The previous assistant message (if any) is the question or prompt the user was responding to. ` +
+            `\n\n` +
+            `Evaluate two things:\n` +
+            `(a) Relevance: did the user actually answer/respond appropriately to the previous assistant message?\n` +
+            `(b) Language quality: is the user's ${speakingName} grammatically and lexically reasonable for an intermediate learner?\n` +
+            `\n` +
+            `Output STRICT JSON in exactly this shape, with no surrounding text or markdown fences:\n` +
+            `{\n` +
+            `  "grade": "correct" | "incorrect" | "n/a",\n` +
+            `  "explanation": "<plain text in ${nativeName}, used only when grade is incorrect; empty otherwise>"\n` +
+            `}\n` +
+            `\n` +
+            `Rules:\n` +
+            `- "correct" if BOTH (a) and (b) pass.\n` +
+            `- "incorrect" if either (a) or (b) fails. Be specific in the explanation: state exactly what was wrong AND what it should have been. Reply in ${nativeName}.\n` +
+            `- "n/a" only when grading is genuinely impossible — e.g. there is no prior assistant message at all (this is the very first user turn), or the user's message is just a greeting / acknowledgement / unintelligible noise. Do not use n/a as a way to avoid grading.\n` +
+            `- The explanation field must be plain text. No markdown, no asterisks, no headers, no bullet points.`;
+
+        try {
+            const sanitized = messages
+                .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+                .map((m) => ({ role: m.role, content: m.content }));
+
+            const raw = await callClaude({ system, messages: sanitized, maxTokens: 512 });
+
+            let grade = 'n/a';
+            let explanation = '';
+            try {
+                const parsed = parseClaudeJson(raw);
+                const g = (parsed.grade || '').toString().toLowerCase();
+                if (g === 'correct' || g === 'incorrect' || g === 'n/a') grade = g;
+                explanation = stripMarkdown((parsed.explanation || '').toString());
+            } catch (e) {
+                fastify.log.warn('learn/grade JSON parse failed: ' + e.message + ' | raw: ' + raw.slice(0, 200));
+            }
+
+            await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
+
+            return { grade, explanation };
+        } catch (e) {
+            fastify.log.error('learn/grade error: ' + e.message);
             return reply.code(502).send({ error: 'AI service unavailable' });
         }
     });
@@ -1314,19 +1400,25 @@ async function start() {
         const speakingName = langName(speaking_language);
         const nativeName = langName(native_language);
         const system =
-            `You explain ${speakingName} text to someone who speaks ${nativeName}. ` +
-            `Reply in ${nativeName} only. Briefly translate the meaning, then point out 1-2 useful words ` +
-            `or grammatical patterns the learner should notice. Keep it under 4 sentences.`;
+            `You are explaining a ${speakingName} sentence to a ${nativeName} speaker who may not understand any of it. ` +
+            `Provide, in this order: ` +
+            `(1) a clear, natural translation of the full meaning into ${nativeName}; ` +
+            `(2) a vocabulary breakdown — for each important word, give its meaning and any nuance worth knowing; ` +
+            `(3) notes on grammar patterns, particles, or idiomatic phrasing if any are present. ` +
+            `Be thorough enough that someone who didn't understand the sentence at all will now fully understand it. ` +
+            `Stay focused — only explain what's actually useful for understanding this specific sentence. Don't pad. Don't be condescending. ` +
+            `Reply in ${nativeName} only. Use plain text only — no markdown, no asterisks, no headers, no bullet points. Use line breaks where they aid readability.`;
 
         try {
             const explanation = await callClaude({
                 system,
                 messages: [{ role: 'user', content: text }],
+                maxTokens: 1500,
             });
 
             await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
 
-            return { explanation };
+            return { explanation: stripMarkdown(explanation) };
         } catch (e) {
             fastify.log.error('learn/explain error: ' + e.message);
             return reply.code(502).send({ error: 'AI service unavailable' });
