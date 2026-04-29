@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../services/elevenlabs_tts_service.dart';
+import '../../services/soniox_tts_service.dart';
 import '../../utils/constants.dart';
 
 class LineByLinePanel extends StatefulWidget {

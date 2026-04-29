@@ -17,7 +17,7 @@ import '../../providers/detected_language_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
-import '../../services/elevenlabs_tts_service.dart';
+import '../../services/soniox_tts_service.dart';
 import '../../providers/tts_provider.dart';
 import '../../utils/constants.dart';
 import '../widgets/transcript_panel.dart';
@@ -27,6 +27,9 @@ import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
 import '../widgets/conversation_panel.dart';
+import '../widgets/learn_panel.dart';
+import '../../providers/native_language_provider.dart';
+import '../../providers/learn_provider.dart';
 import '../../providers/conversation_provider.dart';
 import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
@@ -62,7 +65,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     with WidgetsBindingObserver {
   final AudioService _audioService = AudioService();
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
-  final ElevenLabsTtsService _ttsService = ElevenLabsTtsService();
+  final SonioxTtsService _ttsService = SonioxTtsService();
   Timer? _newLineTimer;
   Timer? _newLineTimerTranslation;
   Timer? _sentenceBreakTimer;
@@ -1035,7 +1038,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (draft.isNotEmpty &&
           !_ttsFiredForSegment &&
           _ttsService.enabled &&
-          ElevenLabsTtsService.supportsLanguage(targetLanguage.code)) {
+          SonioxTtsService.supportsLanguage(targetLanguage.code)) {
         _ttsDraftTimer = Timer(const Duration(seconds: 1), () {
           final currentDraft = ref.read(vietnameseDraftProvider);
           if (currentDraft.isNotEmpty && !_ttsFiredForSegment) {
@@ -1054,7 +1057,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (translation.isNotEmpty &&
           !_ttsFiredForSegment &&
           _ttsService.enabled &&
-          ElevenLabsTtsService.supportsLanguage(targetLanguage.code)) {
+          SonioxTtsService.supportsLanguage(targetLanguage.code)) {
         _ttsService.speak(translation);
       }
       _ttsFiredForSegment = false;
@@ -1555,6 +1558,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(theirLanguageProvider.notifier).state = convLangs.their;
     final displayMode = await loadSavedDisplayMode();
     ref.read(displayModeProvider.notifier).state = displayMode;
+    final nativeLang = await loadSavedNativeLanguage();
+    ref.read(nativeLanguageProvider.notifier).state = nativeLang;
+    final learnAutoTts = await loadSavedLearnAutoTts();
+    ref.read(learnAutoTtsProvider.notifier).state = learnAutoTts;
   }
 
   Future<void> _restoreAutosaveDraft() async {
@@ -1851,8 +1858,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Show speaker toggle for languages with TTS support + valid API key
     final showTtsToggle =
-        ElevenLabsTtsService.supportsLanguage(targetLanguage.code) &&
-            ElevenLabsTtsService.hasApiKey;
+        SonioxTtsService.supportsLanguage(targetLanguage.code) &&
+            SonioxTtsService.hasApiKey;
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||
@@ -1924,6 +1931,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               .clamp(0, 100)
                               .round()
                           : 0;
+                      String fmtHrMin(int m) =>
+                          '${m ~/ 60}h ${m % 60}m';
                       return [
                         PopupMenuItem<DisplayMode>(
                           value: DisplayMode.lineByLine,
@@ -1961,6 +1970,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             children: [
                               const Expanded(child: Text('Conversation')),
                               if (current == DisplayMode.conversation)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.learn,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Learn')),
+                              if (current == DisplayMode.learn)
                                 const Icon(Icons.check, size: 18),
                             ],
                           ),
@@ -2038,7 +2057,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                         CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        'Used: $pct%  [$usedMin/$_limitMinutes min]',
+                                        'Used: $pct%  [${fmtHrMin(usedMin)}/${fmtHrMin(_limitMinutes)}]',
                                         style: const TextStyle(
                                           fontSize: 13,
                                           fontWeight: FontWeight.w500,
@@ -2090,8 +2109,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
             ),
 
-            // Content area: Conversation / Split / Line-by-Line
-            if (displayMode == DisplayMode.conversation) ...[
+            // Content area: Conversation / Split / Line-by-Line / Learn
+            if (displayMode == DisplayMode.learn) ...[
+              const Expanded(child: LearnPanel()),
+            ] else if (displayMode == DisplayMode.conversation) ...[
               Expanded(
                 child: ConversationPanel(
                   messages: ref.watch(conversationMessagesProvider),

@@ -1201,6 +1201,181 @@ async function start() {
     });
 
     // ==================
+    // LEARN MODE — Claude proxy + Soniox TTS proxy
+    // ==================
+
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+    const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+    const LEARN_ROUNDTRIP_SECONDS = 60; // 1 AI roundtrip = 1 minute against pool
+
+    const LANGUAGE_NAMES = {
+        ko: 'Korean', en: 'English', vi: 'Vietnamese', tr: 'Turkish',
+        zh: 'Chinese', ja: 'Japanese', th: 'Thai', ms: 'Malay',
+    };
+    const langName = (code) => LANGUAGE_NAMES[code] || code;
+
+    async function checkUsageLimit(userId) {
+        const res = await pool.query(
+            'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes, COALESCE(is_private, FALSE) AS is_private FROM users WHERE user_id = $1',
+            [userId]
+        );
+        if (res.rows.length === 0) return { ok: false, reason: 'User not found' };
+        const row = res.rows[0];
+        if (row.is_private) return { ok: true };
+        if (parseInt(row.used_seconds) >= parseInt(row.limit_minutes) * 60) {
+            return { ok: false, reason: 'Usage limit reached' };
+        }
+        return { ok: true };
+    }
+
+    async function deductSeconds(userId, seconds) {
+        await pool.query(
+            'UPDATE users SET used_seconds = COALESCE(used_seconds, 0) + $2 WHERE user_id = $1 AND COALESCE(is_private, FALSE) = FALSE',
+            [userId, seconds]
+        );
+    }
+
+    async function callClaude({ system, messages }) {
+        if (!ANTHROPIC_API_KEY) {
+            throw new Error('Server misconfigured: ANTHROPIC_API_KEY missing');
+        }
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'x-api-key': ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+                model: ANTHROPIC_MODEL,
+                max_tokens: 1024,
+                system,
+                messages,
+            }),
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
+        }
+        const data = await res.json();
+        const block = (data.content || []).find((b) => b.type === 'text');
+        return (block?.text || '').trim();
+    }
+
+    fastify.post('/api/learn/message', async (req, reply) => {
+        const { userId, speaking_language, native_language, messages } = req.body || {};
+        if (!userId || !speaking_language || !native_language || !Array.isArray(messages)) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        if (messages.length === 0) {
+            return reply.code(400).send({ error: 'Empty conversation' });
+        }
+
+        const usage = await checkUsageLimit(userId);
+        if (!usage.ok) return reply.code(402).send({ error: usage.reason });
+
+        const speakingName = langName(speaking_language);
+        const nativeName = langName(native_language);
+        const system =
+            `You are a patient conversation partner helping someone practice spoken ${speakingName}. ` +
+            `Always reply in ${speakingName} only — never switch to ${nativeName} unless the user explicitly asks for an explanation. ` +
+            `Keep replies short (1-3 sentences) and use vocabulary appropriate for an intermediate learner. ` +
+            `End each reply with a natural follow-up question to keep the conversation going. ` +
+            `If the user makes a small grammatical error, gently model the correct phrasing in your reply rather than calling it out.`;
+
+        try {
+            const sanitized = messages
+                .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+                .map((m) => ({ role: m.role, content: m.content }));
+
+            const reply_text = await callClaude({ system, messages: sanitized });
+
+            // Deduct AFTER success — failed roundtrips shouldn't burn user minutes.
+            await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
+
+            return { reply: reply_text };
+        } catch (e) {
+            fastify.log.error('learn/message error: ' + e.message);
+            return reply.code(502).send({ error: 'AI service unavailable' });
+        }
+    });
+
+    fastify.post('/api/learn/explain', async (req, reply) => {
+        const { userId, speaking_language, native_language, text } = req.body || {};
+        if (!userId || !speaking_language || !native_language || !text) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+
+        const usage = await checkUsageLimit(userId);
+        if (!usage.ok) return reply.code(402).send({ error: usage.reason });
+
+        const speakingName = langName(speaking_language);
+        const nativeName = langName(native_language);
+        const system =
+            `You explain ${speakingName} text to someone who speaks ${nativeName}. ` +
+            `Reply in ${nativeName} only. Briefly translate the meaning, then point out 1-2 useful words ` +
+            `or grammatical patterns the learner should notice. Keep it under 4 sentences.`;
+
+        try {
+            const explanation = await callClaude({
+                system,
+                messages: [{ role: 'user', content: text }],
+            });
+
+            await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
+
+            return { explanation };
+        } catch (e) {
+            fastify.log.error('learn/explain error: ' + e.message);
+            return reply.code(502).send({ error: 'AI service unavailable' });
+        }
+    });
+
+    // Soniox TTS proxy — forwards to tts-rt.soniox.com and pipes audio bytes back.
+    // Doesn't deduct minutes (the AI roundtrip already did).
+    fastify.post('/api/tts', async (req, reply) => {
+        const { userId, text, language, voice, model } = req.body || {};
+        if (!userId || !text || !language) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        const apiKey = nextSonioxKey();
+        if (!apiKey) {
+            return reply.code(503).send({ error: 'TTS unavailable' });
+        }
+
+        try {
+            const upstream = await fetch('https://tts-rt.soniox.com/tts', {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'authorization': `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    text,
+                    model: model || 'tts-rt-v1',
+                    language,
+                    voice: voice || 'Maya',
+                    audio_format: 'mp3',
+                    sample_rate: 24000,
+                }),
+            });
+
+            if (!upstream.ok) {
+                const errBody = await upstream.text();
+                fastify.log.error(`Soniox TTS ${upstream.status}: ${errBody.slice(0, 300)}`);
+                return reply.code(502).send({ error: 'TTS upstream error' });
+            }
+
+            const buf = Buffer.from(await upstream.arrayBuffer());
+            reply.header('content-type', upstream.headers.get('content-type') || 'audio/mpeg');
+            return reply.send(buf);
+        } catch (e) {
+            fastify.log.error('tts proxy error: ' + e.message);
+            return reply.code(502).send({ error: 'TTS service unavailable' });
+        }
+    });
+
+    // ==================
     // SONIOX WEBSOCKET PROXY
     // ==================
 

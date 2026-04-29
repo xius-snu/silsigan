@@ -1,7 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum DisplayMode { lineByLine, split, conversation, transcription }
+enum DisplayMode { lineByLine, split, conversation, transcription, learn }
 
 final displayModeProvider =
     StateProvider<DisplayMode>((ref) => DisplayMode.lineByLine);

@@ -6,24 +6,24 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import '../utils/constants.dart';
+import 'user_service.dart';
 
 enum TtsLineStatus { idle, loading, playing }
 
-class ElevenLabsTtsService {
-  static const _modelId = 'eleven_flash_v2_5';
-  static const _apiUrl = 'https://api.elevenlabs.io/v1/text-to-speech';
-  static const _apiKey = String.fromEnvironment('ELEVENLABS_API_KEY');
+/// Soniox Text-to-Speech via our own server proxy.
+/// Voice: Maya (single voice across all supported languages).
+/// Model: tts-rt-v1.
+class SonioxTtsService {
+  static const _voice = 'Maya';
+  static const _model = 'tts-rt-v1';
 
-  /// Voice IDs per language code.
-  static const _voices = <String, String>{
-    'vi': 'jpmnSYDOADVEpZksbLmc',
-    'ko': 'QPFsEL6IBxlT15xfiD6C',
-    'en': '21m00Tcm4TlvDq8ikWAM',
-    'tr': 'ErXwobaYiN019PkySvjV',
-    'zh': 'pNInz6obpgDQGcFmaJgB',
+  /// Languages we ship voices for. Soniox supports more, but the app
+  /// scopes itself to these eight.
+  static const _supportedLangs = {
+    'ko', 'en', 'vi', 'tr', 'zh', 'ja', 'th', 'ms',
   };
 
-  /// The language code currently used for TTS (determines voice + language_code).
   String _languageCode = 'vi';
 
   final AudioPlayer _player = AudioPlayer();
@@ -33,18 +33,20 @@ class ElevenLabsTtsService {
   Completer<void>? _playbackCompleter;
 
   Function(String error)? onError;
-
-  /// Called when TTS playback starts/stops — useful for muting mic during TTS.
   Function(bool playing)? onPlaybackStateChanged;
 
-  /// Tracks per-line TTS state for UI (loading spinner / stop button).
   final lineState = ValueNotifier<({String? text, TtsLineStatus status})>(
       (text: null, status: TtsLineStatus.idle));
 
   bool get enabled => _enabled;
-  static bool get hasApiKey => _apiKey.isNotEmpty;
 
-  ElevenLabsTtsService() {
+  /// True iff the proxy URL is configured. Auth happens via the user's
+  /// existing Bearer token, so no app-side key check is needed.
+  static bool get hasApiKey => AppConstants.serverBaseUrl.isNotEmpty;
+
+  static bool supportsLanguage(String code) => _supportedLangs.contains(code);
+
+  SonioxTtsService() {
     _player.onPlayerComplete.listen((_) {
       if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
         _playbackCompleter!.complete();
@@ -56,9 +58,6 @@ class ElevenLabsTtsService {
     _languageCode = code;
   }
 
-  /// Whether TTS is supported for the given language code.
-  static bool supportsLanguage(String code) => _voices.containsKey(code);
-
   void setEnabled(bool value) {
     _enabled = value;
     if (!value) {
@@ -68,7 +67,7 @@ class ElevenLabsTtsService {
   }
 
   void speak(String text) {
-    if (!_enabled || text.trim().isEmpty || !hasApiKey) return;
+    if (!_enabled || text.trim().isEmpty) return;
     _queue.add(text.trim());
     _processQueue();
   }
@@ -90,23 +89,22 @@ class ElevenLabsTtsService {
   }
 
   Future<void> _synthesizeAndPlay(String text) async {
-    final voiceId = _voices[_languageCode] ?? _voices['vi']!;
-    final url = Uri.parse(
-        '$_apiUrl/$voiceId?optimize_streaming_latency=3&output_format=mp3_22050_32');
+    final lang =
+        _supportedLangs.contains(_languageCode) ? _languageCode : 'en';
+    final url = Uri.parse('${AppConstants.serverBaseUrl}/api/tts');
+    final token = UserService.instance.authToken;
     final response = await http.post(
       url,
       headers: {
-        'xi-api-key': _apiKey,
         'Content-Type': 'application/json',
+        if (token != null) 'Authorization': 'Bearer $token',
       },
       body: jsonEncode({
+        'userId': UserService.instance.userId,
         'text': text,
-        'model_id': _modelId,
-        'language_code': _languageCode,
-        'voice_settings': {
-          'stability': 0.5,
-          'similarity_boost': 0.75,
-        },
+        'language': lang,
+        'voice': _voice,
+        'model': _model,
       }),
     );
 
@@ -114,17 +112,15 @@ class ElevenLabsTtsService {
       final body = response.body.length > 200
           ? response.body.substring(0, 200)
           : response.body;
-      onError?.call('ElevenLabs ${response.statusCode}: $body');
+      onError?.call('Soniox TTS ${response.statusCode}: $body');
       return;
     }
 
-    // Save to temp file for reliable playback alongside active recorder
     final tempDir = await getTemporaryDirectory();
     final tempFile = File(
         '${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
     await tempFile.writeAsBytes(response.bodyBytes);
 
-    // Transition to playing state (for per-line icon)
     if (lineState.value.text != null) {
       lineState.value =
           (text: lineState.value.text, status: TtsLineStatus.playing);
@@ -137,19 +133,15 @@ class ElevenLabsTtsService {
     _playbackCompleter = null;
     onPlaybackStateChanged?.call(false);
 
-    // Clean up temp file
     try {
       await tempFile.delete();
     } catch (_) {}
   }
 
-  /// Manual one-off TTS — works regardless of auto-TTS toggle.
-  /// Tap while playing → stop. Tap while idle → play with loading state.
   Future<void> speakOnce(String text) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty || !hasApiKey) return;
+    if (trimmed.isEmpty) return;
 
-    // Tapping while playing this line → stop
     if (lineState.value.text == trimmed &&
         lineState.value.status == TtsLineStatus.playing) {
       await _stopPlayback();
@@ -157,7 +149,6 @@ class ElevenLabsTtsService {
       return;
     }
 
-    // Ignore tap while loading
     if (lineState.value.status == TtsLineStatus.loading) return;
 
     _queue.clear();
@@ -168,7 +159,6 @@ class ElevenLabsTtsService {
     } catch (e) {
       onError?.call('TTS: $e');
     }
-    // Only reset if this line is still the active one
     if (lineState.value.text == trimmed) {
       lineState.value = (text: null, status: TtsLineStatus.idle);
     }
