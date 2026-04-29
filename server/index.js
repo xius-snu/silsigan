@@ -1205,7 +1205,7 @@ async function start() {
     // ==================
 
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
-    const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+    const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
     const LEARN_ROUNDTRIP_SECONDS = 60; // 1 AI roundtrip = 1 minute against pool
 
     const LANGUAGE_NAMES = {
@@ -1281,7 +1281,9 @@ async function start() {
             `Always reply in ${speakingName} only — never switch to ${nativeName} unless the user explicitly asks for an explanation. ` +
             `Keep replies short (1-3 sentences) and use vocabulary appropriate for an intermediate learner. ` +
             `End each reply with a natural follow-up question to keep the conversation going. ` +
-            `If the user makes a small grammatical error, gently model the correct phrasing in your reply rather than calling it out.`;
+            `If the user makes a small grammatical error, gently model the correct phrasing in your reply rather than calling it out. ` +
+            `Maintain consistent pronouns and politeness levels across the entire conversation. ` +
+            `For ${speakingName} specifically, once you have established the speaker relationship (e.g. for Vietnamese: anh/em or chị/em pairings; for Korean: 반말/존댓말 level; for Japanese: です/ます vs casual), do not switch mid-conversation unless the user does first.`;
 
         try {
             const sanitized = messages
