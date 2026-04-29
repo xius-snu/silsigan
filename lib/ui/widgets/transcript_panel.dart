@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
+import 'tts_control_button.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
 /// a displayed line never visually starts with a space or dangling punctuation.
@@ -202,19 +203,14 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                 ),
                 const Spacer(),
                 if (widget.showSpeakerToggle)
-                  GestureDetector(
-                    onTap: widget.onSpeakerToggle,
-                    child: Padding(
-                      padding: const EdgeInsets.only(right: 12),
-                      child: Icon(
-                        widget.speakerEnabled
-                            ? Icons.volume_up
-                            : Icons.volume_off_outlined,
-                        size: 20,
-                        color: widget.speakerEnabled
-                            ? AppConstants.textPrimary
-                            : AppConstants.textSecondary,
-                      ),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: TtsControlButton(
+                      enabled: widget.speakerEnabled,
+                      onEnabledChanged: (v) {
+                        if (v == widget.speakerEnabled) return;
+                        widget.onSpeakerToggle?.call();
+                      },
                     ),
                   ),
                 if (_hasText)

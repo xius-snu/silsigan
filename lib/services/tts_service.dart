@@ -25,6 +25,7 @@ class TtsService {
   final Queue<String> _queue = Queue();
 
   String _languageCode = 'vi';
+  double _rateMultiplier = 1.0;
   bool _enabled = false;
   bool _isProcessing = false;
   bool _isInitialized = false;
@@ -98,6 +99,11 @@ class TtsService {
     _languageCode = code;
   }
 
+  /// Speed multiplier (clamped 0.5 - 1.5) applied at speak-time.
+  void setRate(double multiplier) {
+    _rateMultiplier = multiplier.clamp(0.5, 1.5);
+  }
+
   void setEnabled(bool value) {
     _enabled = value;
     if (!value) {
@@ -137,7 +143,9 @@ class TtsService {
     }
     // iOS rate is 0..1 with ~0.5 = natural; Android rate is 0..2 with 1.0 = natural.
     // Slower than natural — language learners benefit from extra clarity.
-    final rate = defaultTargetPlatform == TargetPlatform.iOS ? 0.45 : 0.75;
+    final base = defaultTargetPlatform == TargetPlatform.iOS ? 0.45 : 0.75;
+    final maxRate = defaultTargetPlatform == TargetPlatform.iOS ? 1.0 : 2.0;
+    final rate = (base * _rateMultiplier).clamp(0.0, maxRate);
     await _tts.setSpeechRate(rate);
     await _tts.setPitch(1.0);
     await _tts.setVolume(1.0);

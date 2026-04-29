@@ -1562,6 +1562,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(nativeLanguageProvider.notifier).state = nativeLang;
     final learnAutoTts = await loadSavedLearnAutoTts();
     ref.read(learnAutoTtsProvider.notifier).state = learnAutoTts;
+    final ttsRate = await loadSavedTtsRate();
+    ref.read(ttsRateProvider.notifier).state = ttsRate;
   }
 
   Future<void> _restoreAutosaveDraft() async {
@@ -1855,6 +1857,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Sync TTS service state with provider
     _ttsService.setLanguageCode(targetLanguage.code);
     _ttsService.setEnabled(ttsEnabled);
+    _ttsService.setRate(ref.watch(ttsRateProvider));
 
     // Show speaker toggle for languages with TTS support + valid API key
     final showTtsToggle =

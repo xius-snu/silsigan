@@ -11,7 +11,9 @@ import '../../services/claude_chat_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/tts_service.dart';
 import '../../services/user_service.dart';
+import '../../providers/tts_provider.dart';
 import '../../utils/constants.dart';
+import 'tts_control_button.dart';
 
 /// Learn mode: 1:1 conversation with Claude in a target language for
 /// speaking practice. User speaks → ASR → Claude → TTS reply.
@@ -275,6 +277,8 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     final autoTts = ref.watch(learnAutoTtsProvider);
     final speakingLang = ref.watch(targetLanguageProvider);
     final nativeLang = ref.watch(nativeLanguageProvider);
+    // Keep TTS service in sync with the global rate slider.
+    _tts.setRate(ref.watch(ttsRateProvider));
 
     return Container(
       color: AppConstants.bgColor,
@@ -338,18 +342,13 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             ),
-          IconButton(
-            tooltip: autoTts ? 'Auto-speak: on' : 'Auto-speak: off',
-            icon: Icon(
-              autoTts ? Icons.volume_up : Icons.volume_off_outlined,
-              size: 22,
-              color: autoTts
-                  ? AppConstants.textPrimary
-                  : AppConstants.textSecondary,
-            ),
-            onPressed: _toggleAutoTts,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          TtsControlButton(
+            enabled: autoTts,
+            iconSize: 22,
+            onEnabledChanged: (v) {
+              if (v == autoTts) return;
+              _toggleAutoTts();
+            },
           ),
         ],
       ),
