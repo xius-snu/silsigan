@@ -29,9 +29,19 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   final ClaudeChatService _claude = ClaudeChatService();
   final ScrollController _scrollController = ScrollController();
 
-  String _currentDraft = '';
+  /// Accumulated finalized utterances for the in-progress message.
+  /// Mutated only by the onTranscriptionCompleted callback.
+  String _finalizedText = '';
+
+  /// The current in-flight utterance from Soniox (provisional + pending).
+  /// Mutated only by the onTranscriptionDraft callback. Replaces wholesale.
+  String _liveDraft = '';
+
   bool _isRecording = false;
   bool _isStopping = false;
+
+  String get _displayedTranscript =>
+      ('$_finalizedText $_liveDraft').replaceAll(RegExp(r'\s+'), ' ').trim();
 
   @override
   void initState() {
@@ -54,15 +64,18 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     _soniox.authToken = UserService.instance.authToken;
 
     _soniox.onTranscriptionDraft = (draft) {
-      if (mounted) setState(() => _currentDraft = draft);
+      if (!mounted) return;
+      setState(() => _liveDraft = draft);
     };
 
     _soniox.onTranscriptionCompleted = (text) {
       if (!mounted) return;
-      // Keep accumulating finalized utterances into the draft until stop.
-      // No new-line splitting — learn mode sends everything as one message.
+      // Move the finalized utterance into _finalizedText. The draft callback
+      // will replace _liveDraft on the next utterance — don't touch it here.
       setState(() {
-        _currentDraft = (_currentDraft.isEmpty ? text : '$_currentDraft $text');
+        _finalizedText =
+            _finalizedText.isEmpty ? text : '$_finalizedText $text';
+        _liveDraft = '';
       });
     };
 
@@ -99,7 +112,8 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
     setState(() {
       _isRecording = true;
-      _currentDraft = '';
+      _finalizedText = '';
+      _liveDraft = '';
     });
 
     try {
@@ -121,22 +135,31 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     if (!_isRecording || _isStopping) return;
     _isStopping = true;
 
+    // Flip to spinner immediately — don't wait for audio teardown.
+    setState(() => _isRecording = false);
+    ref.read(learnLoadingProvider.notifier).state = true;
+
     try {
       await _audio.stop();
       _soniox.finalize();
-      // Brief pause to let final tokens arrive before tearing down.
-      await Future.delayed(const Duration(milliseconds: 600));
+      // Wait for final tokens to settle before disconnecting.
+      await Future.delayed(const Duration(milliseconds: 800));
+      // disconnect() flushes any remaining pending utterance via
+      // onTranscriptionCompleted, which lands in _finalizedText.
       await _soniox.disconnect();
     } catch (_) {}
 
-    final transcript = _currentDraft.replaceAll('\n', ' ').trim();
+    final transcript = _displayedTranscript;
     setState(() {
-      _isRecording = false;
-      _currentDraft = '';
+      _finalizedText = '';
+      _liveDraft = '';
     });
     _isStopping = false;
 
-    if (transcript.isEmpty) return;
+    if (transcript.isEmpty) {
+      ref.read(learnLoadingProvider.notifier).state = false;
+      return;
+    }
 
     await _sendToClaude(transcript);
   }
@@ -261,7 +284,9 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
           Expanded(
             child: Container(
               color: AppConstants.panelColor,
-              child: messages.isEmpty && !_isRecording && _currentDraft.isEmpty
+              child: messages.isEmpty &&
+                      !_isRecording &&
+                      _displayedTranscript.isEmpty
                   ? _buildEmptyState(speakingLang)
                   : _buildChatList(messages, isLoading),
             ),
@@ -426,12 +451,13 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   }
 
   Widget _buildChatList(List<LearnMessage> messages, bool isLoading) {
+    final draft = _displayedTranscript;
     return SelectionArea(
       child: ListView.builder(
         controller: _scrollController,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         itemCount: messages.length +
-            (_currentDraft.isNotEmpty ? 1 : 0) +
+            (draft.isNotEmpty ? 1 : 0) +
             (isLoading ? 1 : 0),
         itemBuilder: (context, index) {
           if (index < messages.length) {
@@ -439,9 +465,9 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             return _buildMessageBubble(m, index);
           }
           // Live recording draft (right-aligned, dimmed)
-          if (_currentDraft.isNotEmpty && index == messages.length) {
+          if (draft.isNotEmpty && index == messages.length) {
             return _buildBubble(
-              text: _currentDraft,
+              text: draft,
               isUser: true,
               isDraft: true,
             );

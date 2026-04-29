@@ -1362,8 +1362,10 @@ async function start() {
 
             if (!upstream.ok) {
                 const errBody = await upstream.text();
-                fastify.log.error(`Soniox TTS ${upstream.status}: ${errBody.slice(0, 300)}`);
-                return reply.code(502).send({ error: 'TTS upstream error' });
+                fastify.log.error(`Soniox TTS ${upstream.status}: ${errBody.slice(0, 500)}`);
+                return reply.code(502).send({
+                    error: `Soniox ${upstream.status}: ${errBody.slice(0, 200)}`,
+                });
             }
 
             const buf = Buffer.from(await upstream.arrayBuffer());
