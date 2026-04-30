@@ -86,12 +86,10 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
     _soniox.onTranscriptionCompleted = (text) {
       if (!mounted) return;
-      // Swallow the post-finalize completion that flushes the deleted text.
-      if (_pendingFinalize) {
-        _pendingFinalize = false;
-        _pendingFinalizeTimer?.cancel();
-        return;
-      }
+      // While clear-and-stop is in flight, drop everything Soniox emits —
+      // both drafts (above) and completions. The teardown caller manages the
+      // flag's lifetime; we just gate.
+      if (_pendingFinalize) return;
       // Move the finalized utterance into _finalizedText. The draft callback
       // will replace _liveDraft on the next utterance — don't touch it here.
       setState(() {
@@ -154,35 +152,80 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     }
   }
 
+  /// Stop the audio + Soniox session, but KEEP the transcript on screen.
+  /// The user can then submit, clear, or re-record.
   Future<void> _stopRecording() async {
     if (!_isRecording || _isStopping) return;
     _isStopping = true;
 
-    // Flip to spinner immediately — don't wait for audio teardown.
     setState(() => _isRecording = false);
-    ref.read(learnLoadingProvider.notifier).state = true;
 
     try {
       await _audio.stop();
       _soniox.finalize();
-      // Wait for final tokens to settle before disconnecting.
+      // Give the final completion event time to land before disconnecting,
+      // so _finalizedText is fully populated.
       await Future.delayed(const Duration(milliseconds: 800));
-      // disconnect() flushes any remaining pending utterance via
-      // onTranscriptionCompleted, which lands in _finalizedText.
       await _soniox.disconnect();
     } catch (_) {}
 
-    final transcript = _displayedTranscript;
+    _isStopping = false;
+  }
+
+  /// Tear the recording session down without preserving anything Soniox is
+  /// holding in flight. Used by clear-while-recording so the next session
+  /// starts from a clean slate (no bleed from the previous audio).
+  Future<void> _clearAndStopRecording() async {
+    // Gate ALL callbacks for the whole teardown. The 2s safety timer is a
+    // belt-and-suspenders fallback in case disconnect hangs — without it
+    // the flag could stick true forever and silently swallow future drafts.
+    _pendingFinalize = true;
+    _pendingFinalizeTimer?.cancel();
+    _pendingFinalizeTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) _pendingFinalize = false;
+    });
+
     setState(() {
+      _isRecording = false;
       _finalizedText = '';
       _liveDraft = '';
     });
-    _isStopping = false;
 
+    try {
+      await _audio.stop();
+      // Hard disconnect — no finalize. We don't want a flush event repainting
+      // the cleared text. Any in-flight tokens get dropped at the WS layer.
+      await _soniox.disconnect();
+    } catch (_) {}
+
+    _pendingFinalizeTimer?.cancel();
+    if (mounted) _pendingFinalize = false;
+  }
+
+  /// Submit the current transcript to Claude. If still recording, stop first
+  /// so the final tokens land before we read [_displayedTranscript].
+  Future<void> _submitTranscript() async {
+    if (ref.read(learnLoadingProvider)) return;
+
+    // Show the spinner immediately so the user gets feedback while the
+    // recording is being torn down.
+    ref.read(learnLoadingProvider.notifier).state = true;
+
+    if (_isRecording) {
+      await _stopRecording();
+    }
+    if (!mounted) return;
+
+    final transcript = _displayedTranscript;
     if (transcript.isEmpty) {
       ref.read(learnLoadingProvider.notifier).state = false;
       return;
     }
+
+    setState(() {
+      _finalizedText = '';
+      _liveDraft = '';
+    });
 
     await _sendToClaude(transcript);
   }
@@ -378,58 +421,18 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     }
   }
 
-  /// Remove the last word from [text]. Whitespace is the word boundary.
-  /// Trailing punctuation is stripped before AND after the cut so a single
-  /// tap removes "world." entirely, not just ".".
-  static String _deleteLastWord(String text) {
-    final endStrip = RegExp(
-      r'''[\s.,;:!?。、，；：！？・…\-—–"'\)\]\}»」』]+$''',
-      unicode: true,
-    );
-    var t = text.replaceAll(endStrip, '');
-    if (t.isEmpty) return '';
-    final lastSpace = t.lastIndexOf(RegExp(r'\s'));
-    // No whitespace boundary in the remaining text → the entire chunk is a
-    // single "word" (e.g. CJK text without spaces). Wipe it.
-    if (lastSpace < 0) return '';
-    t = t.substring(0, lastSpace);
-    return t.replaceAll(endStrip, '');
-  }
-
-  void _backspace() {
-    final current = _displayedTranscript;
-    if (current.isEmpty) return;
-    final hadDraft = _liveDraft.isNotEmpty;
-    final next = _deleteLastWord(current);
-    setState(() {
-      _finalizedText = next;
-      _liveDraft = '';
-    });
-    if (_isRecording && hadDraft) _flushSonioxState();
-  }
-
   void _clearTranscript() {
+    if (_isRecording) {
+      // Fire-and-forget: full teardown so old audio can't bleed into the
+      // next session. Side buttons stay on clear+submit briefly while the
+      // disconnect resolves; that's fine — submit is gated by hasText.
+      _clearAndStopRecording();
+      return;
+    }
     if (_displayedTranscript.isEmpty) return;
-    final hadDraft = _liveDraft.isNotEmpty;
     setState(() {
       _finalizedText = '';
       _liveDraft = '';
-    });
-    if (_isRecording && hadDraft) _flushSonioxState();
-  }
-
-  /// Force Soniox to commit its mid-utterance buffer so the deleted suffix
-  /// doesn't reappear in subsequent drafts. The completion event from this
-  /// finalize is swallowed via [_pendingFinalize]. The timer is a safety
-  /// net: if Soniox doesn't fire a completion (e.g. nothing was actually
-  /// in flight), we'd otherwise drop every future draft forever.
-  void _flushSonioxState() {
-    if (_pendingFinalize) return;
-    _pendingFinalize = true;
-    _soniox.finalize();
-    _pendingFinalizeTimer?.cancel();
-    _pendingFinalizeTimer = Timer(const Duration(milliseconds: 1500), () {
-      if (mounted) _pendingFinalize = false;
     });
   }
 
@@ -887,6 +890,11 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
   Widget _buildBottomBar(bool isLoading) {
     final autoMic = ref.watch(learnAutoMicProvider);
+    final hasText = _displayedTranscript.isNotEmpty;
+    // Show the clear+submit pair while there's anything to act on — either
+    // an active recording session OR text waiting to be sent. Otherwise fall
+    // back to the idle pair (auto-mic toggle + hint).
+    final showActionPair = _isRecording || hasText;
     return Container(
       color: AppConstants.bgColor,
       padding: const EdgeInsets.symmetric(vertical: 24),
@@ -895,7 +903,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
         children: [
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 120),
-            child: _isRecording
+            child: showActionPair
                 ? _buildClearButton(key: const ValueKey('clear'))
                 : _buildAutoMicToggle(autoMic, key: const ValueKey('auto-mic')),
           ),
@@ -904,11 +912,43 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
           const SizedBox(width: 40),
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 120),
-            child: _isRecording
-                ? _buildBackspaceButton(key: const ValueKey('backspace'))
+            child: showActionPair
+                ? _buildSubmitButton(isLoading, hasText,
+                    key: const ValueKey('submit'))
                 : _buildHintButton(isLoading, key: const ValueKey('hint')),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSubmitButton(bool isLoading, bool hasText, {Key? key}) {
+    final enabled = hasText && !isLoading;
+    return GestureDetector(
+      key: key,
+      onTap: enabled ? _submitTranscript : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: AppConstants.sideButtonSize,
+        height: AppConstants.sideButtonSize,
+        decoration: BoxDecoration(
+          color: enabled
+              ? AppConstants.historyButtonColor
+              : AppConstants.saveButtonColor,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.10),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.arrow_upward,
+          color: Colors.white,
+          size: 24,
+        ),
       ),
     );
   }
@@ -944,48 +984,20 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     );
   }
 
-  Widget _buildBackspaceButton({Key? key}) {
-    final hasText = _displayedTranscript.isNotEmpty;
-    return GestureDetector(
-      key: key,
-      onTap: hasText ? _backspace : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        width: AppConstants.sideButtonSize,
-        height: AppConstants.sideButtonSize,
-        decoration: BoxDecoration(
-          color: hasText
-              ? AppConstants.historyButtonColor
-              : AppConstants.saveButtonColor,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.10),
-              blurRadius: 4,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        child: const Icon(
-          Icons.backspace_outlined,
-          color: Colors.white,
-          size: 22,
-        ),
-      ),
-    );
-  }
-
   Widget _buildClearButton({Key? key}) {
-    final hasText = _displayedTranscript.isNotEmpty;
+    // Enabled whenever there's something to clear — text, an active recording
+    // session, or both. While recording with no text, clear acts as "cancel
+    // without sending" (it stops + tears down the Soniox session).
+    final enabled = _isRecording || _displayedTranscript.isNotEmpty;
     return GestureDetector(
       key: key,
-      onTap: hasText ? _clearTranscript : null,
+      onTap: enabled ? _clearTranscript : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 120),
         width: AppConstants.sideButtonSize,
         height: AppConstants.sideButtonSize,
         decoration: BoxDecoration(
-          color: hasText
+          color: enabled
               ? AppConstants.historyButtonColor
               : AppConstants.saveButtonColor,
           shape: BoxShape.circle,
