@@ -548,6 +548,43 @@ class SonioxRealtimeService {
     } catch (_) {}
   }
 
+  /// Drop everything in flight (in-flight tokens AND buffered audio) and
+  /// reconnect on the same session. Audio captured during the brief
+  /// reconnect gap is buffered and flushed to the new session, so the
+  /// caller can keep streaming audio through the reset uninterrupted.
+  ///
+  /// Unlike [_rotateSession] (which flushes pending tokens via
+  /// onTranscriptionCompleted before reconnecting), this method discards
+  /// them — the caller wants the previous utterance gone, not emitted.
+  Future<void> resetContext() async {
+    if (_intentionallyClosed) return;
+    if (_isReconnecting || _isRotating) return;
+    _isRotating = true;
+
+    _subscription?.cancel();
+    _subscription = null;
+    _lateTranslationTimer?.cancel();
+
+    // Discard, don't flush — the whole point is to drop the prior utterance.
+    _resetTokenState();
+    _clearAudioBuffer();
+    _reconnectAttempts = 0;
+
+    try {
+      await _channel?.sink.close().timeout(const Duration(seconds: 1));
+    } catch (_) {}
+    _channel = null;
+
+    await _doConnect();
+
+    // _doConnect clears _isRotating on success. If it failed silently, fall
+    // back to normal reconnection so the service doesn't get stuck.
+    if (_isRotating) {
+      _isRotating = false;
+      _tryReconnect();
+    }
+  }
+
   // ─── Reconnection ───
 
   void _tryReconnect() {

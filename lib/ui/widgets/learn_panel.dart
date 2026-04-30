@@ -42,15 +42,22 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   bool _isRecording = false;
   bool _isStopping = false;
 
-  /// Set true between a backspace/clear tap and the resulting Soniox
-  /// completion event (triggered by finalize). While true, drafts and the
-  /// next completion are ignored — they reflect the pre-deletion state.
+  /// Set true while a clear-during-recording reset is in flight. Drafts
+  /// and completions arriving in that window are discarded — they reflect
+  /// the pre-clear utterance, which the user just asked us to forget.
   bool _pendingFinalize = false;
 
-  /// Safety net for [_pendingFinalize]: if no completion event arrives within
-  /// this window (Soniox sometimes doesn't fire one when there's nothing in
-  /// flight), force-clear the flag so subsequent drafts aren't dropped forever.
+  /// Safety net for [_pendingFinalize]: if the reset hangs (e.g. the WS
+  /// close never resolves), force-clear the flag so subsequent drafts
+  /// aren't dropped forever.
   Timer? _pendingFinalizeTimer;
+
+  /// Drop audio chunks until this time. Used during clear-while-recording
+  /// to discard the small amount of audio still in flutter_sound's capture
+  /// pipeline at the moment of clear — without this, those chunks would
+  /// land on the new Soniox session and immediately repaint the cleared
+  /// transcript.
+  DateTime? _audioGateUntil;
 
   String get _displayedTranscript =>
       ('$_finalizedText $_liveDraft').replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -144,7 +151,15 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
       // Connect Soniox WITHOUT a translation target → ASR-only.
       await _soniox.connect(languageHint: speakingLang);
 
-      _audio.onAudioChunk = (bytes) => _soniox.sendAudio(bytes);
+      _audio.onAudioChunk = (bytes) {
+        // Drop chunks during the brief gate after a clear-context reset.
+        // Without this, audio that flutter_sound was already holding at
+        // the moment of clear would land on the new Soniox session and
+        // immediately repopulate the transcript with pre-clear words.
+        final gate = _audioGateUntil;
+        if (gate != null && DateTime.now().isBefore(gate)) return;
+        _soniox.sendAudio(bytes);
+      };
       await _audio.start();
     } catch (e) {
       setState(() => _isRecording = false);
@@ -175,30 +190,33 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     _isStopping = false;
   }
 
-  /// Tear the recording session down without preserving anything Soniox is
-  /// holding in flight. Used by clear-while-recording so the next session
-  /// starts from a clean slate (no bleed from the previous audio).
-  Future<void> _clearAndStopRecording() async {
-    // Gate ALL callbacks for the whole teardown. The 2s safety timer is a
-    // belt-and-suspenders fallback in case disconnect hangs — without it
-    // the flag could stick true forever and silently swallow future drafts.
+  /// Clear the transcript without leaving recording mode. Drops the past
+  /// audio context (in-flight Soniox tokens AND a small audio-gate window
+  /// to swallow flutter_sound's residual capture chunks) so the cleared
+  /// text doesn't immediately reappear from a token already on the wire.
+  /// Recording stays on and audio capture is uninterrupted.
+  Future<void> _clearWhileRecording() async {
+    // Swallow any draft/completion that races past the WS reset. The 2s
+    // safety timer is a fallback in case the close hangs.
     _pendingFinalize = true;
     _pendingFinalizeTimer?.cancel();
     _pendingFinalizeTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) _pendingFinalize = false;
     });
 
+    // Drop the next ~250ms of audio. flutter_sound buffers a small window
+    // of capture internally; without this gate, those chunks would arrive
+    // at the new Soniox session and the user would see the last syllable
+    // or two of their pre-clear speech reappear.
+    _audioGateUntil = DateTime.now().add(const Duration(milliseconds: 250));
+
     setState(() {
-      _isRecording = false;
       _finalizedText = '';
       _liveDraft = '';
     });
 
     try {
-      await _audio.stop();
-      // Hard disconnect — no finalize. We don't want a flush event repainting
-      // the cleared text. Any in-flight tokens get dropped at the WS layer.
-      await _soniox.disconnect();
+      await _soniox.resetContext();
     } catch (_) {}
 
     _pendingFinalizeTimer?.cancel();
@@ -426,10 +444,11 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
   void _clearTranscript() {
     if (_isRecording) {
-      // Fire-and-forget: full teardown so old audio can't bleed into the
-      // next session. Side buttons stay on clear+submit briefly while the
-      // disconnect resolves; that's fine — submit is gated by hasText.
-      _clearAndStopRecording();
+      // Fire-and-forget: clear text + reset Soniox context, but stay in
+      // recording mode. Old in-flight tokens are dropped (not flushed),
+      // and a brief audio gate prevents flutter_sound's capture-pipeline
+      // residue from immediately repainting the cleared transcript.
+      _clearWhileRecording();
       return;
     }
     if (_displayedTranscript.isEmpty) return;
