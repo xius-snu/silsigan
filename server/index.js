@@ -1448,20 +1448,25 @@ async function start() {
             .join('\n');
 
         const system =
-            `You are helping someone who is practicing ${speakingName} but is stuck and doesn't know what to say. ` +
-            `Below is a conversation between the learner ("Me") and a friend ("Friend"). Write the learner's NEXT message — i.e. what "Me" should say next. ` +
+            `You are writing a HINT for an absolute beginner learner of ${speakingName} who is stuck and doesn't know what to say. ` +
+            `Below is a conversation between the learner ("Me") and a friend ("Friend"). Output the learner's NEXT message — what "Me" should say next. ` +
             `\n\nConversation so far:\n${conversationText || '(none — this is the very first message)'}\n\n` +
-            `Rules:\n` +
-            `- Output ONLY the next message in ${speakingName}. No labels like "Me:", no quotes, no preamble, no translation.\n` +
-            `- If there is a previous Friend turn, reply naturally to it. If there is no conversation yet, start with a casual greeting and one open question (e.g. a friendly hi + "what are you up to?").\n` +
-            `- Keep it short and at the learner's level — match the length and difficulty of their previous Me turns. Usually one short sentence.\n` +
-            `- Sound like a real person texting a friend. Casual, natural. Plain text only — no markdown, no emoji.`;
+            `This output is a HINT. It MUST be the simplest possible message that minimally answers the friend's last question. ` +
+            `Treat the learner as A1 / absolute-beginner level even if the friend's ${speakingName} is fluent. The whole point is that the learner should be able to read, understand, and say this hint without difficulty.\n\n` +
+            `Hard rules:\n` +
+            `- Use ONLY the most common, basic, textbook beginner words. No idioms, no slang, no colloquialisms, no clever phrasing, no rare or fancy vocabulary. If a first-semester beginner textbook wouldn't teach the word, don't use it.\n` +
+            `- Use the simplest grammar possible. Prefer plain "subject + verb + (object)" sentences. Avoid complex tenses, conditionals, subjunctives, idiomatic particles, honorific gymnastics, or any structure a beginner wouldn't recognize.\n` +
+            `- Keep it as SHORT as possible — usually 3 to 7 words. A single short phrase is fine if it answers the question. Never more than one short sentence.\n` +
+            `- The reply only needs to MINIMALLY answer the friend's question. Do not elaborate, add detail, joke, or sound clever. Boring, plain, and basic is correct here.\n` +
+            `- Do NOT match the friend's level. The friend is fluent; the learner is not. The hint should feel noticeably simpler than the friend's turn.\n` +
+            `- If there is no Friend turn yet, output the simplest possible opener — a basic greeting plus one very basic question like "How are you?" / equivalent. No more.\n` +
+            `- Output ONLY the message in ${speakingName}. No labels like "Me:", no quotes, no preamble, no translation, no markdown, no emoji.`;
 
         try {
             const text = await callClaude({
                 system,
-                messages: [{ role: 'user', content: 'Write the next message.' }],
-                maxTokens: 200,
+                messages: [{ role: 'user', content: 'Write the next message. Keep it minimally simple.' }],
+                maxTokens: 80,
             });
 
             await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
