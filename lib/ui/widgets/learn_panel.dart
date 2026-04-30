@@ -131,9 +131,12 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
     final speakingLang = ref.read(targetLanguageProvider).code;
 
+    // Preserve any existing finalized text — re-pressing mic continues from
+    // where the user left off. Only the clear button (or a successful submit)
+    // wipes the transcript. _liveDraft is reset because Soniox starts a fresh
+    // utterance on connect.
     setState(() {
       _isRecording = true;
-      _finalizedText = '';
       _liveDraft = '';
     });
 
