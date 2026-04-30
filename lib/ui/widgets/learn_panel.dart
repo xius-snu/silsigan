@@ -410,18 +410,19 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             ),
           ),
           const SizedBox(width: 4),
-          if (hasMessages)
-            IconButton(
-              tooltip: 'Clear conversation',
-              icon: const Icon(
-                Icons.refresh,
-                size: 20,
-                color: AppConstants.textSecondary,
-              ),
-              onPressed: _clearChat,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          IconButton(
+            tooltip: 'Clear conversation',
+            icon: Icon(
+              Icons.refresh,
+              size: 20,
+              color: hasMessages
+                  ? AppConstants.textSecondary
+                  : AppConstants.textSecondary.withOpacity(0.35),
             ),
+            onPressed: hasMessages ? _clearChat : null,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
           TtsControlButton(
             enabled: autoTts,
             iconSize: 22,
