@@ -388,24 +388,28 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
       color: AppConstants.bgColor,
       child: Row(
         children: [
-          _buildLangPicker(
-            label: 'Practicing',
-            value: speaking,
-            onChanged: (lang) {
-              ref.read(targetLanguageProvider.notifier).state = lang;
-              saveTargetLanguage(lang);
-            },
+          Flexible(
+            child: _buildLangPicker(
+              label: 'Practicing',
+              value: speaking,
+              onChanged: (lang) {
+                ref.read(targetLanguageProvider.notifier).state = lang;
+                saveTargetLanguage(lang);
+              },
+            ),
           ),
           const SizedBox(width: 8),
-          _buildLangPicker(
-            label: 'I speak',
-            value: native,
-            onChanged: (lang) {
-              ref.read(nativeLanguageProvider.notifier).state = lang;
-              saveNativeLanguage(lang);
-            },
+          Flexible(
+            child: _buildLangPicker(
+              label: 'I speak',
+              value: native,
+              onChanged: (lang) {
+                ref.read(nativeLanguageProvider.notifier).state = lang;
+                saveNativeLanguage(lang);
+              },
+            ),
           ),
-          const Spacer(),
+          const SizedBox(width: 4),
           if (hasMessages)
             IconButton(
               tooltip: 'Clear conversation',
@@ -468,12 +472,16 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
                 color: AppConstants.textSecondary,
               ),
             ),
-            Text(
-              value.displayName,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: AppConstants.textPrimary,
+            Flexible(
+              child: Text(
+                value.displayName,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: AppConstants.textPrimary,
+                ),
               ),
             ),
             const Icon(

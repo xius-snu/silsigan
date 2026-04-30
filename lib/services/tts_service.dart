@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -29,7 +28,6 @@ class TtsService {
   bool _enabled = false;
   bool _isProcessing = false;
   bool _isInitialized = false;
-  Completer<void>? _playbackCompleter;
 
   Function(String error)? onError;
   Function(bool playing)? onPlaybackStateChanged;
@@ -53,23 +51,15 @@ class TtsService {
       onPlaybackStateChanged?.call(true);
     });
     _tts.setCompletionHandler(() {
-      _completePlayback();
+      onPlaybackStateChanged?.call(false);
     });
     _tts.setCancelHandler(() {
-      _completePlayback();
+      onPlaybackStateChanged?.call(false);
     });
     _tts.setErrorHandler((msg) {
       onError?.call('TTS: $msg');
-      _completePlayback();
+      onPlaybackStateChanged?.call(false);
     });
-  }
-
-  void _completePlayback() {
-    if (_playbackCompleter != null && !_playbackCompleter!.isCompleted) {
-      _playbackCompleter!.complete();
-    }
-    _playbackCompleter = null;
-    onPlaybackStateChanged?.call(false);
   }
 
   /// One-time iOS audio session setup so TTS playback can coexist with the
@@ -92,7 +82,11 @@ class TtsService {
           IosTextToSpeechAudioMode.defaultMode,
         );
       }
-      await _tts.awaitSpeakCompletion(false);
+      // Make _tts.speak() itself await playback completion. This is more
+      // reliable than relying on setCompletionHandler — on iOS with
+      // mixWithOthers + a shared mic session, the completion event sometimes
+      // doesn't fire, which used to wedge the queue until a timeout.
+      await _tts.awaitSpeakCompletion(true);
     } catch (e) {
       onError?.call('TTS init: $e');
     }
@@ -153,25 +147,10 @@ class TtsService {
     await _tts.setPitch(1.0);
     await _tts.setVolume(1.0);
 
-    _playbackCompleter = Completer<void>();
+    // awaitSpeakCompletion(true) is set in _ensureInitialized — speak()
+    // itself awaits until the OS finishes (or stop() interrupts).
     final result = await _tts.speak(text);
-    if (result == 1) {
-      // If the platform completion event somehow never fires (audio session
-      // glitch, plugin race, etc.), the queue would otherwise stay
-      // _isProcessing=true forever and silently drop every later utterance.
-      // Cap the wait at a generous estimate of the speech duration.
-      final maxSecs = (text.length / 4).ceil().clamp(8, 90);
-      try {
-        await _playbackCompleter!.future
-            .timeout(Duration(seconds: maxSecs));
-      } on TimeoutException {
-        debugPrint(
-            'TTS completion timeout after ${maxSecs}s for "${text.length > 40 ? '${text.substring(0, 40)}…' : text}"');
-      } finally {
-        _playbackCompleter = null;
-      }
-    } else {
-      _playbackCompleter = null;
+    if (result != 1) {
       debugPrint('TTS speak() returned $result — engine refused utterance');
     }
   }
@@ -206,7 +185,7 @@ class TtsService {
     try {
       await _tts.stop();
     } catch (_) {}
-    _completePlayback();
+    onPlaybackStateChanged?.call(false);
   }
 
   Future<void> stop() async {

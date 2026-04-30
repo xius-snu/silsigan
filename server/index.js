@@ -1400,20 +1400,16 @@ async function start() {
         const speakingName = langName(speaking_language);
         const nativeName = langName(native_language);
         const system =
-            `You are explaining a ${speakingName} sentence to a ${nativeName} speaker who may not understand any of it. ` +
-            `Provide, in this order: ` +
-            `(1) a clear, natural translation of the full meaning into ${nativeName}; ` +
-            `(2) a vocabulary breakdown — for each important word, give its meaning and any nuance worth knowing; ` +
-            `(3) notes on grammar patterns, particles, or idiomatic phrasing if any are present. ` +
-            `Be thorough enough that someone who didn't understand the sentence at all will now fully understand it. ` +
-            `Stay focused — only explain what's actually useful for understanding this specific sentence. Don't pad. Don't be condescending. ` +
-            `Reply in ${nativeName} only. Use plain text only — no markdown, no asterisks, no headers, no bullet points. Use line breaks where they aid readability.`;
+            `Explain a ${speakingName} sentence to a ${nativeName} speaker. ` +
+            `Give a one-line natural translation, then a brief note (one or two sentences) on whatever is actually non-obvious — a tricky word, an idiom, an unusual particle or grammar pattern. ` +
+            `If the sentence is straightforward, the translation alone is enough. Skip anything a ${nativeName} speaker would already infer. ` +
+            `Reply in ${nativeName} only. Plain text — no markdown, no headers, no bullets. Keep it tight.`;
 
         try {
             const explanation = await callClaude({
                 system,
                 messages: [{ role: 'user', content: text }],
-                maxTokens: 1500,
+                maxTokens: 400,
             });
 
             await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
