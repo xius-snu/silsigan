@@ -1562,6 +1562,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(nativeLanguageProvider.notifier).state = nativeLang;
     final learnAutoTts = await loadSavedLearnAutoTts();
     ref.read(learnAutoTtsProvider.notifier).state = learnAutoTts;
+    final learnAutoMic = await loadSavedLearnAutoMic();
+    ref.read(learnAutoMicProvider.notifier).state = learnAutoMic;
     final ttsRate = await loadSavedTtsRate();
     ref.read(ttsRateProvider.notifier).state = ttsRate;
   }

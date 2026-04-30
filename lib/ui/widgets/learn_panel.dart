@@ -42,10 +42,15 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   bool _isRecording = false;
   bool _isStopping = false;
 
-  /// Set true between a backspace tap and the resulting Soniox completion
-  /// event (triggered by finalize). While true, drafts and the next
-  /// completion are ignored — they reflect the pre-deletion state.
+  /// Set true between a backspace/clear tap and the resulting Soniox
+  /// completion event (triggered by finalize). While true, drafts and the
+  /// next completion are ignored — they reflect the pre-deletion state.
   bool _pendingFinalize = false;
+
+  /// Safety net for [_pendingFinalize]: if no completion event arrives within
+  /// this window (Soniox sometimes doesn't fire one when there's nothing in
+  /// flight), force-clear the flag so subsequent drafts aren't dropped forever.
+  Timer? _pendingFinalizeTimer;
 
   String get _displayedTranscript =>
       ('$_finalizedText $_liveDraft').replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -59,6 +64,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
 
   @override
   void dispose() {
+    _pendingFinalizeTimer?.cancel();
     _audio.dispose();
     _soniox.disconnect();
     _tts.dispose();
@@ -75,6 +81,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
       // Ignore drafts produced from the pre-deletion utterance.
       if (_pendingFinalize) return;
       setState(() => _liveDraft = draft);
+      _scrollToBottom(jump: true);
     };
 
     _soniox.onTranscriptionCompleted = (text) {
@@ -82,6 +89,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
       // Swallow the post-finalize completion that flushes the deleted text.
       if (_pendingFinalize) {
         _pendingFinalize = false;
+        _pendingFinalizeTimer?.cancel();
         return;
       }
       // Move the finalized utterance into _finalizedText. The draft callback
@@ -91,6 +99,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             _finalizedText.isEmpty ? text : '$_finalizedText $text';
         _liveDraft = '';
       });
+      _scrollToBottom(jump: true);
     };
 
     _soniox.onError = (err) {
@@ -248,6 +257,17 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     } else if (gradeError != null) {
       debugPrint('Grade error: $gradeError');
     }
+
+    // Auto-mic: re-arm the mic after the assistant has replied. Wait for TTS
+    // playback to fully drain first so the spoken reply doesn't get captured
+    // by the recorder. waitForDrain returns immediately if TTS isn't queued.
+    if (reply != null && ref.read(learnAutoMicProvider)) {
+      await _tts.waitForDrain();
+      if (!mounted) return;
+      if (ref.read(learnAutoMicProvider) && !_isRecording && !_isStopping) {
+        await _startRecording();
+      }
+    }
   }
 
   Future<void> _explain(int messageIndex) async {
@@ -304,17 +324,38 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   void _backspace() {
     final current = _displayedTranscript;
     if (current.isEmpty) return;
+    final hadDraft = _liveDraft.isNotEmpty;
     final next = _deleteLastWord(current);
     setState(() {
       _finalizedText = next;
       _liveDraft = '';
     });
-    // While recording, force Soniox to flush its mid-utterance state so the
-    // deleted suffix doesn't keep coming back via subsequent draft events.
-    if (_isRecording && !_pendingFinalize) {
-      _pendingFinalize = true;
-      _soniox.finalize();
-    }
+    if (_isRecording && hadDraft) _flushSonioxState();
+  }
+
+  void _clearTranscript() {
+    if (_displayedTranscript.isEmpty) return;
+    final hadDraft = _liveDraft.isNotEmpty;
+    setState(() {
+      _finalizedText = '';
+      _liveDraft = '';
+    });
+    if (_isRecording && hadDraft) _flushSonioxState();
+  }
+
+  /// Force Soniox to commit its mid-utterance buffer so the deleted suffix
+  /// doesn't reappear in subsequent drafts. The completion event from this
+  /// finalize is swallowed via [_pendingFinalize]. The timer is a safety
+  /// net: if Soniox doesn't fire a completion (e.g. nothing was actually
+  /// in flight), we'd otherwise drop every future draft forever.
+  void _flushSonioxState() {
+    if (_pendingFinalize) return;
+    _pendingFinalize = true;
+    _soniox.finalize();
+    _pendingFinalizeTimer?.cancel();
+    _pendingFinalizeTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) _pendingFinalize = false;
+    });
   }
 
   void _replayTts(String text) {
@@ -323,11 +364,15 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     _tts.speakOnce(text);
   }
 
-  void _scrollToBottom() {
+  void _scrollToBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
+      if (!_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (jump) {
+        _scrollController.jumpTo(max);
+      } else {
         _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
+          max,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
@@ -766,15 +811,23 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
   }
 
   Widget _buildBottomBar(bool isLoading) {
+    final autoMic = ref.watch(learnAutoMicProvider);
     return Container(
       color: AppConstants.bgColor,
       padding: const EdgeInsets.symmetric(vertical: 24),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Left placeholder for symmetry with the right-side backspace.
-          const SizedBox(
-              width: AppConstants.sideButtonSize, height: AppConstants.sideButtonSize),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 120),
+            child: _isRecording
+                ? _buildClearButton(key: const ValueKey('clear'))
+                : const SizedBox(
+                    key: ValueKey('clear-hidden'),
+                    width: AppConstants.sideButtonSize,
+                    height: AppConstants.sideButtonSize,
+                  ),
+          ),
           const SizedBox(width: 40),
           _buildMicButton(isLoading),
           const SizedBox(width: 40),
@@ -782,11 +835,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             duration: const Duration(milliseconds: 120),
             child: _isRecording
                 ? _buildBackspaceButton(key: const ValueKey('backspace'))
-                : const SizedBox(
-                    key: ValueKey('backspace-hidden'),
-                    width: AppConstants.sideButtonSize,
-                    height: AppConstants.sideButtonSize,
-                  ),
+                : _buildAutoMicToggle(autoMic, key: const ValueKey('auto-mic')),
           ),
         ],
       ),
@@ -819,6 +868,94 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
           Icons.backspace_outlined,
           color: Colors.white,
           size: 22,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildClearButton({Key? key}) {
+    final hasText = _displayedTranscript.isNotEmpty;
+    return GestureDetector(
+      key: key,
+      onTap: hasText ? _clearTranscript : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: AppConstants.sideButtonSize,
+        height: AppConstants.sideButtonSize,
+        decoration: BoxDecoration(
+          color: hasText
+              ? AppConstants.historyButtonColor
+              : AppConstants.saveButtonColor,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.10),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.delete_outline,
+          color: Colors.white,
+          size: 24,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAutoMicToggle(bool enabled, {Key? key}) {
+    return GestureDetector(
+      key: key,
+      onTap: () {
+        final next = !ref.read(learnAutoMicProvider);
+        ref.read(learnAutoMicProvider.notifier).state = next;
+        saveLearnAutoMic(next);
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: AppConstants.sideButtonSize,
+        height: AppConstants.sideButtonSize,
+        decoration: BoxDecoration(
+          color: enabled
+              ? AppConstants.historyButtonColor
+              : AppConstants.panelColor,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: enabled
+                ? AppConstants.historyButtonColor
+                : AppConstants.dividerColor,
+            width: 1,
+          ),
+          boxShadow: enabled
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.10),
+                    blurRadius: 4,
+                    offset: const Offset(0, 1),
+                  ),
+                ]
+              : null,
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.autorenew,
+              size: 18,
+              color: enabled ? Colors.white : AppConstants.textSecondary,
+            ),
+            const SizedBox(height: 1),
+            Text(
+              'AUTO',
+              style: TextStyle(
+                fontSize: 8,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+                color: enabled ? Colors.white : AppConstants.textSecondary,
+              ),
+            ),
+          ],
         ),
       ),
     );

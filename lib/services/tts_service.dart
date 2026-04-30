@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -28,6 +29,11 @@ class TtsService {
   bool _enabled = false;
   bool _isProcessing = false;
   bool _isInitialized = false;
+
+  /// Completes when the queue fully drains. Used by callers (e.g. learn-mode
+  /// auto-mic) that need to wait until the spoken reply is finished before
+  /// starting the next action.
+  Completer<void>? _drainCompleter;
 
   Function(String error)? onError;
   Function(bool playing)? onPlaybackStateChanged;
@@ -106,13 +112,26 @@ class TtsService {
     if (!value) {
       _queue.clear();
       _stopPlayback();
+      if (_drainCompleter != null && !_drainCompleter!.isCompleted) {
+        _drainCompleter!.complete();
+      }
     }
   }
 
   void speak(String text) {
     if (!_enabled || text.trim().isEmpty) return;
     _queue.add(text.trim());
+    if (_drainCompleter == null || _drainCompleter!.isCompleted) {
+      _drainCompleter = Completer<void>();
+    }
     _processQueue();
+  }
+
+  /// Resolves once the queued speech (started by [speak]) has fully played
+  /// out. If nothing is queued or playing, returns immediately.
+  Future<void> waitForDrain() async {
+    if (_drainCompleter == null || _drainCompleter!.isCompleted) return;
+    return _drainCompleter!.future;
   }
 
   Future<void> _processQueue() async {
@@ -127,6 +146,9 @@ class TtsService {
       }
     }
     _isProcessing = false;
+    if (_drainCompleter != null && !_drainCompleter!.isCompleted) {
+      _drainCompleter!.complete();
+    }
   }
 
   Future<void> _ttsSpeak(String text) async {
@@ -192,6 +214,9 @@ class TtsService {
     _enabled = false;
     _queue.clear();
     await _stopPlayback();
+    if (_drainCompleter != null && !_drainCompleter!.isCompleted) {
+      _drainCompleter!.complete();
+    }
   }
 
   Future<void> dispose() async {

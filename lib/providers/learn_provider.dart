@@ -21,3 +21,17 @@ Future<void> saveLearnAutoTts(bool value) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setBool('learn_auto_tts', value);
 }
+
+/// Auto-restart the mic after the assistant replies (and after TTS finishes,
+/// so the spoken reply doesn't get re-recorded).
+final learnAutoMicProvider = StateProvider<bool>((ref) => false);
+
+Future<bool> loadSavedLearnAutoMic() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getBool('learn_auto_mic') ?? false;
+}
+
+Future<void> saveLearnAutoMic(bool value) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('learn_auto_mic', value);
+}
