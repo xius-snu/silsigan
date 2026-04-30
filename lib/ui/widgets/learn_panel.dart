@@ -270,6 +270,81 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
     }
   }
 
+  /// Hint flow: ask Claude what the user could say, append it as a user
+  /// message, then get the assistant's reply — handing the turn back. No
+  /// grading (the user didn't actually produce the message).
+  Future<void> _hint() async {
+    if (_isRecording || ref.read(learnLoadingProvider)) return;
+
+    final speakingLang = ref.read(targetLanguageProvider).code;
+    final nativeLang = ref.read(nativeLanguageProvider).code;
+
+    ref.read(learnLoadingProvider.notifier).state = true;
+    _scrollToBottom();
+
+    String suggestion;
+    try {
+      suggestion = await _claude.suggestUserReply(
+        history: ref.read(learnMessagesProvider),
+        speakingLang: speakingLang,
+        nativeLang: nativeLang,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ref.read(learnLoadingProvider.notifier).state = false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    if (suggestion.isEmpty) {
+      ref.read(learnLoadingProvider.notifier).state = false;
+      return;
+    }
+
+    // gradeStatus = na hides the grade chip (we don't grade AI-written turns).
+    final userMsg = LearnMessage(
+      role: 'user',
+      text: suggestion,
+      gradeStatus: GradeStatus.na,
+    );
+    final updated = [...ref.read(learnMessagesProvider), userMsg];
+    ref.read(learnMessagesProvider.notifier).state = updated;
+    _scrollToBottom();
+
+    String? reply;
+    try {
+      reply = await _claude.sendMessage(
+        history: updated,
+        speakingLang: speakingLang,
+        nativeLang: nativeLang,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ref.read(learnLoadingProvider.notifier).state = false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    ref.read(learnMessagesProvider.notifier).state = [
+      ...ref.read(learnMessagesProvider),
+      LearnMessage(role: 'assistant', text: reply),
+    ];
+    ref.read(learnLoadingProvider.notifier).state = false;
+    _scrollToBottom();
+
+    if (ref.read(learnAutoTtsProvider)) {
+      _tts.setLanguageCode(speakingLang);
+      _tts.setEnabled(true);
+      _tts.speak(reply);
+    }
+  }
+
   Future<void> _explain(int messageIndex) async {
     final messages = ref.read(learnMessagesProvider);
     if (messageIndex >= messages.length) return;
@@ -822,11 +897,7 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             duration: const Duration(milliseconds: 120),
             child: _isRecording
                 ? _buildClearButton(key: const ValueKey('clear'))
-                : const SizedBox(
-                    key: ValueKey('clear-hidden'),
-                    width: AppConstants.sideButtonSize,
-                    height: AppConstants.sideButtonSize,
-                  ),
+                : _buildAutoMicToggle(autoMic, key: const ValueKey('auto-mic')),
           ),
           const SizedBox(width: 40),
           _buildMicButton(isLoading),
@@ -835,9 +906,40 @@ class _LearnPanelState extends ConsumerState<LearnPanel> {
             duration: const Duration(milliseconds: 120),
             child: _isRecording
                 ? _buildBackspaceButton(key: const ValueKey('backspace'))
-                : _buildAutoMicToggle(autoMic, key: const ValueKey('auto-mic')),
+                : _buildHintButton(isLoading, key: const ValueKey('hint')),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHintButton(bool isLoading, {Key? key}) {
+    final disabled = isLoading;
+    return GestureDetector(
+      key: key,
+      onTap: disabled ? null : _hint,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        width: AppConstants.sideButtonSize,
+        height: AppConstants.sideButtonSize,
+        decoration: BoxDecoration(
+          color: disabled
+              ? AppConstants.saveButtonColor
+              : AppConstants.historyButtonColor,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.10),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.auto_awesome,
+          color: Colors.white,
+          size: 22,
+        ),
       ),
     );
   }

@@ -110,6 +110,33 @@ class ClaudeChatService {
     return GradeResult(status, explanation);
   }
 
+  /// Ask Claude to suggest the user's next message in [speakingLang],
+  /// given the conversation [history]. Used by the hint button when the
+  /// learner is stuck. Returns plain text in the speaking language.
+  Future<String> suggestUserReply({
+    required List<LearnMessage> history,
+    required String speakingLang,
+    required String nativeLang,
+  }) async {
+    final res = await http.post(
+      Uri.parse('$_baseUrl/api/learn/suggest'),
+      headers: _headers,
+      body: jsonEncode({
+        'userId': UserService.instance.userId,
+        'speaking_language': speakingLang,
+        'native_language': nativeLang,
+        'messages': history.map((m) => m.toApi()).toList(),
+      }),
+    );
+
+    if (res.statusCode != 200) {
+      throw _ServerError.fromResponse(res);
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (data['suggestion'] as String).trim();
+  }
+
   /// Ask Claude to explain [messageText] in the user's native language.
   Future<String> explain({
     required String messageText,

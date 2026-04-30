@@ -1428,6 +1428,51 @@ async function start() {
         }
     });
 
+    fastify.post('/api/learn/suggest', async (req, reply) => {
+        const { userId, speaking_language, native_language, messages } = req.body || {};
+        if (!userId || !speaking_language || !native_language || !Array.isArray(messages)) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+
+        const usage = await checkUsageLimit(userId);
+        if (!usage.ok) return reply.code(402).send({ error: usage.reason });
+
+        const speakingName = langName(speaking_language);
+
+        const sanitized = messages
+            .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+            .map((m) => ({ role: m.role, content: m.content }));
+
+        const conversationText = sanitized
+            .map((m) => (m.role === 'user' ? 'Me' : 'Friend') + ': ' + m.content)
+            .join('\n');
+
+        const system =
+            `You are helping someone who is practicing ${speakingName} but is stuck and doesn't know what to say. ` +
+            `Below is a conversation between the learner ("Me") and a friend ("Friend"). Write the learner's NEXT message — i.e. what "Me" should say next. ` +
+            `\n\nConversation so far:\n${conversationText || '(none — this is the very first message)'}\n\n` +
+            `Rules:\n` +
+            `- Output ONLY the next message in ${speakingName}. No labels like "Me:", no quotes, no preamble, no translation.\n` +
+            `- If there is a previous Friend turn, reply naturally to it. If there is no conversation yet, start with a casual greeting and one open question (e.g. a friendly hi + "what are you up to?").\n` +
+            `- Keep it short and at the learner's level — match the length and difficulty of their previous Me turns. Usually one short sentence.\n` +
+            `- Sound like a real person texting a friend. Casual, natural. Plain text only — no markdown, no emoji.`;
+
+        try {
+            const text = await callClaude({
+                system,
+                messages: [{ role: 'user', content: 'Write the next message.' }],
+                maxTokens: 200,
+            });
+
+            await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
+
+            return { suggestion: stripMarkdown(text).trim() };
+        } catch (e) {
+            fastify.log.error('learn/suggest error: ' + e.message);
+            return reply.code(502).send({ error: 'AI service unavailable' });
+        }
+    });
+
     // ==================
     // SONIOX WEBSOCKET PROXY
     // ==================
