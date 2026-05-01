@@ -1415,18 +1415,17 @@ async function start() {
             `Output format (plain text only):\n` +
             `- Line 1: the ${nativeName} word for "Translation", then ": ", then a natural ${nativeName} translation of the whole sentence. Use the actual ${nativeName} word — for example English "Translation", Korean "번역", Vietnamese "Bản dịch", Turkish "Çeviri". The Translation line has NO bullet.\n` +
             `- Line 2: a single empty blank line.\n` +
-            `- Then one BULLET line per meaningful chunk in the sentence, IN THE ORDER THEY APPEAR. Each chunk line MUST start with the literal Unicode bullet character "• " (U+2022 followed by one space) and have the form "• <chunk in ${speakingName}>: <meaning in ${nativeName}>". Break the sentence into the smallest useful units — each content word, particle, or fixed phrase a learner would benefit from seeing labeled. Keep punctuation attached to its chunk (e.g. "Chưa?").\n\n` +
+            `- Then one BULLET line per KEY chunk — content vocabulary, names, idioms, or grammatical markers that are genuinely worth learning. SKIP filler/function words (articles, common pronouns, generic auxiliaries, basic copulas) unless they carry meaning a learner would miss. Do NOT label the same word twice — if a word repeats in the sentence, or already appears inside a multi-word chunk you labeled, do not give it its own bullet. Aim for fewer, higher-value bullets, not exhaustive coverage. List chunks IN THE ORDER they first appear. Each chunk line MUST start with the literal Unicode bullet character "• " (U+2022 followed by one space) and have the form "• <chunk in ${speakingName}>: <meaning in ${nativeName}>". Keep punctuation attached to its chunk only when the punctuation carries meaning.\n\n` +
             `Worked example (Vietnamese → English) for input "Bạn đã gặp bạn của bạn chưa?":\n` +
             `Translation: Did you meet your friend?\n` +
             `\n` +
-            `• Bạn: You\n` +
             `• Đã: Past tense marker\n` +
             `• Gặp: Meet\n` +
             `• Bạn của bạn: Your friend\n` +
-            `• Chưa?: Yet? (sentence-final question particle)\n\n` +
+            `• Chưa: Yet (question particle)\n\n` +
             `Rules:\n` +
             `- All labels and explanations are in ${nativeName}, including the "Translation" line label. Only the chunks before each colon stay in ${speakingName}.\n` +
-            `- Default to JUST the translation/meaning for each chunk — nothing more. Add a brief parenthetical note ONLY when the meaning is genuinely non-obvious to a learner (e.g. an untranslatable particle, a grammatical marker with no direct equivalent, a fixed expression whose literal sense differs from its real use). Do NOT add per-word breakdowns of multi-word chunks. Do NOT add register/politeness notes unless the word's whole point is its register.\n` +
+            `- Default to JUST the meaning — no parenthetical. Add a parenthetical ONLY when the meaning is genuinely incomplete without it (e.g. an untranslatable particle, a grammatical role with no direct equivalent). Keep it to a few words at most. No register/politeness notes, no etymology, no per-word breakdowns of multi-word chunks, no usage examples.\n` +
             `- Always leave exactly one blank line between the Translation line and the first bullet. No blank lines between bullets.\n` +
             `- Use ONLY "• " (U+2022 + space) as the bullet character. Do NOT use "-", "*", "+", or numbered lists for chunk lines — those will be stripped from the output.\n` +
             `- Plain text only — no markdown, no asterisks, no headers, no leading dashes.`;
