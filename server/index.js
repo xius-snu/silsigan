@@ -1303,6 +1303,12 @@ async function start() {
             `You are a real person chatting in ${speakingName} with someone who is practicing the language. Talk like a real person texting, not like a tutor or an AI. ` +
             `Always reply in ${speakingName} only — never ${nativeName} unless the user explicitly asks for an explanation. ` +
             `\n\n` +
+            `Code-switching exception (CHECK THIS FIRST): If the user's most recent message is written entirely (or almost entirely) in ${nativeName} or any language other than ${speakingName}, it means they want to say that thought in ${speakingName} but don't know how. DO NOT continue the conversation, do NOT answer the content of their message, and do NOT add any commentary. Output exactly ONE line in this form and nothing else:\n` +
+            `<the ${nativeName} word/phrase for "Say">: "<their message translated into natural ${speakingName}>"\n` +
+            `Use the natural ${nativeName} imperative for "Say" — English "Say", Korean "이렇게 말해봐", Vietnamese "Hãy nói", Turkish "Şöyle söyle", etc. The text inside the quotes must be in ${speakingName} only. No follow-up question, no extra line, no markdown.\n` +
+            `\n` +
+            `Otherwise (the user did write in ${speakingName}), follow the rules below.\n` +
+            `\n` +
             `Keep replies SHORT. Match the user's level and length:\n` +
             `- If the user wrote one short sentence, reply with one short sentence. If they wrote a single greeting like "hello", just say hi back and ask one simple thing — e.g. "Hi, what are you doing?". Do NOT say "I'm so happy to meet you" or other AI-sounding warmth.\n` +
             `- Only get longer or use harder vocabulary if the user has clearly shown they can handle it (longer sentences, more advanced words, idioms). Even then, stay conversational — usually 1-2 sentences, rarely 3.\n` +
@@ -1407,16 +1413,28 @@ async function start() {
         const speakingName = langName(speaking_language);
         const nativeName = langName(native_language);
         const system =
-            `Explain a ${speakingName} sentence to a ${nativeName} speaker. ` +
-            `Give a one-line natural translation, then a brief note (one or two sentences) on whatever is actually non-obvious — a tricky word, an idiom, an unusual particle or grammar pattern. ` +
-            `If the sentence is straightforward, the translation alone is enough. Skip anything a ${nativeName} speaker would already infer. ` +
-            `Reply in ${nativeName} only. Plain text — no markdown, no headers, no bullets. Keep it tight.`;
+            `You are explaining a ${speakingName} sentence to a ${nativeName} speaker who is learning ${speakingName}.\n\n` +
+            `Output format (plain text only):\n` +
+            `- Line 1: the ${nativeName} word for "Translation", then ": ", then a natural ${nativeName} translation of the whole sentence. Use the actual ${nativeName} word — for example English "Translation", Korean "번역", Vietnamese "Bản dịch", Turkish "Çeviri".\n` +
+            `- Then one line per meaningful chunk in the sentence, IN THE ORDER THEY APPEAR, formatted as: "<chunk in ${speakingName}>: <meaning in ${nativeName}> [optional brief grammar note]". Break the sentence into the smallest useful units — each content word, particle, or fixed phrase a learner would benefit from seeing labeled. For multi-word chunks, you may show the per-word breakdown in parentheses, e.g. "Bạn của bạn: Your friend (Bạn = friend / của = of / bạn = you)". Keep punctuation attached to its chunk (e.g. "Chưa?").\n\n` +
+            `Worked example (Vietnamese → English) for input "Bạn đã gặp bạn của bạn chưa?":\n` +
+            `Translation: Did you meet your friend?\n` +
+            `Bạn: You (casual/peer)\n` +
+            `Đã: Past tense marker (did)\n` +
+            `Gặp: Meet\n` +
+            `Bạn của bạn: Your friend (Bạn = friend / của = of / bạn = you)\n` +
+            `Chưa?: Not yet? (Used at the end of a sentence to ask "have you done it yet?")\n\n` +
+            `Rules:\n` +
+            `- All labels and explanations are in ${nativeName}, including the "Translation" line label. Only the chunks before each colon stay in ${speakingName}.\n` +
+            `- Add a grammar note only when it actually helps a learner; otherwise just give the meaning.\n` +
+            `- Keep each line tight. No empty lines between chunks.\n` +
+            `- Plain text only — no markdown, no asterisks, no headers, no bullets, no leading dashes.`;
 
         try {
             const explanation = await callClaude({
                 system,
                 messages: [{ role: 'user', content: text }],
-                maxTokens: 400,
+                maxTokens: 600,
             });
 
             await deductSeconds(userId, LEARN_ROUNDTRIP_SECONDS);
