@@ -1356,21 +1356,19 @@ async function start() {
 
         const system =
             `You are a strict but fair language tutor evaluating a learner's most recent ${speakingName} message. ` +
-            `Look at the conversation up to and including the user's last message. The previous assistant message (if any) is the question or prompt the user was responding to. ` +
-            `\n\n` +
-            `Evaluate two things:\n` +
+            `Look at the conversation up to and including the user's last message. The previous assistant message (if any) is the question or prompt the user was responding to.\n\n` +
+            `IMPORTANT — the user's message was captured by speech-to-text, so it may contain transcription artifacts where a similar-sounding word was misregistered as a different (often unrelated) word. Before grading, infer what the user most likely INTENDED to say: if a word looks out of place but a phonetically similar word would make the sentence coherent in this conversational context, assume that's what they actually said and grade against the intended meaning. Treat near-homophones, dropped/added function words, particle confusions, and tone/diacritic mistakes as transcription noise rather than user errors — unless the entire message is genuinely incoherent. Only flag things that would still be wrong even after this charitable reconstruction.\n\n` +
+            `Evaluate two things (against the inferred intended message):\n` +
             `(a) Relevance: did the user actually answer/respond appropriately to the previous assistant message?\n` +
-            `(b) Language quality: is the user's ${speakingName} grammatically and lexically reasonable for an intermediate learner?\n` +
-            `\n` +
+            `(b) Language quality: is the user's ${speakingName} grammatically and lexically reasonable for an intermediate learner?\n\n` +
             `Output STRICT JSON in exactly this shape, with no surrounding text or markdown fences:\n` +
             `{\n` +
             `  "grade": "correct" | "incorrect" | "n/a",\n` +
             `  "explanation": "<plain text in ${nativeName}, used only when grade is incorrect; empty otherwise>"\n` +
-            `}\n` +
-            `\n` +
+            `}\n\n` +
             `Rules:\n` +
-            `- "correct" if BOTH (a) and (b) pass.\n` +
-            `- "incorrect" if either (a) or (b) fails. Be specific in the explanation: state exactly what was wrong AND what it should have been. Reply in ${nativeName}.\n` +
+            `- "correct" if BOTH (a) and (b) pass under the charitable ASR-aware reconstruction.\n` +
+            `- "incorrect" if either (a) or (b) fails for a reason that ISN'T plausibly a transcription artifact. Keep the explanation short and concrete — one short sentence (two max). Name what was wrong and the fix; skip preamble, restating the user's sentence, hedging, or politeness padding. Reply in ${nativeName}.\n` +
             `- "n/a" only when grading is genuinely impossible — e.g. there is no prior assistant message at all (this is the very first user turn), or the user's message is just a greeting / acknowledgement / unintelligible noise. Do not use n/a as a way to avoid grading.\n` +
             `- The explanation field must be plain text. No markdown, no asterisks, no headers, no bullet points.`;
 
@@ -1415,20 +1413,23 @@ async function start() {
         const system =
             `You are explaining a ${speakingName} sentence to a ${nativeName} speaker who is learning ${speakingName}.\n\n` +
             `Output format (plain text only):\n` +
-            `- Line 1: the ${nativeName} word for "Translation", then ": ", then a natural ${nativeName} translation of the whole sentence. Use the actual ${nativeName} word — for example English "Translation", Korean "번역", Vietnamese "Bản dịch", Turkish "Çeviri".\n` +
-            `- Then one line per meaningful chunk in the sentence, IN THE ORDER THEY APPEAR, formatted as: "<chunk in ${speakingName}>: <meaning in ${nativeName}> [optional brief grammar note]". Break the sentence into the smallest useful units — each content word, particle, or fixed phrase a learner would benefit from seeing labeled. For multi-word chunks, you may show the per-word breakdown in parentheses, e.g. "Bạn của bạn: Your friend (Bạn = friend / của = of / bạn = you)". Keep punctuation attached to its chunk (e.g. "Chưa?").\n\n` +
+            `- Line 1: the ${nativeName} word for "Translation", then ": ", then a natural ${nativeName} translation of the whole sentence. Use the actual ${nativeName} word — for example English "Translation", Korean "번역", Vietnamese "Bản dịch", Turkish "Çeviri". The Translation line has NO bullet.\n` +
+            `- Line 2: a single empty blank line.\n` +
+            `- Then one BULLET line per meaningful chunk in the sentence, IN THE ORDER THEY APPEAR. Each chunk line MUST start with the literal Unicode bullet character "• " (U+2022 followed by one space) and have the form "• <chunk in ${speakingName}>: <meaning in ${nativeName}>". Break the sentence into the smallest useful units — each content word, particle, or fixed phrase a learner would benefit from seeing labeled. Keep punctuation attached to its chunk (e.g. "Chưa?").\n\n` +
             `Worked example (Vietnamese → English) for input "Bạn đã gặp bạn của bạn chưa?":\n` +
             `Translation: Did you meet your friend?\n` +
-            `Bạn: You (casual/peer)\n` +
-            `Đã: Past tense marker (did)\n` +
-            `Gặp: Meet\n` +
-            `Bạn của bạn: Your friend (Bạn = friend / của = of / bạn = you)\n` +
-            `Chưa?: Not yet? (Used at the end of a sentence to ask "have you done it yet?")\n\n` +
+            `\n` +
+            `• Bạn: You\n` +
+            `• Đã: Past tense marker\n` +
+            `• Gặp: Meet\n` +
+            `• Bạn của bạn: Your friend\n` +
+            `• Chưa?: Yet? (sentence-final question particle)\n\n` +
             `Rules:\n` +
             `- All labels and explanations are in ${nativeName}, including the "Translation" line label. Only the chunks before each colon stay in ${speakingName}.\n` +
-            `- Add a grammar note only when it actually helps a learner; otherwise just give the meaning.\n` +
-            `- Keep each line tight. No empty lines between chunks.\n` +
-            `- Plain text only — no markdown, no asterisks, no headers, no bullets, no leading dashes.`;
+            `- Default to JUST the translation/meaning for each chunk — nothing more. Add a brief parenthetical note ONLY when the meaning is genuinely non-obvious to a learner (e.g. an untranslatable particle, a grammatical marker with no direct equivalent, a fixed expression whose literal sense differs from its real use). Do NOT add per-word breakdowns of multi-word chunks. Do NOT add register/politeness notes unless the word's whole point is its register.\n` +
+            `- Always leave exactly one blank line between the Translation line and the first bullet. No blank lines between bullets.\n` +
+            `- Use ONLY "• " (U+2022 + space) as the bullet character. Do NOT use "-", "*", "+", or numbered lists for chunk lines — those will be stripped from the output.\n` +
+            `- Plain text only — no markdown, no asterisks, no headers, no leading dashes.`;
 
         try {
             const explanation = await callClaude({
