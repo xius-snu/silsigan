@@ -54,11 +54,83 @@ async function verifyUser(userId, token, { checkUsage = false, checkPrivate = fa
     return await res.json();
 }
 
+// Atomically bill `seconds` against the user via the Render backend and
+// learn whether they are now over their limit. Used by the per-session
+// tick to enforce limits mid-WS without trusting the client.
+async function billSeconds(userId, token, seconds, fastifyLog) {
+    try {
+        const res = await fetch(`${RENDER_API_URL}/api/proxy-bill`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, tokenHash: hashToken(token), seconds }),
+        });
+        if (!res.ok) return { limitReached: false };
+        return await res.json();
+    } catch (e) {
+        fastifyLog.error(`Bill commit failed for ${userId}: ${e.message}`);
+        return { limitReached: false };
+    }
+}
+
+// Per-session billing state: count audio bytes forwarded to Soniox, tick
+// every 5s to commit accrued seconds to the backend, and force-close (4005)
+// once the user crosses their limit. bytes-per-second is derived from the
+// client's first-message config so a lying sample_rate just yields garbled
+// transcription rather than underbilling.
+function createBilling(socket, userId, token, fastifyLog) {
+    const TICK_MS = 5000;
+    let bytesPerSecond = 48000;
+    let bytesAccrued = 0;
+    let tickTimeout = null;
+    let closed = false;
+
+    async function commitChunk(secs) {
+        if (secs < 1) return;
+        const r = await billSeconds(userId, token, secs, fastifyLog);
+        if (r.limitReached && socket.readyState === WebSocket.OPEN) {
+            socket.close(4005, 'Usage limit reached');
+        }
+    }
+
+    async function tick() {
+        if (closed) return;
+        const toCommit = Math.floor(bytesAccrued / bytesPerSecond);
+        if (toCommit > 0) {
+            bytesAccrued -= toCommit * bytesPerSecond;
+            await commitChunk(toCommit);
+        }
+        if (!closed) tickTimeout = setTimeout(tick, TICK_MS);
+    }
+
+    return {
+        commitConfig(config) {
+            const sr = parseInt(config.sample_rate) || 24000;
+            const ch = parseInt(config.num_channels) || 1;
+            const fmt = (config.audio_format || 'pcm_s16le').toString().toLowerCase();
+            const bps = (fmt === 'pcm_s8' || fmt === 'pcm_u8') ? 1 : 2;
+            bytesPerSecond = Math.max(1, sr * bps * ch);
+        },
+        recordBytes(n) {
+            if (n > 0) bytesAccrued += n;
+        },
+        start() {
+            tickTimeout = setTimeout(tick, TICK_MS);
+        },
+        async stop() {
+            closed = true;
+            if (tickTimeout) clearTimeout(tickTimeout);
+            const finalSecs = Math.round(bytesAccrued / bytesPerSecond);
+            bytesAccrued = 0;
+            await commitChunk(finalSecs);
+        },
+    };
+}
+
 // ============================================
 // WEBSOCKET RELAY (shared logic)
 // ============================================
 
-function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []) {
+function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = [], billing = null) {
     let sonioxWs = null;
     let configReceived = false;
     const pendingMessages = [];
@@ -73,6 +145,7 @@ function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []
                 const config = JSON.parse(data.toString());
                 config.api_key = apiKey;
                 configReceived = true;
+                if (billing) billing.commitConfig(config);
 
                 sonioxWs = new WebSocket(SONIOX_WS_URL, {
                     perMessageDeflate: false,
@@ -112,8 +185,10 @@ function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []
                 return;
             }
         } else if (sonioxWs && sonioxWs.readyState === WebSocket.OPEN) {
+            if (billing && isBinary) billing.recordBytes(data.length);
             sonioxWs.send(data, { binary: isBinary });
         } else if (sonioxWs && sonioxWs.readyState === WebSocket.CONNECTING) {
+            if (billing && isBinary) billing.recordBytes(data.length);
             pendingMessages.push({ data, binary: isBinary });
         }
     }
@@ -127,7 +202,10 @@ function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []
             sonioxWs.close();
         }
         sonioxWs = null;
+        if (billing) billing.stop();
     });
+
+    if (billing) billing.start();
 
     // Replay any messages that arrived during async auth
     for (const msg of earlyMessages) {
@@ -177,8 +255,9 @@ async function start() {
         }
 
         // Verify auth + usage via Render backend
+        let auth;
         try {
-            const auth = await verifyUser(userId, token, {
+            auth = await verifyUser(userId, token, {
                 checkUsage: !wantsPrivate,
                 checkPrivate: true,
             });
@@ -199,7 +278,12 @@ async function start() {
         // Remove early buffer, hand off to relay with buffered messages
         socket.off('message', earlyHandler);
         const apiKey = wantsPrivate ? SONIOX_PRIVATE_KEY : nextSonioxKey();
-        setupSonioxRelay(socket, userId, apiKey, fastify.log, earlyMessages);
+        // Don't bill private-build clients (they use the dev's own key) or
+        // DB-private users (uncapped accounts).
+        const billing = (!wantsPrivate && !auth.isPrivate)
+            ? createBilling(socket, userId, token, fastify.log)
+            : null;
+        setupSonioxRelay(socket, userId, apiKey, fastify.log, earlyMessages, billing);
     });
 
     // ==================
@@ -228,8 +312,9 @@ async function start() {
         }
 
         // Verify auth + usage via Render backend
+        let auth;
         try {
-            const auth = await verifyUser(userId, token, { checkUsage: true });
+            auth = await verifyUser(userId, token, { checkUsage: true, checkPrivate: true });
             if (!auth.valid) {
                 socket.close(4001, 'Invalid credentials');
                 return;
@@ -247,7 +332,10 @@ async function start() {
         // Remove early buffer, hand off to relay with buffered messages
         socket.off('message', earlyHandler);
         const apiKey = nextLimitedSonioxKey();
-        setupSonioxRelay(socket, userId, apiKey, fastify.log, earlyMessages);
+        const billing = !auth.isPrivate
+            ? createBilling(socket, userId, token, fastify.log)
+            : null;
+        setupSonioxRelay(socket, userId, apiKey, fastify.log, earlyMessages, billing);
     });
 
     const port = process.env.PORT || 3000;

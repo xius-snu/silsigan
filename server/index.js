@@ -82,6 +82,7 @@ const PUBLIC_ROUTES = new Set([
     'POST:/api/user/activity',
     'POST:/api/user/usage',
     'POST:/api/proxy-auth',
+    'POST:/api/proxy-bill',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -362,15 +363,11 @@ async function start() {
                     'UPDATE users SET last_seen_at = CURRENT_TIMESTAMP, last_recorded_at = CURRENT_TIMESTAMP WHERE user_id = $1',
                     [userId]
                 );
-            } else if (event === 'recording_stop' && meta && meta.duration_seconds) {
-                const secs = Math.max(0, Math.round(meta.duration_seconds));
-                if (secs > 0) {
-                    await pool.query(
-                        'UPDATE users SET used_seconds = COALESCE(used_seconds, 0) + $2 WHERE user_id = $1',
-                        [userId, secs]
-                    );
-                }
             }
+            // Note: recording_stop intentionally does NOT bump used_seconds.
+            // Usage time is billed authoritatively by the WS proxy from
+            // forwarded audio bytes; the client cannot under-report by
+            // skipping or tampering with this call.
             return { success: true };
         } catch (e) {
             fastify.log.error('Activity update error: ' + e.message);
@@ -423,6 +420,48 @@ async function start() {
             return result;
         } catch (e) {
             fastify.log.error('Proxy auth error: ' + e.message);
+            return reply.code(500).send({ valid: false });
+        }
+    });
+
+    // Atomically increment used_seconds and report whether the user is now
+    // over their limit. Skips private users via the WHERE clause. Used by
+    // the standalone proxy on each tick of an active WS session.
+    async function billUsageSeconds(userId, seconds) {
+        const res = await pool.query(
+            `UPDATE users
+             SET used_seconds = COALESCE(used_seconds, 0) + $2
+             WHERE user_id = $1 AND COALESCE(is_private, FALSE) = FALSE
+             RETURNING COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes`,
+            [userId, seconds]
+        );
+        if (res.rows.length === 0) return { limitReached: false }; // private user
+        const row = res.rows[0];
+        return {
+            limitReached: parseInt(row.used_seconds) >= parseInt(row.limit_minutes) * 60,
+        };
+    }
+
+    fastify.post('/api/proxy-bill', async (req, reply) => {
+        const { userId, tokenHash, seconds } = req.body || {};
+        const secs = parseInt(seconds);
+        // Cap per-tick to prevent a misbehaving proxy from billing enormous
+        // chunks at once. Real ticks are ~5s; allow generous headroom.
+        if (!userId || !tokenHash || !secs || secs < 1 || secs > 600) {
+            return reply.code(400).send({ valid: false });
+        }
+        try {
+            const auth = await pool.query(
+                'SELECT auth_token_hash FROM users WHERE user_id = $1',
+                [userId]
+            );
+            if (auth.rows.length === 0 || auth.rows[0].auth_token_hash !== tokenHash) {
+                return { valid: false };
+            }
+            const r = await billUsageSeconds(userId, secs);
+            return { valid: true, limitReached: r.limitReached };
+        } catch (e) {
+            fastify.log.error('Proxy bill error: ' + e.message);
             return reply.code(500).send({ valid: false });
         }
     });
@@ -1500,6 +1539,64 @@ async function start() {
     // SONIOX WEBSOCKET PROXY
     // ==================
 
+    // Server-authoritative usage billing for Soniox WS sessions.
+    // Bytes-per-second is derived from the client's audio config so a client
+    // that lies about sample_rate just gets garbled transcription back from
+    // Soniox — there is no underbilling exploit. Tick commits accrued seconds
+    // every 5s and force-closes (4005) once the user crosses their limit.
+    function createSonioxBilling(socket, userId, fastifyLog) {
+        const TICK_MS = 5000;
+        let bytesPerSecond = 48000; // PCM16 24kHz mono default
+        let bytesAccrued = 0;
+        let tickTimeout = null;
+        let closed = false;
+
+        async function commitChunk(secs) {
+            if (secs < 1) return;
+            try {
+                const r = await billUsageSeconds(userId, secs);
+                if (r.limitReached && socket.readyState === WebSocket.OPEN) {
+                    socket.close(4005, 'Usage limit reached');
+                }
+            } catch (e) {
+                fastifyLog.error(`Bill commit failed for ${userId}: ${e.message}`);
+            }
+        }
+
+        async function tick() {
+            if (closed) return;
+            const toCommit = Math.floor(bytesAccrued / bytesPerSecond);
+            if (toCommit > 0) {
+                bytesAccrued -= toCommit * bytesPerSecond;
+                await commitChunk(toCommit);
+            }
+            if (!closed) tickTimeout = setTimeout(tick, TICK_MS);
+        }
+
+        return {
+            commitConfig(config) {
+                const sr = parseInt(config.sample_rate) || 24000;
+                const ch = parseInt(config.num_channels) || 1;
+                const fmt = (config.audio_format || 'pcm_s16le').toString().toLowerCase();
+                const bps = (fmt === 'pcm_s8' || fmt === 'pcm_u8') ? 1 : 2;
+                bytesPerSecond = Math.max(1, sr * bps * ch);
+            },
+            recordBytes(n) {
+                if (n > 0) bytesAccrued += n;
+            },
+            start() {
+                tickTimeout = setTimeout(tick, TICK_MS);
+            },
+            async stop() {
+                closed = true;
+                if (tickTimeout) clearTimeout(tickTimeout);
+                const finalSecs = Math.round(bytesAccrued / bytesPerSecond);
+                bytesAccrued = 0;
+                await commitChunk(finalSecs);
+            },
+        };
+    }
+
     fastify.get('/ws/soniox', { websocket: true }, async (socket, req) => {
         const { userId, token } = req.query;
         const wantsPrivate = req.query.private === '1';
@@ -1558,6 +1655,9 @@ async function start() {
         let configReceived = false;
         const pendingMessages = [];
         let clientClosed = false;
+        const billing = (!wantsPrivate && !dbIsPrivate)
+            ? createSonioxBilling(socket, userId, fastify.log)
+            : null;
 
         socket.on('message', (data, isBinary) => {
             if (clientClosed) return;
@@ -1568,6 +1668,7 @@ async function start() {
                     const config = JSON.parse(data.toString());
                     config.api_key = apiKey;
                     configReceived = true;
+                    if (billing) billing.commitConfig(config);
 
                     sonioxWs = new WebSocket(SONIOX_WS_URL, {
                         perMessageDeflate: false,
@@ -1609,13 +1710,17 @@ async function start() {
                 }
             } else if (sonioxWs && sonioxWs.readyState === WebSocket.OPEN) {
                 // Forward audio or finalize to Soniox
+                if (billing && isBinary) billing.recordBytes(data.length);
                 sonioxWs.send(data, { binary: isBinary });
             } else if (sonioxWs && sonioxWs.readyState === WebSocket.CONNECTING) {
                 // Buffer while Soniox connection is opening
+                if (billing && isBinary) billing.recordBytes(data.length);
                 pendingMessages.push({ data, binary: isBinary });
             }
             // If Soniox is closing/closed, drop the message silently
         });
+
+        if (billing) billing.start();
 
         socket.on('close', () => {
             clientClosed = true;
@@ -1623,6 +1728,7 @@ async function start() {
                 sonioxWs.close();
             }
             sonioxWs = null;
+            if (billing) billing.stop();
         });
     });
 
@@ -1689,6 +1795,7 @@ async function start() {
         let configReceived = false;
         const pendingMessages = [];
         let clientClosed = false;
+        const billing = createSonioxBilling(socket, userId, fastify.log);
 
         socket.on('message', (data, isBinary) => {
             if (clientClosed) return;
@@ -1698,6 +1805,7 @@ async function start() {
                     const config = JSON.parse(data.toString());
                     config.api_key = apiKey;
                     configReceived = true;
+                    billing.commitConfig(config);
 
                     sonioxWs = new WebSocket(SONIOX_WS_URL, {
                         perMessageDeflate: false,
@@ -1737,17 +1845,22 @@ async function start() {
                     return;
                 }
             } else if (sonioxWs && sonioxWs.readyState === WebSocket.OPEN) {
+                if (isBinary) billing.recordBytes(data.length);
                 sonioxWs.send(data, { binary: isBinary });
             } else if (sonioxWs && sonioxWs.readyState === WebSocket.CONNECTING) {
+                if (isBinary) billing.recordBytes(data.length);
                 pendingMessages.push({ data, binary: isBinary });
             }
         });
+
+        billing.start();
 
         socket.on('close', () => {
             clientClosed = true;
             if (sonioxWs && sonioxWs.readyState !== WebSocket.CLOSED) {
                 sonioxWs.close();
             }
+            billing.stop();
             sonioxWs = null;
         });
     });
