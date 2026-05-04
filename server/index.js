@@ -551,41 +551,44 @@ async function start() {
             return reply.code(400).send({ error: 'Unknown product' });
         }
 
-        // Verify purchase with RevenueCat if API key is set.
-        // RevenueCat may take a moment to process — retry up to 3 times.
-        if (REVENUECAT_API_KEY) {
-            let verified = false;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    const rcRes = await fetch(
-                        `https://api.revenuecat.com/v1/subscribers/${userId}`,
-                        { headers: { Authorization: `Bearer ${REVENUECAT_API_KEY}` } }
-                    );
-                    if (!rcRes.ok) {
-                        fastify.log.error(`RevenueCat verify failed (attempt ${attempt}): ${rcRes.status}`);
-                    } else {
-                        const rcData = await rcRes.json();
-                        const purchases = rcData.subscriber?.non_subscriptions?.[productId] || [];
-                        const found = transactionId
-                            ? purchases.some(p => p.store_transaction_id === transactionId || p.id === transactionId)
-                            : purchases.length > 0;
-                        if (found) {
-                            verified = true;
-                            break;
-                        }
-                        fastify.log.warn(`RevenueCat: transaction not found yet (attempt ${attempt})`);
+        // Verify purchase with RevenueCat. Fail closed: if the API key is
+        // missing or verification fails for any reason, refuse to credit.
+        // No purchase, no minutes — even if RC is unreachable.
+        if (!REVENUECAT_API_KEY) {
+            fastify.log.error('REVENUECAT_API_KEY not configured — refusing purchase');
+            return reply.code(503).send({ error: 'Purchase verification unavailable' });
+        }
+        let verified = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const rcRes = await fetch(
+                    `https://api.revenuecat.com/v1/subscribers/${userId}`,
+                    { headers: { Authorization: `Bearer ${REVENUECAT_API_KEY}` } }
+                );
+                if (!rcRes.ok) {
+                    fastify.log.error(`RevenueCat verify failed (attempt ${attempt}): ${rcRes.status}`);
+                } else {
+                    const rcData = await rcRes.json();
+                    const purchases = rcData.subscriber?.non_subscriptions?.[productId] || [];
+                    const found = transactionId
+                        ? purchases.some(p => p.store_transaction_id === transactionId || p.id === transactionId)
+                        : purchases.length > 0;
+                    if (found) {
+                        verified = true;
+                        break;
                     }
-                } catch (e) {
-                    fastify.log.error(`RevenueCat verification error (attempt ${attempt}): ${e.message}`);
+                    fastify.log.warn(`RevenueCat: transaction not found yet (attempt ${attempt})`);
                 }
-                // Wait before retrying (2s, 5s)
-                if (attempt < 2) {
-                    await new Promise(r => setTimeout(r, attempt === 0 ? 2000 : 5000));
-                }
+            } catch (e) {
+                fastify.log.error(`RevenueCat verification error (attempt ${attempt}): ${e.message}`);
             }
-            if (!verified) {
-                return reply.code(403).send({ error: 'Purchase verification failed' });
+            // Wait before retrying (2s, 5s)
+            if (attempt < 2) {
+                await new Promise(r => setTimeout(r, attempt === 0 ? 2000 : 5000));
             }
+        }
+        if (!verified) {
+            return reply.code(403).send({ error: 'Purchase verification failed' });
         }
 
         const client = await pool.connect();
