@@ -74,6 +74,7 @@ class SonioxRealtimeService {
   Function(String error)? onError;
   Function()? onConnected;
   Function(String language)? onLanguageDetected;
+  Function()? onUsageLimitReached;
 
   bool _forceTranslation = false;
   String? _languageHint;
@@ -191,9 +192,21 @@ class SonioxRealtimeService {
   void _handleDisconnect(String reason) {
     if (_intentionallyClosed) return;
 
+    // Proxy signals usage limit with WS close code 4005. Capture before
+    // nulling _channel so we don't race with reconnect logic.
+    final closeCode = _channel?.closeCode;
+
     _subscription?.cancel();
     _subscription = null;
     _channel = null;
+
+    if (closeCode == 4005) {
+      _intentionallyClosed = true;
+      _stopRotationTimer();
+      _clearAudioBuffer();
+      onUsageLimitReached?.call();
+      return;
+    }
 
     if (!_isRotating) {
       _tryReconnect();

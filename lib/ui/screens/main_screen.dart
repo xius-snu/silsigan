@@ -101,10 +101,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // restart audio after a real suspension — not after Control Center, etc.
   bool _wasPaused = false;
 
-  // Usage limit tracking
+  // Usage limit tracking — server-authoritative. The proxy bills audio bytes
+  // and force-closes the WS with 4005 when the user crosses their limit;
+  // the client trusts that signal rather than running its own timer.
   int _usedSeconds = 0;
   int _limitMinutes = 30;
-  Timer? _usageLimitTimer;
   static const _isPrivateMode =
       String.fromEnvironment('SONIOX_PRIVATE') == 'true';
   bool _isPrivateUser = false;
@@ -121,6 +122,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
           SnackBar(content: Text(error), duration: const Duration(seconds: 3)),
         );
       }
+    };
+    // Server-authoritative limit: the proxy closes the WS with 4005 when the
+    // user crosses their billed limit. Stop the recording and surface it.
+    _sonioxService.onUsageLimitReached = () {
+      _forceStopForUsageLimit();
     };
     // Restore saved languages and autosaved draft
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -142,7 +148,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _autosaveTimer?.cancel();
     _incomingPollTimer?.cancel();
     _outgoingPollTimer?.cancel();
-    _usageLimitTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     _ttsService.dispose();
@@ -354,20 +359,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   bool get _usageLimitReached => !_isPrivate && _remainingSeconds <= 0;
-
-  void _startUsageLimitTimer() {
-    _usageLimitTimer?.cancel();
-    if (_isPrivate) return;
-    final remainingSecs = _limitMinutes * 60 - _usedSeconds;
-    if (remainingSecs <= 0) {
-      _forceStopForUsageLimit();
-      return;
-    }
-    // One-shot timer that fires exactly when the limit is reached
-    _usageLimitTimer = Timer(Duration(seconds: remainingSecs), () {
-      _forceStopForUsageLimit();
-    });
-  }
 
   Future<void> _forceStopForUsageLimit() async {
     final recordingState = ref.read(recordingStateProvider);
@@ -1164,7 +1155,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _autosaveTimer =
           Timer.periodic(const Duration(seconds: 15), (_) => _autosave());
       _recordingStartedAt = DateTime.now();
-      _startUsageLimitTimer();
       UserService.instance.reportActivity('recording_start', {
         'mode': ref.read(displayModeProvider).name,
       });
@@ -1192,7 +1182,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sentenceBreakTimer = null;
     _ttsDraftTimer?.cancel();
     _ttsFiredForSegment = false;
-    _usageLimitTimer?.cancel();
 
     // Stop audio capture (timeout in case recorder is stuck after background)
     try {
@@ -1750,7 +1739,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       );
       await _audioService.start();
       _recordingStartedAt = DateTime.now();
-      _startUsageLimitTimer();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
       UserService.instance.reportActivity('recording_start', {
@@ -1772,7 +1760,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _isStopping = true;
 
     ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
-    _usageLimitTimer?.cancel();
 
     try {
       await _audioService.stop().timeout(const Duration(seconds: 5));
