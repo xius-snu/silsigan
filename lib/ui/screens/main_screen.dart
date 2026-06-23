@@ -598,6 +598,85 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  /// Run a RevenueCat purchase behind a blocking "Processing…" overlay. The
+  /// StoreKit sheet has its own UI, but after the user confirms there's a
+  /// server-credit + usage-refresh window where the bottom sheet is already
+  /// gone and the minutes aren't credited yet — without this the user would
+  /// stare at the home screen with no feedback. The overlay is always torn
+  /// down in the finally, including on cancel/error.
+  Future<void> _purchaseRcPackage(
+    BuildContext sheetCtx,
+    Package rcPkg,
+    String label,
+  ) async {
+    Navigator.pop(sheetCtx); // close the purchase sheet
+
+    BuildContext? overlayCtx;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.35),
+      builder: (dCtx) {
+        overlayCtx = dCtx;
+        return const Center(
+          child: Card(
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(14)),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3,
+                      color: Color(0xFF111111),
+                    ),
+                  ),
+                  SizedBox(height: 16),
+                  Text(
+                    'Processing…',
+                    style: TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    int? minutes;
+    try {
+      minutes = await PurchaseService.instance.purchase(rcPkg);
+      if (minutes != null && mounted) {
+        // Refresh usage from server
+        final usage = await UserService.instance.fetchUsage();
+        if (usage != null) {
+          setState(() {
+            _usedSeconds = usage['usedSeconds'] as int;
+            _limitMinutes = usage['limitMinutes'] as int;
+          });
+        }
+      }
+    } finally {
+      // Always tear down the overlay — confirm, cancel, or error.
+      if (overlayCtx != null && overlayCtx!.mounted) {
+        Navigator.of(overlayCtx!).pop();
+      }
+    }
+
+    if (minutes != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$label added!')),
+      );
+    }
+  }
+
   static const _androidMockPackages = [
     {'label': '1 Hour', 'price': '26,000₫', 'per': '26,000₫/hr', 'hours': 1},
     {'label': '5 Hours', 'price': '79,000₫', 'per': '15,800₫/hr', 'hours': 5, 'discount': '39% OFF'},
@@ -690,23 +769,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: GestureDetector(
-        onTap: () async {
-          Navigator.pop(ctx);
-          final minutes = await PurchaseService.instance.purchase(rcPkg);
-          if (minutes != null && mounted) {
-            // Refresh usage from server
-            final usage = await UserService.instance.fetchUsage();
-            if (usage != null) {
-              setState(() {
-                _usedSeconds = usage['usedSeconds'] as int;
-                _limitMinutes = usage['limitMinutes'] as int;
-              });
-            }
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('$label added!')),
-            );
-          }
-        },
+        onTap: () => _purchaseRcPackage(ctx, rcPkg, label),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
