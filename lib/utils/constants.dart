@@ -8,7 +8,7 @@ class AppConstants {
   static const sonioxProxyUrl = 'wss://proxy.silsigan.xyz/ws/soniox';
   static const sonioxLimitedProxyUrl =
       'wss://proxy.silsigan.xyz/ws/soniox-limited';
-  static const sonioxModel = 'stt-rt-v4';
+  static const sonioxModel = 'stt-rt-v5';
   static const transcriptionLanguage = 'ko';
 
   // Audio
@@ -17,6 +17,13 @@ class AppConstants {
   static const chunkIntervalMs = 100;
   static const audioFormat = 'pcm_s16le';
   static const endpointDelayMs = 2000;
+  // Soniox v5 endpoint tuning (v5-only; ignored by older models). Kept at
+  // neutral defaults so they live in one place for post-launch tuning.
+  //   endpointSensitivity:            -1.0..1.0  (higher = endpoints fire sooner)
+  //   endpointLatencyAdjustmentLevel:  0..3      (higher = wait for more accurate
+  //                                               final tokens at the endpoint)
+  static const endpointSensitivity = 0.0;
+  static const endpointLatencyAdjustmentLevel = 0;
   static const newLinePauseMs = 2000;
   static const maxParagraphSentences = 4;
 
@@ -34,6 +41,8 @@ class AppConstants {
   static const double titleFontSize = 24.0;
   static const double labelFontSize = 14.0;
   static const double contentFontSize = 15.0;
+  // Quick Mode uses larger text for at-a-glance reading.
+  static const double quickFontSize = 30.0;
   static const double langFontSize = 17.0;
   static const double panelBorderRadius = 10.0;
   static const double panelPaddingH = 26.0;

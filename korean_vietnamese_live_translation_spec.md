@@ -30,7 +30,7 @@ No file uploads. No batch processing. Everything is live, streaming, real-time.
 | Layer | Technology | Reason |
 |---|---|---|
 | Framework | Flutter (Dart) | Single codebase iOS+Android |
-| ASR + Translation | Soniox (`stt-rt-v4`) via WebSocket | Streaming transcription + built-in one-way translation |
+| ASR + Translation | Soniox (`stt-rt-v5`) via WebSocket | Streaming transcription + built-in one-way translation |
 | Audio Capture | flutter_sound | Raw PCM16 mic access + WAV file creation |
 | State Management | Riverpod | Reactive streams for live text updates |
 | WebSocket | web_socket_channel | Soniox WebSocket connection |
@@ -101,7 +101,7 @@ wss://stt-rt.soniox.com/transcribe-websocket
 ```json
 {
   "api_key": "<soniox_api_key>",
-  "model": "stt-rt-v4",
+  "model": "stt-rt-v5",
   "language_hints": ["ko"],
   "audio_format": "pcm_s16le",
   "sample_rate": 24000,
@@ -378,7 +378,7 @@ lib/
 class AppConstants {
   // Soniox
   static const sonioxRealtimeUrl = 'wss://stt-rt.soniox.com/transcribe-websocket';
-  static const sonioxModel = 'stt-rt-v4';
+  static const sonioxModel = 'stt-rt-v5';
   static const transcriptionLanguage = 'ko';
 
   // Audio

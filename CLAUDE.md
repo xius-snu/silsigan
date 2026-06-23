@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Four display modes (line-by-line, split, conversation, transcription) and eight target languages.
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick) and eight target languages.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -70,12 +70,13 @@ lib/
 │   └── word_timestamp.dart                # Per-word ms offsets for audio scrubbing
 ├── providers/
 │   ├── recording_provider.dart            # idle/recording/processing/postRecording
-│   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription
+│   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription/quick
 │   ├── target_language_provider.dart      # 8 languages (see below)
 │   ├── detected_language_provider.dart    # Soniox-detected source language
 │   ├── transcript_provider.dart           # koreanDraft + koreanHistory (legacy naming)
 │   ├── translation_provider.dart          # vietnameseDraft + vietnameseHistory (legacy naming)
 │   ├── conversation_provider.dart         # Conversation mode: myLanguage/theirLanguage/messages
+│   ├── quick_provider.dart                # Quick mode: quickTranscript + quickTranslation (strings)
 │   ├── tts_provider.dart                  # ttsEnabled, ttsRate (0.5–1.5×)
 │   └── session_history_provider.dart      # FutureProvider over SQLite
 ├── services/
@@ -97,6 +98,7 @@ lib/
 │       ├── transcript_panel.dart          # Split-mode scrollable panel with copy button
 │       ├── line_by_line_panel.dart        # Aligned per-utterance pairs with audio scrubbing
 │       ├── conversation_panel.dart        # Chat-bubble UI with two-sided mic
+│       ├── quick_panel.dart               # Quick mode: big-text top/bottom + press-and-hold mic
 │       ├── record_button.dart             # Animated mic/stop with haptics
 │       ├── save_discard_row.dart          # idle/postRecording side buttons
 │       ├── history_sheet.dart             # Bottom sheet: list + inline detail + audio player
@@ -126,6 +128,7 @@ server/
 2. **`split`** — two scrollable panels (transcript/translation); paragraph breaks on 2s pause or 4 sentences; late translations re-attach to their paragraph.
 3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`); tap either side to record as that speaker.
 4. **`transcription`** — transcript only, no translation (skips Soniox `translation` config).
+5. **`quick`** — press-and-hold "walkie-talkie" translator (`QuickPanel`, self-contained). Big text, transcription top / translation bottom, no save/history. Hold the mic to record; the first transcribed word clears the previous result; release stops audio input, lets the trailing translation settle (~700ms), then speaks the full translation via TTS (always on, independent of the global toggle). State lives in `quick_provider.dart` (`quickTranscript` / `quickTranslation` — single growing strings, not history lists).
 
 ---
 

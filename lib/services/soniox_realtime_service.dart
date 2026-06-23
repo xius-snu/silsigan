@@ -123,6 +123,10 @@ class SonioxRealtimeService {
         'num_channels': AppConstants.numChannels,
         'enable_endpoint_detection': true,
         'max_endpoint_delay_ms': AppConstants.endpointDelayMs,
+        // v5 semantic-endpointing tuning (ignored by pre-v5 models).
+        'endpoint_sensitivity': AppConstants.endpointSensitivity,
+        'endpoint_latency_adjustment_level':
+            AppConstants.endpointLatencyAdjustmentLevel,
         'enable_language_identification': true,
       };
 
@@ -383,7 +387,8 @@ class SonioxRealtimeService {
     // translation, producing a visually "stuck together" draft.
     if (_pendingUtterance.isEmpty &&
         _provisionalText.isEmpty &&
-        (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty)) {
+        (_pendingTranslation.isNotEmpty ||
+            _provisionalTranslation.isNotEmpty)) {
       _flushLateTranslation();
     }
 

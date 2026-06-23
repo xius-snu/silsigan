@@ -27,7 +27,9 @@ import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
 import '../widgets/conversation_panel.dart';
+import '../widgets/quick_panel.dart';
 import '../../providers/conversation_provider.dart';
+import '../../providers/quick_provider.dart';
 import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
 import '../../services/user_service.dart';
@@ -83,6 +85,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Guard against multiple stop taps
   bool _isStopping = false;
+
+  // ── Quick Mode (press-and-hold) state ──────────────────────────────
+  // Confirmed (endpoint-completed) text accumulated during the current hold.
+  String _quickTranscriptConfirmed = '';
+  String _quickTranslationConfirmed = '';
+  // When true, the next transcribed word clears the previous hold's display.
+  bool _quickResetPending = false;
+  // True between mic press and release.
+  bool _quickHolding = false;
+  // True while the async start handler is still connecting.
+  bool _quickStarting = false;
 
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
@@ -363,6 +376,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final displayMode = ref.read(displayModeProvider);
       if (displayMode == DisplayMode.conversation) {
         await _stopConversationRecording();
+      } else if (displayMode == DisplayMode.quick) {
+        await _stopQuickRecording();
       } else {
         await _stopRecording();
       }
@@ -472,7 +487,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
                 // Package cards — RevenueCat on iOS, mock on Android
                 if (Platform.isAndroid)
-                  ..._androidMockPackages.map((pkg) => _buildMockPackageCard(ctx, pkg))
+                  ..._androidMockPackages
+                      .map((pkg) => _buildMockPackageCard(ctx, pkg))
                 else if (rcPackages.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
@@ -555,7 +571,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   children: [
                     GestureDetector(
                       onTap: () => launchUrl(
-                        Uri.parse('https://xius-snu.github.io/silsigan/privacy'),
+                        Uri.parse(
+                            'https://xius-snu.github.io/silsigan/privacy'),
                         mode: LaunchMode.externalApplication,
                       ),
                       child: Text(
@@ -576,7 +593,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     ),
                     GestureDetector(
                       onTap: () => launchUrl(
-                        Uri.parse('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/'),
+                        Uri.parse(
+                            'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/'),
                         mode: LaunchMode.externalApplication,
                       ),
                       child: Text(
@@ -679,10 +697,37 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   static const _androidMockPackages = [
     {'label': '1 Hour', 'price': '26,000₫', 'per': '26,000₫/hr', 'hours': 1},
-    {'label': '5 Hours', 'price': '79,000₫', 'per': '15,800₫/hr', 'hours': 5, 'discount': '39% OFF'},
-    {'label': '10 Hours', 'price': '159,000₫', 'per': '15,900₫/hr', 'hours': 10, 'discount': '39% OFF', 'badge': 'POPULAR'},
-    {'label': '30 Hours', 'price': '399,000₫', 'per': '13,300₫/hr', 'hours': 30, 'discount': '49% OFF', 'badge': 'SAVE 49%'},
-    {'label': '50 Hours', 'price': '659,000₫', 'per': '13,180₫/hr', 'hours': 50, 'discount': '49% OFF', 'badge': 'BEST VALUE'},
+    {
+      'label': '5 Hours',
+      'price': '79,000₫',
+      'per': '15,800₫/hr',
+      'hours': 5,
+      'discount': '39% OFF'
+    },
+    {
+      'label': '10 Hours',
+      'price': '159,000₫',
+      'per': '15,900₫/hr',
+      'hours': 10,
+      'discount': '39% OFF',
+      'badge': 'POPULAR'
+    },
+    {
+      'label': '30 Hours',
+      'price': '399,000₫',
+      'per': '13,300₫/hr',
+      'hours': 30,
+      'discount': '49% OFF',
+      'badge': 'SAVE 49%'
+    },
+    {
+      'label': '50 Hours',
+      'price': '659,000₫',
+      'per': '13,180₫/hr',
+      'hours': 50,
+      'discount': '49% OFF',
+      'badge': 'BEST VALUE'
+    },
   ];
 
   Widget _buildMockPackageCard(BuildContext ctx, Map<String, Object> pkg) {
@@ -699,7 +744,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       child: GestureDetector(
         onTap: () {
           ScaffoldMessenger.of(ctx).showSnackBar(
-            const SnackBar(content: Text('Purchases are not available on Android yet')),
+            const SnackBar(
+                content: Text('Purchases are not available on Android yet')),
           );
         },
         child: Container(
@@ -720,31 +766,46 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   children: [
                     Row(
                       children: [
-                        Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                        Text(label,
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w600)),
                         if (hasBadge) ...[
                           const SizedBox(width: 8),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
                               color: const Color(0xFF2C2C2E),
                               borderRadius: BorderRadius.circular(4),
                             ),
-                            child: Text(badge, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
+                            child: Text(badge,
+                                style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white)),
                           ),
                         ],
                       ],
                     ),
                     const SizedBox(height: 2),
-                    Text(perHour, style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                    Text(perHour,
+                        style:
+                            TextStyle(fontSize: 12, color: Colors.grey[500])),
                   ],
                 ),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text(price, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  Text(price,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w700)),
                   if (hasDiscount)
-                    Text(discount, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF4CAF50))),
+                    Text(discount,
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF4CAF50))),
                 ],
               ),
             ],
@@ -755,7 +816,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   Widget _buildRcPackageCard(BuildContext ctx, Package rcPkg) {
-    final meta = _packageMeta[rcPkg.identifier] ?? {'label': rcPkg.identifier, 'hours': 0};
+    final meta = _packageMeta[rcPkg.identifier] ??
+        {'label': rcPkg.identifier, 'hours': 0};
     final label = meta['label'] as String;
     final hours = meta['hours'] as int;
     final badge = meta['badge'] as String?;
@@ -764,7 +826,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final hasDiscount = discount != null;
     final price = rcPkg.storeProduct.priceString;
     final priceNum = rcPkg.storeProduct.price;
-    final perHour = hours > 0 ? '${rcPkg.storeProduct.currencyCode} ${(priceNum / hours).toStringAsFixed(2)}/hr' : '';
+    final perHour = hours > 0
+        ? '${rcPkg.storeProduct.currencyCode} ${(priceNum / hours).toStringAsFixed(2)}/hr'
+        : '';
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -776,9 +840,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
             color: hasBadge ? const Color(0xFFF8F8FF) : Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: hasBadge
-                  ? const Color(0xFF4A4A4A)
-                  : Colors.grey.shade300,
+              color: hasBadge ? const Color(0xFF4A4A4A) : Colors.grey.shade300,
               width: hasBadge ? 1.5 : 1,
             ),
           ),
@@ -1032,8 +1094,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           // silence timer) so late-arriving translations land on the
           // correct line before the break fires.
           final lastLine = ref.read(koreanHistoryProvider).lastOrNull ?? '';
-          if (_countSentences(lastLine) >=
-                  AppConstants.maxParagraphSentences &&
+          if (_countSentences(lastLine) >= AppConstants.maxParagraphSentences &&
               _sentenceBreakTimer == null) {
             _newLineTimer?.cancel();
             _sentenceBreakTimer = Timer(
@@ -1160,8 +1221,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 : '${updated[i]} $translation';
           } else if (updated.last.isEmpty) {
             // Single paragraph break — insert translation before it
-            updated.insert(
-                updated.length - 1, _cleanLineStart(translation));
+            updated.insert(updated.length - 1, _cleanLineStart(translation));
           } else {
             // No paragraph break — append to last line
             updated.last = '${updated.last} $translation';
@@ -1864,6 +1924,224 @@ class _MainScreenState extends ConsumerState<MainScreen>
     saveConversationLanguages(theirLang, myLang);
   }
 
+  // ── Quick Mode Recording (press-and-hold) ───────────────────────────
+
+  String _quickJoin(String a, String b) {
+    if (a.isEmpty) return b;
+    if (b.isEmpty) return a;
+    return '$a $b';
+  }
+
+  /// Clear the previous hold's display on the first word of a new hold, so the
+  /// old translation stays visible until fresh text actually arrives.
+  void _maybeQuickReset(String text) {
+    if (!_quickResetPending || text.trim().isEmpty) return;
+    _quickResetPending = false;
+    _quickTranscriptConfirmed = '';
+    _quickTranslationConfirmed = '';
+    ref.read(quickTranscriptProvider.notifier).state = '';
+    ref.read(quickTranslationProvider.notifier).state = '';
+  }
+
+  void _setupQuickCallbacks() {
+    _sonioxService.onLanguageDetected = (language) {
+      ref.read(detectedLanguageProvider.notifier).state = language;
+    };
+
+    _sonioxService.onTranscriptionDraft = (draft) {
+      _maybeQuickReset(draft);
+      ref.read(quickTranscriptProvider.notifier).state =
+          _quickJoin(_quickTranscriptConfirmed, draft);
+    };
+
+    _sonioxService.onTranscriptionCompleted = (transcript) {
+      _maybeQuickReset(transcript);
+      final clean = _cleanLineStart(transcript.trim());
+      if (clean.isNotEmpty) {
+        _quickTranscriptConfirmed =
+            _quickJoin(_quickTranscriptConfirmed, clean);
+      }
+      ref.read(quickTranscriptProvider.notifier).state =
+          _quickTranscriptConfirmed;
+    };
+
+    _sonioxService.onTranslationDraft = (draft) {
+      ref.read(quickTranslationProvider.notifier).state =
+          _quickJoin(_quickTranslationConfirmed, draft);
+    };
+
+    _sonioxService.onTranslationCompleted = (translation) {
+      final clean = _cleanLineStart(translation.trim());
+      if (clean.isNotEmpty) {
+        _quickTranslationConfirmed =
+            _quickJoin(_quickTranslationConfirmed, clean);
+      }
+      ref.read(quickTranslationProvider.notifier).state =
+          _quickTranslationConfirmed;
+    };
+
+    _sonioxService.onError = (error) {
+      if (!mounted) return;
+      final now = DateTime.now();
+      if (_lastErrorShown != null &&
+          now.difference(_lastErrorShown!).inSeconds < 10) {
+        return;
+      }
+      _lastErrorShown = now;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Transcription error: $error')),
+      );
+    };
+  }
+
+  Future<void> _startQuickRecording() async {
+    if (_quickStarting) return;
+    final st = ref.read(recordingStateProvider);
+    if (st == RecordingState.recording || st == RecordingState.processing) {
+      return;
+    }
+
+    // Server-authoritative usage limit (shows paywall if exhausted).
+    if (_usageLimitReached) {
+      _forceStopForUsageLimit();
+      return;
+    }
+
+    _quickHolding = true;
+    _quickStarting = true;
+
+    final needsPermission = Platform.isAndroid || Platform.isIOS;
+    final status = needsPermission
+        ? await Permission.microphone.request()
+        : PermissionStatus.granted;
+    if (!status.isGranted) {
+      _quickHolding = false;
+      _quickStarting = false;
+      return;
+    }
+
+    // Cut off any translation still being spoken from the previous hold.
+    _ttsService.flush();
+
+    // Keep the previous text on screen until the first new word arrives.
+    _quickResetPending = true;
+    ref.read(detectedLanguageProvider.notifier).state = null;
+    _setupQuickCallbacks();
+    _audioService.onAudioChunk = (bytes) => _sonioxService.sendAudio(bytes);
+
+    final targetLanguage = ref.read(targetLanguageProvider);
+
+    try {
+      await BackgroundService.startRecordingService();
+      await UserService.instance.ensureAuthenticated();
+      _sonioxService.userId = UserService.instance.userId;
+      _sonioxService.authToken = UserService.instance.authToken;
+      _sonioxService.isPrivateUser = _isPrivateUser;
+      await _sonioxService.connect(
+        targetLanguageCode: targetLanguage.code,
+        forceTranslation: targetLanguage == TargetLanguage.korean,
+        languageHint: targetLanguage == TargetLanguage.korean ? '' : null,
+      );
+      await _audioService.start();
+      _recordingStartedAt = DateTime.now();
+      ref.read(recordingStateProvider.notifier).state =
+          RecordingState.recording;
+      UserService.instance.reportActivity('recording_start', {'mode': 'quick'});
+    } catch (e) {
+      await BackgroundService.stopRecordingService();
+      _quickStarting = false;
+      _quickHolding = false;
+      if (mounted) {
+        ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start: $e')),
+        );
+      }
+      return;
+    }
+
+    _quickStarting = false;
+
+    // The user may have released before the connection finished — stop now.
+    if (!_quickHolding) {
+      await _stopQuickRecording();
+    }
+  }
+
+  Future<void> _stopQuickRecording() async {
+    _quickHolding = false;
+
+    // Start handler is still connecting; it will call us once it finishes.
+    if (_quickStarting) return;
+    // Nothing to stop unless we're actually recording.
+    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
+    if (_isStopping) return;
+    _isStopping = true;
+
+    ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
+
+    // Stop audio input immediately — no more speech is captured.
+    try {
+      await _audioService.stop().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    // Finalize, give the trailing translation tokens a moment to land, then
+    // disconnect (which flushes anything still pending into the providers).
+    try {
+      _sonioxService.finalize();
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 700));
+    try {
+      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    try {
+      await BackgroundService.stopRecordingService()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
+
+    _audioService.clearRecording();
+    _isStopping = false;
+
+    // Usage reporting (Quick Mode is metered like the other modes).
+    if (_recordingStartedAt != null) {
+      final durationSecs =
+          DateTime.now().difference(_recordingStartedAt!).inSeconds;
+      UserService.instance.reportActivity('recording_stop', {
+        'duration_seconds': durationSecs,
+        'mode': 'quick',
+      });
+      _usedSeconds += durationSecs;
+      _recordingStartedAt = null;
+      _fetchUsage();
+    }
+
+    // Speak the full translation aloud, unless the user muted Quick Mode's
+    // speaker toggle.
+    final translation = ref.read(quickTranslationProvider).trim();
+    if (ref.read(quickTtsEnabledProvider) &&
+        translation.isNotEmpty &&
+        TtsService.supportsLanguage(ref.read(targetLanguageProvider).code)) {
+      _ttsService.speak(translation);
+    }
+
+    if (mounted) {
+      ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
+    }
+  }
+
+  /// Clear Quick Mode's transcription + translation immediately (no confirm)
+  /// and stop any speech still playing.
+  void _clearQuick() {
+    _quickTranscriptConfirmed = '';
+    _quickTranslationConfirmed = '';
+    _quickResetPending = false;
+    ref.read(quickTranscriptProvider.notifier).state = '';
+    ref.read(quickTranslationProvider.notifier).state = '';
+    ref.read(detectedLanguageProvider.notifier).state = null;
+    _ttsService.flush();
+  }
+
   void _resetState() {
     _autosaveTimer?.cancel();
     _sessionCreatedAt = null;
@@ -1899,13 +2177,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Sync TTS service state with provider
     _ttsService.setLanguageCode(targetLanguage.code);
-    _ttsService.setEnabled(ttsEnabled);
+    // Quick Mode has its own speaker toggle (default on); the other modes use
+    // the global toggle. Driving setEnabled from the active mode's provider on
+    // every build also keeps rebuilds from cutting off in-progress playback.
+    final quickTtsEnabled = ref.watch(quickTtsEnabledProvider);
+    _ttsService.setEnabled(
+        displayMode == DisplayMode.quick ? quickTtsEnabled : ttsEnabled);
     _ttsService.setRate(ref.watch(ttsRateProvider));
 
     // Show speaker toggle for languages with TTS support + valid API key
-    final showTtsToggle =
-        TtsService.supportsLanguage(targetLanguage.code) &&
-            TtsService.hasApiKey;
+    final showTtsToggle = TtsService.supportsLanguage(targetLanguage.code) &&
+        TtsService.hasApiKey;
 
     final isRecordingOrProcessing =
         recordingState == RecordingState.recording ||
@@ -1977,8 +2259,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               .clamp(0, 100)
                               .round()
                           : 0;
-                      String fmtHrMin(int m) =>
-                          '${m ~/ 60}h ${m % 60}m';
+                      String fmtHrMin(int m) => '${m ~/ 60}h ${m % 60}m';
                       return [
                         PopupMenuItem<DisplayMode>(
                           value: DisplayMode.lineByLine,
@@ -2016,6 +2297,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             children: [
                               const Expanded(child: Text('Conversation')),
                               if (current == DisplayMode.conversation)
+                                const Icon(Icons.check, size: 18),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<DisplayMode>(
+                          value: DisplayMode.quick,
+                          child: Row(
+                            children: [
+                              const Expanded(child: Text('Quick Mode')),
+                              if (current == DisplayMode.quick)
                                 const Icon(Icons.check, size: 18),
                             ],
                           ),
@@ -2145,8 +2436,29 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
             ),
 
-            // Content area: Conversation / Split / Line-by-Line
-            if (displayMode == DisplayMode.conversation) ...[
+            // Content area: Quick / Conversation / Split / Line-by-Line
+            if (displayMode == DisplayMode.quick) ...[
+              Expanded(
+                child: QuickPanel(
+                  transcript: ref.watch(quickTranscriptProvider),
+                  translation: ref.watch(quickTranslationProvider),
+                  recordingState: recordingState,
+                  targetLanguage: targetLanguage,
+                  detectedLanguage: detectedLanguage,
+                  speakerEnabled: quickTtsEnabled,
+                  onSpeakerChanged: (v) {
+                    ref.read(quickTtsEnabledProvider.notifier).state = v;
+                  },
+                  onMicPressStart: _startQuickRecording,
+                  onMicPressEnd: _stopQuickRecording,
+                  onClear: _clearQuick,
+                  onTargetLanguageChanged: (lang) {
+                    ref.read(targetLanguageProvider.notifier).state = lang;
+                    saveTargetLanguage(lang);
+                  },
+                ),
+              ),
+            ] else if (displayMode == DisplayMode.conversation) ...[
               Expanded(
                 child: ConversationPanel(
                   messages: ref.watch(conversationMessagesProvider),
