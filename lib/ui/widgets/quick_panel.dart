@@ -24,6 +24,7 @@ class QuickPanel extends StatefulWidget {
   final VoidCallback onMicPressStart;
   final VoidCallback onMicPressEnd;
   final VoidCallback onClear;
+  final VoidCallback onReplay;
   final ValueChanged<TargetLanguage> onTargetLanguageChanged;
 
   const QuickPanel({
@@ -38,6 +39,7 @@ class QuickPanel extends StatefulWidget {
     required this.onMicPressStart,
     required this.onMicPressEnd,
     required this.onClear,
+    required this.onReplay,
     required this.onTargetLanguageChanged,
   });
 
@@ -183,21 +185,52 @@ class _QuickPanelState extends State<QuickPanel>
               right: 8,
             ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  label.toUpperCase(),
-                  style: const TextStyle(
-                    fontSize: AppConstants.labelFontSize,
-                    fontWeight: FontWeight.w400,
-                    color: AppConstants.textSecondary,
-                    letterSpacing: 0.5,
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    label.toUpperCase(),
+                    style: const TextStyle(
+                      fontSize: AppConstants.labelFontSize,
+                      fontWeight: FontWeight.w400,
+                      color: AppConstants.textSecondary,
+                      letterSpacing: 0.5,
+                    ),
                   ),
                 ),
                 const Spacer(),
                 if (showSpeaker)
-                  TtsControlButton(
-                    enabled: widget.speakerEnabled,
-                    onEnabledChanged: widget.onSpeakerChanged,
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      TtsControlButton(
+                        enabled: widget.speakerEnabled,
+                        onEnabledChanged: widget.onSpeakerChanged,
+                      ),
+                      // Replay: re-speak the current translation on demand
+                      // (works even when the speaker toggle is muted). Only
+                      // shown when there's a settled translation to replay.
+                      if (!_isRecording &&
+                          !_isProcessing &&
+                          text.trim().isNotEmpty)
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            widget.onReplay();
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.all(4),
+                            child: Icon(
+                              Icons.replay,
+                              size: 20,
+                              color: AppConstants.textPrimary,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
               ],
             ),

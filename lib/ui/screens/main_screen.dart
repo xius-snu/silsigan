@@ -2142,6 +2142,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _ttsService.flush();
   }
 
+  /// Re-speak the current Quick Mode translation on demand. Uses speakOnce so
+  /// it plays even when the speaker toggle is muted (and a second tap stops it).
+  void _replayQuick() {
+    final translation = ref.read(quickTranslationProvider).trim();
+    if (translation.isEmpty) return;
+    if (!TtsService.supportsLanguage(ref.read(targetLanguageProvider).code)) {
+      return;
+    }
+    _ttsService.speakOnce(translation);
+  }
+
   void _resetState() {
     _autosaveTimer?.cancel();
     _sessionCreatedAt = null;
@@ -2452,6 +2463,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onMicPressStart: _startQuickRecording,
                   onMicPressEnd: _stopQuickRecording,
                   onClear: _clearQuick,
+                  onReplay: _replayQuick,
                   onTargetLanguageChanged: (lang) {
                     ref.read(targetLanguageProvider.notifier).state = lang;
                     saveTargetLanguage(lang);
