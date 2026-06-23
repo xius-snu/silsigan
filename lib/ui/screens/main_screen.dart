@@ -98,6 +98,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
   bool _quickHolding = false;
   // True while the async start handler is still connecting.
   bool _quickStarting = false;
+  // Quick Mode language swap ("reload") button state. When swapped, the swap
+  // button restores these snapshots; otherwise it computes a fresh swap.
+  bool _quickSwapped = false;
+  TargetLanguage? _quickPreSwapSource;
+  TargetLanguage _quickPreSwapTarget = TargetLanguage.vietnamese;
+  // Most-recently-used target languages (most recent first) — fallback for the
+  // swap button when the reply language can't be inferred from the transcript.
+  List<TargetLanguage> _recentTargets = [];
 
   // ── Conversation Mode (press-and-hold) state ───────────────────────
   // Translation accumulated during the current turn, spoken aloud on release.
@@ -705,36 +713,36 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   static const _androidMockPackages = [
-    {'label': '1 Hour', 'price': '26,000₫', 'per': '26,000₫/hr', 'hours': 1},
+    {'label': '1 Hour', 'price': '\$0.99', 'per': '\$0.99/hr', 'hours': 1},
     {
       'label': '5 Hours',
-      'price': '79,000₫',
-      'per': '15,800₫/hr',
+      'price': '\$2.99',
+      'per': '\$0.60/hr',
       'hours': 5,
-      'discount': '39% OFF'
+      'discount': '40% OFF'
     },
     {
       'label': '10 Hours',
-      'price': '159,000₫',
-      'per': '15,900₫/hr',
+      'price': '\$5.99',
+      'per': '\$0.60/hr',
       'hours': 10,
-      'discount': '39% OFF',
+      'discount': '40% OFF',
       'badge': 'POPULAR'
     },
     {
       'label': '30 Hours',
-      'price': '399,000₫',
-      'per': '13,300₫/hr',
+      'price': '\$14.99',
+      'per': '\$0.50/hr',
       'hours': 30,
-      'discount': '49% OFF',
-      'badge': 'SAVE 49%'
+      'discount': '50% OFF',
+      'badge': 'SAVE 50%'
     },
     {
       'label': '50 Hours',
-      'price': '659,000₫',
-      'per': '13,180₫/hr',
+      'price': '\$24.99',
+      'per': '\$0.50/hr',
       'hours': 50,
-      'discount': '49% OFF',
+      'discount': '50% OFF',
       'badge': 'BEST VALUE'
     },
   ];
@@ -1674,6 +1682,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(targetLanguageProvider.notifier).state = targetLang;
     final sourceLang = await loadSavedSourceLanguage();
     ref.read(sourceLanguageProvider.notifier).state = sourceLang;
+    _recentTargets = await loadRecentTargets();
     final convLangs = await loadSavedConversationLanguages();
     ref.read(myLanguageProvider.notifier).state = convLangs.my;
     ref.read(theirLanguageProvider.notifier).state = convLangs.their;
@@ -2087,6 +2096,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _audioService.onAudioChunk = (bytes) => _sonioxService.sendAudio(bytes);
 
     final targetLanguage = ref.read(targetLanguageProvider);
+    _recordRecentTarget(targetLanguage);
 
     try {
       await BackgroundService.startRecordingService();
@@ -2196,6 +2206,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(quickTranscriptProvider.notifier).state = '';
     ref.read(quickTranslationProvider.notifier).state = '';
     ref.read(detectedLanguageProvider.notifier).state = null;
+    // The current languages become the new baseline for the swap toggle.
+    if (_quickSwapped) setState(() => _quickSwapped = false);
     _ttsService.flush();
   }
 
@@ -2208,6 +2220,95 @@ class _MainScreenState extends ConsumerState<MainScreen>
       return;
     }
     _ttsService.speakOnce(translation);
+  }
+
+  /// The [TargetLanguage] whose code matches [code], or null if [code] isn't
+  /// one of the supported target languages (unlike [TargetLanguage.fromCode],
+  /// which falls back to Vietnamese).
+  TargetLanguage? _targetForCode(String? code) {
+    if (code == null) return null;
+    for (final l in TargetLanguage.values) {
+      if (l.code == code) return l;
+    }
+    return null;
+  }
+
+  /// A sensible "other" target language when we can't infer one from the
+  /// transcript: the most-recently-used target that differs from [current],
+  /// else Vietnamese (or Korean if [current] is already Vietnamese).
+  TargetLanguage _fallbackTarget(TargetLanguage current) {
+    for (final l in _recentTargets) {
+      if (l != current) return l;
+    }
+    return current == TargetLanguage.vietnamese
+        ? TargetLanguage.korean
+        : TargetLanguage.vietnamese;
+  }
+
+  /// Record [lang] as the most-recently-used target language (deduped, capped).
+  void _recordRecentTarget(TargetLanguage lang) {
+    _recentTargets
+      ..remove(lang)
+      ..insert(0, lang);
+    if (_recentTargets.length > 5) {
+      _recentTargets = _recentTargets.sublist(0, 5);
+    }
+    saveRecentTargets(_recentTargets);
+  }
+
+  /// Quick Mode swap ("reload") button. Toggles the target language to the
+  /// other side of the conversation so the listener can reply, and restores the
+  /// original on a second press. Behavior depends on the current setup:
+  ///   • Source pinned (2-way): swap source ↔ target.
+  ///   • Source "Any" + transcript: target → the detected transcript language.
+  ///   • Source "Any" + empty (or undetectable): target → most-recently-used.
+  void _swapQuickLanguages() {
+    final currentSource = ref.read(sourceLanguageProvider);
+    final currentTarget = ref.read(targetLanguageProvider);
+
+    // Second press: restore the snapshot taken when we swapped.
+    if (_quickSwapped) {
+      ref.read(sourceLanguageProvider.notifier).state = _quickPreSwapSource;
+      ref.read(targetLanguageProvider.notifier).state = _quickPreSwapTarget;
+      saveSourceLanguage(_quickPreSwapSource);
+      saveTargetLanguage(_quickPreSwapTarget);
+      setState(() => _quickSwapped = false);
+      return;
+    }
+
+    TargetLanguage? newSource;
+    TargetLanguage newTarget;
+    if (currentSource != null) {
+      // 2-way mode: swap the two pinned languages.
+      newSource = currentTarget;
+      newTarget = currentSource;
+    } else {
+      // "Any" source: aim the target at whatever was just spoken so the reply
+      // gets translated back. Fall back to a recent language when the transcript
+      // is empty, the language is undetectable, or it equals the current target.
+      newSource = null;
+      final hasTranscript = ref.read(quickTranscriptProvider).trim().isNotEmpty;
+      TargetLanguage? candidate;
+      if (hasTranscript) {
+        candidate = _targetForCode(ref.read(detectedLanguageProvider));
+      }
+      if (candidate == null || candidate == currentTarget) {
+        candidate = _fallbackTarget(currentTarget);
+      }
+      newTarget = candidate;
+    }
+
+    // Nothing would change — leave the toggle off so a press isn't a no-op.
+    if (newSource == currentSource && newTarget == currentTarget) return;
+
+    _quickPreSwapSource = currentSource;
+    _quickPreSwapTarget = currentTarget;
+    ref.read(sourceLanguageProvider.notifier).state = newSource;
+    ref.read(targetLanguageProvider.notifier).state = newTarget;
+    saveSourceLanguage(newSource);
+    saveTargetLanguage(newTarget);
+    _recordRecentTarget(newTarget);
+    setState(() => _quickSwapped = true);
   }
 
   void _resetState() {
@@ -2537,6 +2638,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onSourceChanged: (lang) {
                     ref.read(sourceLanguageProvider.notifier).state = lang;
                     saveSourceLanguage(lang);
+                    if (_quickSwapped) setState(() => _quickSwapped = false);
                   },
                   speakerEnabled: quickTtsEnabled,
                   onSpeakerChanged: (v) {
@@ -2549,7 +2651,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onTargetLanguageChanged: (lang) {
                     ref.read(targetLanguageProvider.notifier).state = lang;
                     saveTargetLanguage(lang);
+                    _recordRecentTarget(lang);
+                    if (_quickSwapped) setState(() => _quickSwapped = false);
                   },
+                  swapActive: _quickSwapped,
+                  onSwap: _swapQuickLanguages,
                 ),
               ),
             ] else if (displayMode == DisplayMode.conversation) ...[

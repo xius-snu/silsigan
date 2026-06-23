@@ -61,3 +61,21 @@ Future<void> saveSourceLanguage(TargetLanguage? lang) async {
     await prefs.setString('source_language', lang.code);
   }
 }
+
+/// Load the most-recently-used target languages (most recent first). Used by
+/// Quick Mode's swap button to pick a sensible "reply" language when it can't
+/// be inferred from the transcription.
+Future<List<TargetLanguage>> loadRecentTargets() async {
+  final prefs = await SharedPreferences.getInstance();
+  final codes = prefs.getStringList('recent_targets') ?? const [];
+  return codes.map(TargetLanguage.fromCode).toList();
+}
+
+/// Persist the most-recently-used target language list (most recent first).
+Future<void> saveRecentTargets(List<TargetLanguage> langs) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setStringList(
+    'recent_targets',
+    langs.map((l) => l.code).toList(),
+  );
+}

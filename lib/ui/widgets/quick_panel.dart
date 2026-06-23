@@ -29,6 +29,14 @@ class QuickPanel extends StatefulWidget {
   final ValueChanged<TargetLanguage?> onSourceChanged;
   final ValueChanged<TargetLanguage> onTargetLanguageChanged;
 
+  /// Whether the languages are currently in the swapped ("reply") state. Drives
+  /// the highlight on the swap button so the user can tell a swap is active.
+  final bool swapActive;
+
+  /// Toggle the target language to the other side of the conversation (and back
+  /// again on a second press). Implemented by the swap handler in MainScreen.
+  final VoidCallback onSwap;
+
   const QuickPanel({
     super.key,
     required this.transcript,
@@ -45,6 +53,8 @@ class QuickPanel extends StatefulWidget {
     required this.onReplay,
     required this.onSourceChanged,
     required this.onTargetLanguageChanged,
+    required this.swapActive,
+    required this.onSwap,
   });
 
   @override
@@ -329,8 +339,11 @@ class _QuickPanelState extends State<QuickPanel>
     final hasText = widget.transcript.trim().isNotEmpty ||
         widget.translation.trim().isNotEmpty;
     // The clear button only appears when there's something to clear and we're
-    // not mid-recording. A matching spacer on the right keeps the mic centered.
+    // not mid-recording. The swap button sits on the right and is hidden while
+    // recording (languages can't change mid-utterance). Both reserve a fixed
+    // slot so the mic stays centered regardless of visibility.
     final showClear = !_isRecording && !_isProcessing && hasText;
+    final showSwap = !_isRecording && !_isProcessing;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -338,11 +351,54 @@ class _QuickPanelState extends State<QuickPanel>
         const SizedBox(width: 40),
         _buildMicButton(),
         const SizedBox(width: 40),
-        const SizedBox(
-          width: AppConstants.sideButtonSize,
-          height: AppConstants.sideButtonSize,
-        ),
+        _buildSwapButton(showSwap),
       ],
+    );
+  }
+
+  /// Swap / "reload" button: flips the target language to the other side of the
+  /// conversation so the listener can reply, and back again on a second press.
+  Widget _buildSwapButton(bool show) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 150),
+      child: show
+          ? GestureDetector(
+              key: const ValueKey('quick-swap'),
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                HapticFeedback.selectionClick();
+                widget.onSwap();
+              },
+              child: Container(
+                width: AppConstants.sideButtonSize,
+                height: AppConstants.sideButtonSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: widget.swapActive
+                      ? AppConstants.micButtonColor
+                      : AppConstants.panelColor,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.12),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.swap_horiz,
+                  color: widget.swapActive
+                      ? Colors.white
+                      : AppConstants.textPrimary,
+                  size: AppConstants.sideIconSize,
+                ),
+              ),
+            )
+          : const SizedBox(
+              key: ValueKey('quick-swap-empty'),
+              width: AppConstants.sideButtonSize,
+              height: AppConstants.sideButtonSize,
+            ),
     );
   }
 
