@@ -27,9 +27,6 @@ import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
 import '../widgets/conversation_panel.dart';
-import '../widgets/learn_panel.dart';
-import '../../providers/native_language_provider.dart';
-import '../../providers/learn_provider.dart';
 import '../../providers/conversation_provider.dart';
 import '../widgets/friend_dialog.dart';
 import '../widgets/session_invite_banner.dart';
@@ -1547,12 +1544,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(theirLanguageProvider.notifier).state = convLangs.their;
     final displayMode = await loadSavedDisplayMode();
     ref.read(displayModeProvider.notifier).state = displayMode;
-    final nativeLang = await loadSavedNativeLanguage();
-    ref.read(nativeLanguageProvider.notifier).state = nativeLang;
-    final learnAutoTts = await loadSavedLearnAutoTts();
-    ref.read(learnAutoTtsProvider.notifier).state = learnAutoTts;
-    final learnAutoMic = await loadSavedLearnAutoMic();
-    ref.read(learnAutoMicProvider.notifier).state = learnAutoMic;
     final ttsRate = await loadSavedTtsRate();
     ref.read(ttsRateProvider.notifier).state = ttsRate;
   }
@@ -1966,16 +1957,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             ],
                           ),
                         ),
-                        PopupMenuItem<DisplayMode>(
-                          value: DisplayMode.learn,
-                          child: Row(
-                            children: [
-                              const Expanded(child: Text('Learn')),
-                              if (current == DisplayMode.learn)
-                                const Icon(Icons.check, size: 18),
-                            ],
-                          ),
-                        ),
                         const PopupMenuDivider(),
                         PopupMenuItem<DisplayMode>(
                           value: current, // keep current mode unchanged
@@ -2101,10 +2082,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
             ),
 
-            // Content area: Conversation / Split / Line-by-Line / Learn
-            if (displayMode == DisplayMode.learn) ...[
-              const Expanded(child: LearnPanel()),
-            ] else if (displayMode == DisplayMode.conversation) ...[
+            // Content area: Conversation / Split / Line-by-Line
+            if (displayMode == DisplayMode.conversation) ...[
               Expanded(
                 child: ConversationPanel(
                   messages: ref.watch(conversationMessagesProvider),
