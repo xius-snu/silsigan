@@ -71,7 +71,7 @@ lib/
 ├── providers/
 │   ├── recording_provider.dart            # idle/recording/processing/postRecording
 │   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription/quick
-│   ├── target_language_provider.dart      # 8 languages (see below)
+│   ├── target_language_provider.dart      # 8 languages + sourceLanguageProvider (null = Any)
 │   ├── detected_language_provider.dart    # Soniox-detected source language
 │   ├── transcript_provider.dart           # koreanDraft + koreanHistory (legacy naming)
 │   ├── translation_provider.dart          # vietnameseDraft + vietnameseHistory (legacy naming)
@@ -99,6 +99,7 @@ lib/
 │       ├── line_by_line_panel.dart        # Aligned per-utterance pairs with audio scrubbing
 │       ├── conversation_panel.dart        # Chat-bubble UI with two-sided mic
 │       ├── quick_panel.dart               # Quick mode: big-text top/bottom + press-and-hold mic
+│       ├── source_language_selector.dart  # Left-side source picker (Any/auto-detect or pinned)
 │       ├── record_button.dart             # Animated mic/stop with haptics
 │       ├── save_discard_row.dart          # idle/postRecording side buttons
 │       ├── history_sheet.dart             # Bottom sheet: list + inline detail + audio player
@@ -126,7 +127,7 @@ server/
 
 1. **`lineByLine`** (default) — each Soniox endpoint = one segment; transcription + translation lines aligned 1:1; supports audio scrubbing via word timestamps.
 2. **`split`** — two scrollable panels (transcript/translation); paragraph breaks on 2s pause or 4 sentences; late translations re-attach to their paragraph.
-3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`); tap either side to record as that speaker.
+3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`). Each side's mic is **press-and-hold** (walkie-talkie): the held side is the speaker, and on release the translation is spoken aloud in the *listener's* language (TTS always on; flushed when the other side starts a turn).
 4. **`transcription`** — transcript only, no translation (skips Soniox `translation` config).
 5. **`quick`** — press-and-hold "walkie-talkie" translator (`QuickPanel`, self-contained). Big text, transcription top / translation bottom, no save/history. Hold the mic to record; the first transcribed word clears the previous result; release stops audio input, lets the trailing translation settle (~700ms), then speaks the full translation via TTS (always on, independent of the global toggle). State lives in `quick_provider.dart` (`quickTranscript` / `quickTranslation` — single growing strings, not history lists).
 
@@ -135,6 +136,8 @@ server/
 ## Target Languages
 
 Eight languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese, Korean, Japanese, Thai, Malay**. Each has a `displayName` and ISO `code`. TTS support matches the locale map in `tts_service.dart`.
+
+**Source language** is also selectable (left side, `sourceLanguageProvider`; `null` = **Any**/auto-detect). A pinned source is sent to Soniox as a `language_hints` entry (`SourceLanguageSelector`), enabling e.g. English → Vietnamese. Applies to line-by-line, split, and quick modes; conversation has its own two-language slots. While recording with "Any", the box shows the detected language.
 
 ---
 

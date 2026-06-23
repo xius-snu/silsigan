@@ -28,6 +28,7 @@ import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
 import '../widgets/conversation_panel.dart';
 import '../widgets/quick_panel.dart';
+import '../widgets/source_language_selector.dart';
 import '../../providers/conversation_provider.dart';
 import '../../providers/quick_provider.dart';
 import '../widgets/friend_dialog.dart';
@@ -96,6 +97,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
   bool _quickHolding = false;
   // True while the async start handler is still connecting.
   bool _quickStarting = false;
+
+  // ── Conversation Mode (press-and-hold) state ───────────────────────
+  // Translation accumulated during the current turn, spoken aloud on release.
+  String _convTranslationConfirmed = '';
+  // True between mic press and release; true while the start handler connects.
+  bool _convHolding = false;
+  bool _convStarting = false;
 
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
@@ -1258,13 +1266,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
       _sonioxService.isPrivateUser = _isPrivateUser;
+      // Source language: null ("Any") → no hint (pure auto-detect); a pinned
+      // language → hint it. forceTranslation keeps the translation config for
+      // every non-transcription target (incl. source==target echo cases).
+      final sourceLang = ref.read(sourceLanguageProvider);
       await _sonioxService.connect(
         targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
-        forceTranslation:
-            !isTranscriptionOnly && targetLanguage == TargetLanguage.korean,
-        languageHint: isTranscriptionOnly
-            ? ''
-            : (targetLanguage == TargetLanguage.korean ? '' : null),
+        forceTranslation: !isTranscriptionOnly,
+        languageHint: sourceLang?.code ?? '',
       );
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
@@ -1662,6 +1671,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Future<void> _restoreSavedLanguages() async {
     final targetLang = await loadSavedTargetLanguage();
     ref.read(targetLanguageProvider.notifier).state = targetLang;
+    final sourceLang = await loadSavedSourceLanguage();
+    ref.read(sourceLanguageProvider.notifier).state = sourceLang;
     final convLangs = await loadSavedConversationLanguages();
     ref.read(myLanguageProvider.notifier).state = convLangs.my;
     ref.read(theirLanguageProvider.notifier).state = convLangs.their;
@@ -1744,38 +1755,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // ── Conversation Mode Recording ──────────────────────────────────
 
-  Future<void> _startConversationRecording() async {
-    // If already recording, ignore (both buttons do the same thing)
-    if (ref.read(recordingStateProvider) == RecordingState.recording) return;
-
-    // Check usage limit before starting
-    if (_usageLimitReached) {
-      _forceStopForUsageLimit();
-      return;
-    }
-
-    final needsPermission = Platform.isAndroid || Platform.isIOS;
-    final status = needsPermission
-        ? await Permission.microphone.request()
-        : PermissionStatus.granted;
-    if (!status.isGranted) return;
-
-    ref.read(activeConversationSpeakerProvider.notifier).state =
-        ConversationSpeaker.bottom;
-    ref.read(conversationDraftOriginalProvider.notifier).state = '';
-    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
-
-    final myLang = ref.read(myLanguageProvider);
-    final theirLang = ref.read(theirLanguageProvider);
-
-    // Set up Soniox callbacks for conversation mode
+  void _setupConversationCallbacks() {
     _sonioxService.onTranscriptionDraft = (draft) {
       ref.read(conversationDraftOriginalProvider.notifier).state = draft;
     };
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
-        // Use the current detected speaker (set by onLanguageDetected)
+        // Speaker is whichever mic is being held (set on press).
         final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
             ConversationSpeaker.bottom;
         final msg = ConversationMessage(
@@ -1795,6 +1782,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
+        final clean = _cleanLineStart(translation);
+        // Accumulate for the spoken-on-release TTS.
+        _convTranslationConfirmed =
+            _quickJoin(_convTranslationConfirmed, clean);
         final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
             ConversationSpeaker.bottom;
         ref.read(conversationMessagesProvider.notifier).update((state) {
@@ -1802,8 +1793,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           for (int i = updated.length - 1; i >= 0; i--) {
             if (updated[i].speaker == currentSpeaker &&
                 updated[i].translatedText.isEmpty) {
-              updated[i] = updated[i]
-                  .copyWith(translatedText: _cleanLineStart(translation));
+              updated[i] = updated[i].copyWith(translatedText: clean);
               break;
             }
           }
@@ -1814,15 +1804,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onLanguageDetected = (language) {
+      // Speaker is determined by the held mic (push-to-talk), not detection.
       ref.read(detectedLanguageProvider.notifier).state = language;
-      // Route speech to correct side based on detected language
-      if (language == myLang.code) {
-        ref.read(activeConversationSpeakerProvider.notifier).state =
-            ConversationSpeaker.bottom;
-      } else if (language == theirLang.code) {
-        ref.read(activeConversationSpeakerProvider.notifier).state =
-            ConversationSpeaker.top;
-      }
     };
 
     _sonioxService.onError = (error) {
@@ -1837,10 +1820,47 @@ class _MainScreenState extends ConsumerState<MainScreen>
         SnackBar(content: Text('Transcription error: $error')),
       );
     };
+  }
 
-    _audioService.onAudioChunk = (bytes) {
-      _sonioxService.sendAudio(bytes);
-    };
+  Future<void> _startConversationRecording(ConversationSpeaker speaker) async {
+    if (_convStarting) return;
+    final st = ref.read(recordingStateProvider);
+    if (st == RecordingState.recording || st == RecordingState.processing) {
+      return;
+    }
+
+    // Check usage limit before starting
+    if (_usageLimitReached) {
+      _forceStopForUsageLimit();
+      return;
+    }
+
+    _convHolding = true;
+    _convStarting = true;
+
+    final needsPermission = Platform.isAndroid || Platform.isIOS;
+    final status = needsPermission
+        ? await Permission.microphone.request()
+        : PermissionStatus.granted;
+    if (!status.isGranted) {
+      _convHolding = false;
+      _convStarting = false;
+      return;
+    }
+
+    // Cut off any translation still being spoken from the previous turn.
+    _ttsService.flush();
+
+    _convTranslationConfirmed = '';
+    ref.read(activeConversationSpeakerProvider.notifier).state = speaker;
+    ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+
+    final myLang = ref.read(myLanguageProvider);
+    final theirLang = ref.read(theirLanguageProvider);
+
+    _setupConversationCallbacks();
+    _audioService.onAudioChunk = (bytes) => _sonioxService.sendAudio(bytes);
 
     try {
       await BackgroundService.startRecordingService();
@@ -1860,16 +1880,31 @@ class _MainScreenState extends ConsumerState<MainScreen>
       });
     } catch (e) {
       await BackgroundService.stopRecordingService();
+      _convStarting = false;
+      _convHolding = false;
       ref.read(activeConversationSpeakerProvider.notifier).state = null;
       if (mounted) {
+        ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to start: $e')),
         );
       }
+      return;
+    }
+
+    _convStarting = false;
+
+    // The user may have released before the connection finished — stop now.
+    if (!_convHolding) {
+      await _stopConversationRecording();
     }
   }
 
   Future<void> _stopConversationRecording() async {
+    _convHolding = false;
+
+    if (_convStarting) return;
+    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
     if (_isStopping) return;
     _isStopping = true;
 
@@ -1879,8 +1914,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.stop().timeout(const Duration(seconds: 5));
     } catch (_) {}
 
+    // Finalize, let trailing translation tokens land, then disconnect.
     try {
       _sonioxService.finalize();
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 700));
+    try {
       await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
     } catch (_) {}
 
@@ -1902,6 +1941,21 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _usedSeconds += durationSecs;
       _recordingStartedAt = null;
       _fetchUsage();
+    }
+
+    // Speak the translation aloud in the LISTENER's language — the side
+    // opposite the speaker who just held their mic.
+    final speaker = ref.read(activeConversationSpeakerProvider);
+    final text = _convTranslationConfirmed.trim();
+    if (speaker != null && text.isNotEmpty) {
+      final myLang = ref.read(myLanguageProvider);
+      final theirLang = ref.read(theirLanguageProvider);
+      final ttsLangCode =
+          speaker == ConversationSpeaker.bottom ? theirLang.code : myLang.code;
+      if (TtsService.supportsLanguage(ttsLangCode)) {
+        _ttsService.setLanguageCode(ttsLangCode);
+        _ttsService.speak(text);
+      }
     }
 
     ref.read(activeConversationSpeakerProvider.notifier).state = null;
@@ -2039,8 +2093,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _sonioxService.isPrivateUser = _isPrivateUser;
       await _sonioxService.connect(
         targetLanguageCode: targetLanguage.code,
-        forceTranslation: targetLanguage == TargetLanguage.korean,
-        languageHint: targetLanguage == TargetLanguage.korean ? '' : null,
+        forceTranslation: true,
+        languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
       );
       await _audioService.start();
       _recordingStartedAt = DateTime.now();
@@ -2182,18 +2236,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final vietnameseHistory = ref.watch(vietnameseHistoryProvider);
 
     final targetLanguage = ref.watch(targetLanguageProvider);
+    final sourceLanguage = ref.watch(sourceLanguageProvider);
     final displayMode = ref.watch(displayModeProvider);
     final ttsEnabled = ref.watch(ttsEnabledProvider);
     final detectedLanguage = ref.watch(detectedLanguageProvider);
 
-    // Sync TTS service state with provider
-    _ttsService.setLanguageCode(targetLanguage.code);
-    // Quick Mode has its own speaker toggle (default on); the other modes use
-    // the global toggle. Driving setEnabled from the active mode's provider on
+    // Sync TTS service state with provider. In Conversation mode the TTS
+    // language is chosen per-turn (the listener's side) at release time, so
+    // don't overwrite it here.
+    if (displayMode != DisplayMode.conversation) {
+      _ttsService.setLanguageCode(targetLanguage.code);
+    }
+    // Quick + Conversation always voice the translation on release; the other
+    // modes use the global toggle. Driving setEnabled from the active mode on
     // every build also keeps rebuilds from cutting off in-progress playback.
     final quickTtsEnabled = ref.watch(quickTtsEnabledProvider);
-    _ttsService.setEnabled(
-        displayMode == DisplayMode.quick ? quickTtsEnabled : ttsEnabled);
+    final bool ttsOn = displayMode == DisplayMode.quick
+        ? quickTtsEnabled
+        : displayMode == DisplayMode.conversation
+            ? true
+            : ttsEnabled;
+    _ttsService.setEnabled(ttsOn);
     _ttsService.setRate(ref.watch(ttsRateProvider));
 
     // Show speaker toggle for languages with TTS support + valid API key
@@ -2455,7 +2518,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   translation: ref.watch(quickTranslationProvider),
                   recordingState: recordingState,
                   targetLanguage: targetLanguage,
+                  sourceLanguage: sourceLanguage,
                   detectedLanguage: detectedLanguage,
+                  onSourceChanged: (lang) {
+                    ref.read(sourceLanguageProvider.notifier).state = lang;
+                    saveSourceLanguage(lang);
+                  },
                   speakerEnabled: quickTtsEnabled,
                   onSpeakerChanged: (v) {
                     ref.read(quickTtsEnabledProvider.notifier).state = v;
@@ -2481,9 +2549,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   recordingState: recordingState,
                   myLanguage: ref.watch(myLanguageProvider),
                   theirLanguage: ref.watch(theirLanguageProvider),
-                  onBottomMicStart: _startConversationRecording,
+                  onBottomMicStart: () =>
+                      _startConversationRecording(ConversationSpeaker.bottom),
                   onBottomMicStop: _stopConversationRecording,
-                  onTopMicStart: _startConversationRecording,
+                  onTopMicStart: () =>
+                      _startConversationRecording(ConversationSpeaker.top),
                   onTopMicStop: _stopConversationRecording,
                   onSwapLanguages: _swapConversationLanguages,
                   onClear: _clearConversation,
@@ -2572,29 +2642,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 200),
-                            child: Container(
-                              key: ValueKey(detectedLanguage ?? 'any'),
-                              width: AppConstants.langBoxWidth,
-                              height: AppConstants.langBoxHeight,
-                              decoration: BoxDecoration(
-                                color: AppConstants.panelColor,
-                                borderRadius: BorderRadius.circular(
-                                  AppConstants.langBoxRadius,
-                                ),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                detectedLanguage != null
-                                    ? languageDisplayName(detectedLanguage)
-                                    : 'Any',
-                                style: const TextStyle(
-                                  fontSize: AppConstants.langFontSize,
-                                  color: AppConstants.textPrimary,
-                                ),
-                              ),
-                            ),
+                          SourceLanguageSelector(
+                            source: sourceLanguage,
+                            detectedLanguage: detectedLanguage,
+                            isRecording: isRecordingOrProcessing,
+                            enabled: !isRecordingOrProcessing,
+                            onChanged: (lang) {
+                              ref.read(sourceLanguageProvider.notifier).state =
+                                  lang;
+                              saveSourceLanguage(lang);
+                            },
                           ),
                           const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 12),

@@ -26,6 +26,10 @@ enum TargetLanguage {
 final targetLanguageProvider =
     StateProvider<TargetLanguage>((ref) => TargetLanguage.vietnamese);
 
+/// Source language. `null` = "Any" (auto-detect). When set, it's passed to
+/// Soniox as a language hint so the user can pin e.g. English → Vietnamese.
+final sourceLanguageProvider = StateProvider<TargetLanguage?>((ref) => null);
+
 /// Load saved language on app start
 Future<TargetLanguage> loadSavedTargetLanguage() async {
   final prefs = await SharedPreferences.getInstance();
@@ -38,4 +42,22 @@ Future<TargetLanguage> loadSavedTargetLanguage() async {
 Future<void> saveTargetLanguage(TargetLanguage lang) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('target_language', lang.code);
+}
+
+/// Load saved source language on app start (null = "Any").
+Future<TargetLanguage?> loadSavedSourceLanguage() async {
+  final prefs = await SharedPreferences.getInstance();
+  final code = prefs.getString('source_language');
+  if (code == null) return null;
+  return TargetLanguage.fromCode(code);
+}
+
+/// Persist source language selection (null = "Any").
+Future<void> saveSourceLanguage(TargetLanguage? lang) async {
+  final prefs = await SharedPreferences.getInstance();
+  if (lang == null) {
+    await prefs.remove('source_language');
+  } else {
+    await prefs.setString('source_language', lang.code);
+  }
 }

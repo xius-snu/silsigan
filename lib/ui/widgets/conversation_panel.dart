@@ -76,6 +76,9 @@ class _ConversationPanelState extends State<ConversationPanel> {
   Timer? _topResumeTimer;
   Timer? _ellipsisTimer;
   int _ellipsisCount = 3;
+  // Tracks the single in-flight press-and-hold pointer (only one side can
+  // record at a time).
+  int? _activeMicPointer;
 
   @override
   void initState() {
@@ -355,8 +358,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
-              isActive: _isRecording,
-              isDisabled: _isProcessing,
+              side: ConversationSpeaker.top,
               onStart: widget.onTopMicStart,
               onStop: widget.onTopMicStop,
               tealTheme: true,
@@ -383,8 +385,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
             child: _buildMicButton(
-              isActive: _isRecording,
-              isDisabled: _isProcessing,
+              side: ConversationSpeaker.bottom,
               onStart: widget.onBottomMicStart,
               onStop: widget.onBottomMicStop,
               tealTheme: false,
@@ -545,41 +546,81 @@ class _ConversationPanelState extends State<ConversationPanel> {
 
   // ── Mic Button ──
 
+  /// Press-and-hold mic for one side. Holding starts recording as [side];
+  /// releasing stops input (the parent then speaks the translation aloud).
+  /// Only one side can record at a time — the other mic is disabled while busy.
   Widget _buildMicButton({
-    required bool isActive,
-    required bool isDisabled,
+    required ConversationSpeaker side,
     required VoidCallback onStart,
     required VoidCallback onStop,
     required bool tealTheme,
   }) {
     const size = 64.0;
+    final thisActive = widget.activeSpeaker == side;
 
-    if (isDisabled) {
+    // This side just released and is awaiting the translation/TTS.
+    if (_isProcessing && thisActive) {
       return Container(
         width: size,
         height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color:
-              tealTheme ? Colors.white.withOpacity(0.2) : Colors.grey.shade300,
+          color: Colors.red.withOpacity(0.8),
         ),
-        child: Icon(
-          Icons.mic_off,
-          size: 28,
-          color:
-              tealTheme ? Colors.white.withOpacity(0.4) : Colors.grey.shade500,
+        child: const Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation(Colors.white),
+            ),
+          ),
         ),
       );
     }
 
-    return GestureDetector(
-      onTap: () {
+    // Busy on the other side (or processing) — disable this mic.
+    if (_isRecording || _isProcessing) {
+      if (!thisActive) {
+        return Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: tealTheme
+                ? Colors.white.withOpacity(0.2)
+                : Colors.grey.shade300,
+          ),
+          child: Icon(
+            Icons.mic_off,
+            size: 28,
+            color: tealTheme
+                ? Colors.white.withOpacity(0.4)
+                : Colors.grey.shade500,
+          ),
+        );
+      }
+    }
+
+    final active = _isRecording && thisActive;
+    return Listener(
+      onPointerDown: (event) {
+        if (_activeMicPointer != null) return;
+        if (widget.recordingState != RecordingState.idle) return;
+        _activeMicPointer = event.pointer;
         HapticFeedback.mediumImpact();
-        if (isActive) {
-          onStop();
-        } else {
-          onStart();
-        }
+        onStart();
+      },
+      onPointerUp: (event) {
+        if (event.pointer != _activeMicPointer) return;
+        _activeMicPointer = null;
+        onStop();
+      },
+      onPointerCancel: (event) {
+        if (event.pointer != _activeMicPointer) return;
+        _activeMicPointer = null;
+        onStop();
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 120),
@@ -588,12 +629,12 @@ class _ConversationPanelState extends State<ConversationPanel> {
         height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: isActive
+          color: active
               ? Colors.red
               : (tealTheme ? Colors.white : AppConstants.micButtonColor),
           boxShadow: [
             BoxShadow(
-              color: isActive
+              color: active
                   ? Colors.red.withOpacity(0.3)
                   : Colors.black.withOpacity(0.15),
               blurRadius: 10,
@@ -602,9 +643,9 @@ class _ConversationPanelState extends State<ConversationPanel> {
           ],
         ),
         child: Icon(
-          isActive ? Icons.stop_rounded : Icons.mic,
+          Icons.mic,
           size: 28,
-          color: isActive
+          color: active
               ? Colors.white
               : (tealTheme ? _ConvColors.topBg : Colors.white),
         ),

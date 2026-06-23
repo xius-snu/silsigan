@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
-import '../../providers/detected_language_provider.dart';
 import '../../utils/constants.dart';
 import 'tts_control_button.dart';
+import 'source_language_selector.dart';
 
 /// Quick Mode: a press-and-hold "walkie-talkie" translator.
 ///
@@ -18,6 +18,7 @@ class QuickPanel extends StatefulWidget {
   final String translation;
   final RecordingState recordingState;
   final TargetLanguage targetLanguage;
+  final TargetLanguage? sourceLanguage;
   final String? detectedLanguage;
   final bool speakerEnabled;
   final ValueChanged<bool> onSpeakerChanged;
@@ -25,6 +26,7 @@ class QuickPanel extends StatefulWidget {
   final VoidCallback onMicPressEnd;
   final VoidCallback onClear;
   final VoidCallback onReplay;
+  final ValueChanged<TargetLanguage?> onSourceChanged;
   final ValueChanged<TargetLanguage> onTargetLanguageChanged;
 
   const QuickPanel({
@@ -33,6 +35,7 @@ class QuickPanel extends StatefulWidget {
     required this.translation,
     required this.recordingState,
     required this.targetLanguage,
+    required this.sourceLanguage,
     required this.detectedLanguage,
     required this.speakerEnabled,
     required this.onSpeakerChanged,
@@ -40,6 +43,7 @@ class QuickPanel extends StatefulWidget {
     required this.onMicPressEnd,
     required this.onClear,
     required this.onReplay,
+    required this.onSourceChanged,
     required this.onTargetLanguageChanged,
   });
 
@@ -264,25 +268,15 @@ class _QuickPanelState extends State<QuickPanel>
   }
 
   Widget _buildLanguageRow() {
-    final detected = widget.detectedLanguage;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Container(
-          width: AppConstants.langBoxWidth,
-          height: AppConstants.langBoxHeight,
-          decoration: BoxDecoration(
-            color: AppConstants.panelColor,
-            borderRadius: BorderRadius.circular(AppConstants.langBoxRadius),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            detected != null ? languageDisplayName(detected) : 'Any',
-            style: const TextStyle(
-              fontSize: AppConstants.langFontSize,
-              color: AppConstants.textPrimary,
-            ),
-          ),
+        SourceLanguageSelector(
+          source: widget.sourceLanguage,
+          detectedLanguage: widget.detectedLanguage,
+          isRecording: _isRecording || _isProcessing,
+          enabled: !_isRecording && !_isProcessing,
+          onChanged: widget.onSourceChanged,
         ),
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 12),
