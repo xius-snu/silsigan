@@ -29,6 +29,7 @@ import '../widgets/line_by_line_panel.dart';
 import '../widgets/conversation_panel.dart';
 import '../widgets/quick_panel.dart';
 import '../widgets/source_language_selector.dart';
+import '../widgets/tts_control_button.dart';
 import '../../providers/conversation_provider.dart';
 import '../../providers/quick_provider.dart';
 import '../widgets/friend_dialog.dart';
@@ -1944,10 +1945,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
 
     // Speak the translation aloud in the LISTENER's language — the side
-    // opposite the speaker who just held their mic.
+    // opposite the speaker who just held their mic (unless TTS is muted).
     final speaker = ref.read(activeConversationSpeakerProvider);
     final text = _convTranslationConfirmed.trim();
-    if (speaker != null && text.isNotEmpty) {
+    if (speaker != null &&
+        text.isNotEmpty &&
+        ref.read(conversationTtsEnabledProvider)) {
       final myLang = ref.read(myLanguageProvider);
       final theirLang = ref.read(theirLanguageProvider);
       final ttsLangCode =
@@ -2254,7 +2257,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final bool ttsOn = displayMode == DisplayMode.quick
         ? quickTtsEnabled
         : displayMode == DisplayMode.conversation
-            ? true
+            ? ref.watch(conversationTtsEnabledProvider)
             : ttsEnabled;
     _ttsService.setEnabled(ttsOn);
     _ttsService.setRate(ref.watch(ttsRateProvider));
@@ -2309,6 +2312,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   const SizedBox(width: 12),
                   StatusBar(state: recordingState),
                   const Spacer(),
+                  // Conversation TTS toggle — speak the translation on release.
+                  if (displayMode == DisplayMode.conversation) ...[
+                    TtsControlButton(
+                      enabled: ref.watch(conversationTtsEnabledProvider),
+                      onEnabledChanged: (v) => ref
+                          .read(conversationTtsEnabledProvider.notifier)
+                          .state = v,
+                      iconSize: 24,
+                    ),
+                    const SizedBox(width: 16),
+                  ],
                   GestureDetector(
                     onTap: _showFriendDialog,
                     child: const Icon(

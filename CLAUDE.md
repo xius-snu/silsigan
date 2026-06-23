@@ -127,7 +127,7 @@ server/
 
 1. **`lineByLine`** (default) — each Soniox endpoint = one segment; transcription + translation lines aligned 1:1; supports audio scrubbing via word timestamps.
 2. **`split`** — two scrollable panels (transcript/translation); paragraph breaks on 2s pause or 4 sentences; late translations re-attach to their paragraph.
-3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`). Each side's mic is **press-and-hold** (walkie-talkie): the held side is the speaker, and on release the translation is spoken aloud in the *listener's* language (TTS always on; flushed when the other side starts a turn).
+3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`). Each side's mic is **press-and-hold** (walkie-talkie): the held side is the speaker, and on release the translation is spoken aloud in the *listener's* language. TTS defaults on and is toggled via the speaker button in the header (`conversationTtsEnabledProvider`); it's flushed when the other side starts a turn.
 4. **`transcription`** — transcript only, no translation (skips Soniox `translation` config).
 5. **`quick`** — press-and-hold "walkie-talkie" translator (`QuickPanel`, self-contained). Big text, transcription top / translation bottom, no save/history. Hold the mic to record; the first transcribed word clears the previous result; release stops audio input, lets the trailing translation settle (~700ms), then speaks the full translation via TTS (always on, independent of the global toggle). State lives in `quick_provider.dart` (`quickTranscript` / `quickTranslation` — single growing strings, not history lists).
 

@@ -28,17 +28,19 @@ class ConversationMessage {
 final activeConversationSpeakerProvider =
     StateProvider<ConversationSpeaker?>((ref) => null);
 
+/// Whether Conversation mode speaks the translation aloud on release.
+/// Defaults ON; toggled via the speaker button in the header. Not persisted.
+final conversationTtsEnabledProvider = StateProvider<bool>((ref) => true);
+
 /// Completed conversation messages
 final conversationMessagesProvider =
     StateProvider<List<ConversationMessage>>((ref) => []);
 
 /// Live draft text (original) while someone is speaking
-final conversationDraftOriginalProvider =
-    StateProvider<String>((ref) => '');
+final conversationDraftOriginalProvider = StateProvider<String>((ref) => '');
 
 /// Live draft text (translation) while someone is speaking
-final conversationDraftTranslatedProvider =
-    StateProvider<String>((ref) => '');
+final conversationDraftTranslatedProvider = StateProvider<String>((ref) => '');
 
 /// Bottom person's language (defaults to Korean)
 final myLanguageProvider =
