@@ -518,36 +518,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 else
                   ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Expanded(child: Divider(color: Colors.grey[300])),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Text(
-                        'or',
-                        style: TextStyle(fontSize: 13, color: Colors.grey[500]),
-                      ),
-                    ),
-                    Expanded(child: Divider(color: Colors.grey[300])),
-                  ],
-                ),
-                const SizedBox(height: 12),
-
-                // Redeem code section
-                _RedeemCodeSection(
-                  onRedeemed: (usedSec, limitMin) {
-                    setState(() {
-                      _usedSeconds = usedSec;
-                      _limitMinutes = limitMin;
-                    });
-                    Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Code redeemed!')),
-                    );
-                  },
-                ),
-
                 const SizedBox(height: 24),
 
                 // Restore purchases
@@ -2897,93 +2867,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ],
         ),
       ),
-    );
-  }
-}
-
-class _RedeemCodeSection extends StatefulWidget {
-  final void Function(int usedSeconds, int limitMinutes) onRedeemed;
-
-  const _RedeemCodeSection({required this.onRedeemed});
-
-  @override
-  State<_RedeemCodeSection> createState() => _RedeemCodeSectionState();
-}
-
-class _RedeemCodeSectionState extends State<_RedeemCodeSection> {
-  final _controller = TextEditingController();
-  String? _error;
-  bool _isLoading = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _redeem() async {
-    final code = _controller.text.trim();
-    if (code.isEmpty) return;
-    setState(() {
-      _isLoading = true;
-      _error = null;
-    });
-    final res = await UserService.instance.redeemCode(code);
-    if (!mounted) return;
-    if (res['success'] == true) {
-      widget.onRedeemed(res['usedSeconds'] as int, res['limitMinutes'] as int);
-    } else {
-      setState(() {
-        _isLoading = false;
-        _error = res['error'] as String?;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: _controller,
-            textCapitalization: TextCapitalization.characters,
-            decoration: InputDecoration(
-              hintText: 'Enter private code',
-              errorText: _error,
-              isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            onSubmitted: (_) => _redeem(),
-          ),
-        ),
-        const SizedBox(width: 10),
-        SizedBox(
-          height: 44,
-          child: ElevatedButton(
-            onPressed: _isLoading ? null : _redeem,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.black87,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: _isLoading
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white),
-                  )
-                : const Text('Redeem'),
-          ),
-        ),
-      ],
     );
   }
 }

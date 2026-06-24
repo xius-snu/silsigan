@@ -195,7 +195,6 @@ Eight languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chines
 - iOS only — Android shows mock UI with "not available" snackbar.
 - Successful purchase → POST to Render to credit minutes → refresh `_usedSeconds` / `_limitMinutes`.
 - Pending purchases (Apple credited but server failed) are persisted and retried on next launch.
-- Redeem code section lets users enter a server-issued code.
 
 ---
 

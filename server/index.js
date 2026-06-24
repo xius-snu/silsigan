@@ -466,65 +466,6 @@ async function start() {
         }
     });
 
-    fastify.post('/api/user/redeem-code', async (req, reply) => {
-        const { userId, code } = req.body;
-        if (!userId || !code) return reply.code(400).send({ error: 'Missing fields' });
-
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            // Lock the code row to prevent race conditions
-            const codeRes = await client.query(
-                'SELECT code, minutes, used FROM premium_codes WHERE code = $1 FOR UPDATE',
-                [code.trim()]
-            );
-            if (codeRes.rows.length === 0) {
-                await client.query('ROLLBACK');
-                return reply.code(404).send({ error: 'Invalid code' });
-            }
-            if (codeRes.rows[0].used) {
-                await client.query('ROLLBACK');
-                return reply.code(409).send({ error: 'Code already used' });
-            }
-
-            const bonusMinutes = codeRes.rows[0].minutes;
-
-            // Mark code as used
-            await client.query(
-                'UPDATE premium_codes SET used = TRUE, used_by = $2, used_at = CURRENT_TIMESTAMP WHERE code = $1',
-                [code.trim(), userId]
-            );
-
-            // Add minutes to user's limit
-            await client.query(
-                'UPDATE users SET usage_limit_minutes = COALESCE(usage_limit_minutes, 30) + $2 WHERE user_id = $1',
-                [userId, bonusMinutes]
-            );
-
-            await client.query('COMMIT');
-
-            // Fetch updated values
-            const updated = await pool.query(
-                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
-                [userId]
-            );
-
-            return {
-                success: true,
-                added_minutes: bonusMinutes,
-                used_seconds: parseInt(updated.rows[0].used_seconds),
-                limit_minutes: parseInt(updated.rows[0].limit_minutes),
-            };
-        } catch (e) {
-            await client.query('ROLLBACK');
-            fastify.log.error('Redeem code error: ' + e.message);
-            return reply.code(500).send({ error: 'Database error' });
-        } finally {
-            client.release();
-        }
-    });
-
     // ==================
     // PURCHASE ENDPOINT
     // ==================
