@@ -46,3 +46,6 @@ app.*.map.json
 .env.json
 server/.env
 server/node_modules/
+
+# Local data dumps (transcript exports, etc.)
+full_transcripts.jsonl
