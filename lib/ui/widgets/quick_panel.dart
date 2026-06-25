@@ -177,6 +177,10 @@ class _QuickPanelState extends State<QuickPanel>
     String? placeholder,
   }) {
     final display = text.isNotEmpty ? text : (placeholder ?? '');
+    final showReplay = showSpeaker &&
+        !_isRecording &&
+        !_isProcessing &&
+        text.trim().isNotEmpty;
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
@@ -188,90 +192,92 @@ class _QuickPanelState extends State<QuickPanel>
               )
             : null,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      // Label + body sit in the normal layout flow and are IDENTICAL for both
+      // halves, so the body text starts at the same vertical offset in each.
+      // The speaker/replay controls are floated in a Stack overlay so they
+      // don't grow the header and push the translation text down — it stays
+      // aligned with the transcription text above.
+      child: Stack(
+        fit: StackFit.expand,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(
-              left: AppConstants.panelPaddingH,
-              top: 14,
-              bottom: 4,
-              right: 8,
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    label.toUpperCase(),
-                    style: const TextStyle(
-                      fontSize: AppConstants.labelFontSize,
-                      fontWeight: FontWeight.w400,
-                      color: AppConstants.textSecondary,
-                      letterSpacing: 0.5,
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(
+                  left: AppConstants.panelPaddingH,
+                  top: 20,
+                  bottom: 4,
+                  right: 8,
+                ),
+                child: Text(
+                  label.toUpperCase(),
+                  style: const TextStyle(
+                    fontSize: AppConstants.labelFontSize,
+                    fontWeight: FontWeight.w400,
+                    color: AppConstants.textSecondary,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: SelectionArea(
+                  child: SingleChildScrollView(
+                    controller: controller,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppConstants.panelPaddingH,
+                      vertical: 8,
                     ),
-                  ),
-                ),
-                const Spacer(),
-                if (showSpeaker)
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      TtsControlButton(
-                        enabled: widget.speakerEnabled,
-                        onEnabledChanged: widget.onSpeakerChanged,
-                      ),
-                      // Replay: re-speak the current translation on demand
-                      // (works even when the speaker toggle is muted). Only
-                      // shown when there's a settled translation to replay.
-                      if (!_isRecording &&
-                          !_isProcessing &&
-                          text.trim().isNotEmpty)
-                        GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () {
-                            HapticFeedback.selectionClick();
-                            widget.onReplay();
-                          },
-                          child: const Padding(
-                            padding: EdgeInsets.all(4),
-                            child: Icon(
-                              Icons.replay,
-                              size: 20,
-                              color: AppConstants.textPrimary,
-                            ),
-                          ),
+                    child: Align(
+                      alignment: Alignment.topLeft,
+                      child: Text(
+                        display,
+                        style: const TextStyle(
+                          fontSize: AppConstants.quickFontSize,
+                          color: AppConstants.textPrimary,
+                          fontWeight: FontWeight.w500,
+                          height: 1.35,
                         ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: SelectionArea(
-              child: SingleChildScrollView(
-                controller: controller,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppConstants.panelPaddingH,
-                  vertical: 8,
-                ),
-                child: Align(
-                  alignment: Alignment.topLeft,
-                  child: Text(
-                    display,
-                    style: const TextStyle(
-                      fontSize: AppConstants.quickFontSize,
-                      color: AppConstants.textPrimary,
-                      fontWeight: FontWeight.w500,
-                      height: 1.35,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
+          if (showSpeaker)
+            Positioned(
+              top: 14,
+              right: 8,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Replay: re-speak the current translation on demand (works
+                  // even when the speaker toggle is muted). Only shown when
+                  // there's a settled translation to replay.
+                  if (showReplay)
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        widget.onReplay();
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.replay,
+                          size: 20,
+                          color: AppConstants.textPrimary,
+                        ),
+                      ),
+                    ),
+                  TtsControlButton(
+                    enabled: widget.speakerEnabled,
+                    onEnabledChanged: widget.onSpeakerChanged,
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );

@@ -557,10 +557,18 @@ class _ConversationPanelState extends State<ConversationPanel> {
   }) {
     const size = 64.0;
     final thisActive = widget.activeSpeaker == side;
+    final hintColor =
+        tealTheme ? Colors.white.withOpacity(0.85) : Colors.grey.shade600;
 
-    // This side just released and is awaiting the translation/TTS.
+    // Build the mic widget for the current state, plus the hint shown beneath
+    // it. The hint makes the press-and-hold (walkie-talkie) behaviour obvious,
+    // distinguishing it from the tap-to-toggle mic used in the other modes.
+    Widget mic;
+    String hint;
+
     if (_isProcessing && thisActive) {
-      return Container(
+      // This side just released and is awaiting the translation/TTS.
+      mic = Container(
         width: size,
         height: size,
         decoration: BoxDecoration(
@@ -578,78 +586,96 @@ class _ConversationPanelState extends State<ConversationPanel> {
           ),
         ),
       );
-    }
-
-    // Busy on the other side (or processing) — disable this mic.
-    if (_isRecording || _isProcessing) {
-      if (!thisActive) {
-        return Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: tealTheme
-                ? Colors.white.withOpacity(0.2)
-                : Colors.grey.shade300,
-          ),
-          child: Icon(
-            Icons.mic_off,
-            size: 28,
-            color: tealTheme
-                ? Colors.white.withOpacity(0.4)
-                : Colors.grey.shade500,
-          ),
-        );
-      }
-    }
-
-    final active = _isRecording && thisActive;
-    return Listener(
-      onPointerDown: (event) {
-        if (_activeMicPointer != null) return;
-        if (widget.recordingState != RecordingState.idle) return;
-        _activeMicPointer = event.pointer;
-        HapticFeedback.mediumImpact();
-        onStart();
-      },
-      onPointerUp: (event) {
-        if (event.pointer != _activeMicPointer) return;
-        _activeMicPointer = null;
-        onStop();
-      },
-      onPointerCancel: (event) {
-        if (event.pointer != _activeMicPointer) return;
-        _activeMicPointer = null;
-        onStop();
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        curve: Curves.easeInOut,
+      hint = 'Translating…';
+    } else if ((_isRecording || _isProcessing) && !thisActive) {
+      // Busy on the other side — disable this mic.
+      mic = Container(
         width: size,
         height: size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: active
-              ? Colors.red
-              : (tealTheme ? Colors.white : AppConstants.micButtonColor),
-          boxShadow: [
-            BoxShadow(
-              color: active
-                  ? Colors.red.withOpacity(0.3)
-                  : Colors.black.withOpacity(0.15),
-              blurRadius: 10,
-              offset: const Offset(0, 3),
-            ),
-          ],
+          color:
+              tealTheme ? Colors.white.withOpacity(0.2) : Colors.grey.shade300,
         ),
         child: Icon(
-          Icons.mic,
+          Icons.mic_off,
           size: 28,
-          color: active
-              ? Colors.white
-              : (tealTheme ? _ConvColors.topBg : Colors.white),
+          color:
+              tealTheme ? Colors.white.withOpacity(0.4) : Colors.grey.shade500,
         ),
-      ),
+      );
+      hint = '';
+    } else {
+      final active = _isRecording && thisActive;
+      mic = Listener(
+        onPointerDown: (event) {
+          if (_activeMicPointer != null) return;
+          if (widget.recordingState != RecordingState.idle) return;
+          _activeMicPointer = event.pointer;
+          HapticFeedback.mediumImpact();
+          onStart();
+        },
+        onPointerUp: (event) {
+          if (event.pointer != _activeMicPointer) return;
+          _activeMicPointer = null;
+          onStop();
+        },
+        onPointerCancel: (event) {
+          if (event.pointer != _activeMicPointer) return;
+          _activeMicPointer = null;
+          onStop();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeInOut,
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: active
+                ? Colors.red
+                : (tealTheme ? Colors.white : AppConstants.micButtonColor),
+            boxShadow: [
+              BoxShadow(
+                color: active
+                    ? Colors.red.withOpacity(0.3)
+                    : Colors.black.withOpacity(0.15),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Icon(
+            Icons.mic,
+            size: 28,
+            color: active
+                ? Colors.white
+                : (tealTheme ? _ConvColors.topBg : Colors.white),
+          ),
+        ),
+      );
+      hint = active ? 'Listening…' : 'Hold to talk';
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        mic,
+        const SizedBox(height: 6),
+        // Fixed-height slot so the mic doesn't shift as the hint text changes.
+        SizedBox(
+          height: 15,
+          child: Text(
+            hint,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: hintColor,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
