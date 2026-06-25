@@ -30,11 +30,12 @@ class QuickPanel extends StatefulWidget {
   final ValueChanged<TargetLanguage> onTargetLanguageChanged;
 
   /// Whether the languages are currently in the swapped ("reply") state. Drives
-  /// the highlight on the swap button so the user can tell a swap is active.
+  /// the highlight on the language-row arrow so the user can tell a swap is active.
   final bool swapActive;
 
   /// Toggle the target language to the other side of the conversation (and back
-  /// again on a second press). Implemented by the swap handler in MainScreen.
+  /// again on a second press). Fired by tapping the language-row arrow;
+  /// implemented by the swap handler in MainScreen.
   final VoidCallback onSwap;
 
   const QuickPanel({
@@ -294,12 +295,37 @@ class _QuickPanelState extends State<QuickPanel>
           enabled: !_isRecording && !_isProcessing,
           onChanged: widget.onSourceChanged,
         ),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 12),
-          child: Icon(
-            Icons.arrow_forward,
-            size: 27,
-            color: AppConstants.textPrimary,
+        // Tappable swap arrow: flips source ↔ target (or, with an "Any" source
+        // mid-session, points the target at the last-detected language so the
+        // listener can reply). A second press reverts. Disabled while recording.
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: (_isRecording || _isProcessing)
+              ? null
+              : () {
+                  HapticFeedback.selectionClick();
+                  widget.onSwap();
+                },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 40,
+              height: 40,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.swapActive
+                    ? AppConstants.micButtonColor
+                    : Colors.transparent,
+              ),
+              child: Icon(
+                widget.swapActive ? Icons.swap_horiz : Icons.arrow_forward,
+                size: 27,
+                color:
+                    widget.swapActive ? Colors.white : AppConstants.textPrimary,
+              ),
+            ),
           ),
         ),
         PopupMenuButton<TargetLanguage>(
@@ -345,11 +371,10 @@ class _QuickPanelState extends State<QuickPanel>
     final hasText = widget.transcript.trim().isNotEmpty ||
         widget.translation.trim().isNotEmpty;
     // The clear button only appears when there's something to clear and we're
-    // not mid-recording. The swap button sits on the right and is hidden while
-    // recording (languages can't change mid-utterance). Both reserve a fixed
-    // slot so the mic stays centered regardless of visibility.
+    // not mid-recording. Swapping now lives on the language-row arrow, so the
+    // right slot is just an empty placeholder matching the clear button's slot
+    // to keep the mic centered.
     final showClear = !_isRecording && !_isProcessing && hasText;
-    final showSwap = !_isRecording && !_isProcessing;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -357,54 +382,11 @@ class _QuickPanelState extends State<QuickPanel>
         const SizedBox(width: 40),
         _buildMicButton(),
         const SizedBox(width: 40),
-        _buildSwapButton(showSwap),
+        const SizedBox(
+          width: AppConstants.sideButtonSize,
+          height: AppConstants.sideButtonSize,
+        ),
       ],
-    );
-  }
-
-  /// Swap / "reload" button: flips the target language to the other side of the
-  /// conversation so the listener can reply, and back again on a second press.
-  Widget _buildSwapButton(bool show) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 150),
-      child: show
-          ? GestureDetector(
-              key: const ValueKey('quick-swap'),
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                HapticFeedback.selectionClick();
-                widget.onSwap();
-              },
-              child: Container(
-                width: AppConstants.sideButtonSize,
-                height: AppConstants.sideButtonSize,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: widget.swapActive
-                      ? AppConstants.micButtonColor
-                      : AppConstants.panelColor,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.12),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Icon(
-                  Icons.swap_horiz,
-                  color: widget.swapActive
-                      ? Colors.white
-                      : AppConstants.textPrimary,
-                  size: AppConstants.sideIconSize,
-                ),
-              ),
-            )
-          : const SizedBox(
-              key: ValueKey('quick-swap-empty'),
-              width: AppConstants.sideButtonSize,
-              height: AppConstants.sideButtonSize,
-            ),
     );
   }
 
