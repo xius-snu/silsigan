@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -98,11 +99,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
   bool _quickHolding = false;
   // True while the async start handler is still connecting.
   bool _quickStarting = false;
-  // Quick Mode language swap ("reload") button state. When swapped, the swap
-  // button restores these snapshots; otherwise it computes a fresh swap.
-  bool _quickSwapped = false;
-  TargetLanguage? _quickPreSwapSource;
-  TargetLanguage _quickPreSwapTarget = TargetLanguage.vietnamese;
+  // Language swap state, shared by Quick Mode's swap button and the tappable
+  // arrow in line-by-line / split modes. When swapped, a second press restores
+  // these snapshots; otherwise it computes a fresh swap. Source/target live in
+  // global providers, so the swap is a single source of truth across modes.
+  bool _langSwapped = false;
+  TargetLanguage? _preSwapSource;
+  TargetLanguage _preSwapTarget = TargetLanguage.vietnamese;
   // Most-recently-used target languages (most recent first) — fallback for the
   // swap button when the reply language can't be inferred from the transcript.
   List<TargetLanguage> _recentTargets = [];
@@ -2177,7 +2180,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(quickTranslationProvider.notifier).state = '';
     ref.read(detectedLanguageProvider.notifier).state = null;
     // The current languages become the new baseline for the swap toggle.
-    if (_quickSwapped) setState(() => _quickSwapped = false);
+    if (_langSwapped) setState(() => _langSwapped = false);
     _ttsService.flush();
   }
 
@@ -2226,23 +2229,35 @@ class _MainScreenState extends ConsumerState<MainScreen>
     saveRecentTargets(_recentTargets);
   }
 
-  /// Quick Mode swap ("reload") button. Toggles the target language to the
-  /// other side of the conversation so the listener can reply, and restores the
-  /// original on a second press. Behavior depends on the current setup:
+  /// Whether the current mode has any transcribed content yet — used by the
+  /// language swap to decide whether it can infer the reply language from what
+  /// was just spoken. Quick Mode keeps a single transcript string; line-by-line
+  /// and split keep a history list.
+  bool get _hasTranscribedContent {
+    if (ref.read(displayModeProvider) == DisplayMode.quick) {
+      return ref.read(quickTranscriptProvider).trim().isNotEmpty;
+    }
+    return ref.read(koreanHistoryProvider).any((l) => l.trim().isNotEmpty);
+  }
+
+  /// Language swap. Used by Quick Mode's swap button and the tappable arrow in
+  /// line-by-line / split modes. Toggles the target language to the other side
+  /// of the conversation so the listener can reply, and restores the original on
+  /// a second press. Behavior depends on the current setup:
   ///   • Source pinned (2-way): swap source ↔ target.
   ///   • Source "Any" + transcript: target → the detected transcript language.
   ///   • Source "Any" + empty (or undetectable): target → most-recently-used.
-  void _swapQuickLanguages() {
+  void _swapLanguages() {
     final currentSource = ref.read(sourceLanguageProvider);
     final currentTarget = ref.read(targetLanguageProvider);
 
     // Second press: restore the snapshot taken when we swapped.
-    if (_quickSwapped) {
-      ref.read(sourceLanguageProvider.notifier).state = _quickPreSwapSource;
-      ref.read(targetLanguageProvider.notifier).state = _quickPreSwapTarget;
-      saveSourceLanguage(_quickPreSwapSource);
-      saveTargetLanguage(_quickPreSwapTarget);
-      setState(() => _quickSwapped = false);
+    if (_langSwapped) {
+      ref.read(sourceLanguageProvider.notifier).state = _preSwapSource;
+      ref.read(targetLanguageProvider.notifier).state = _preSwapTarget;
+      saveSourceLanguage(_preSwapSource);
+      saveTargetLanguage(_preSwapTarget);
+      setState(() => _langSwapped = false);
       return;
     }
 
@@ -2257,7 +2272,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // gets translated back. Fall back to a recent language when the transcript
       // is empty, the language is undetectable, or it equals the current target.
       newSource = null;
-      final hasTranscript = ref.read(quickTranscriptProvider).trim().isNotEmpty;
+      final hasTranscript = _hasTranscribedContent;
       TargetLanguage? candidate;
       if (hasTranscript) {
         candidate = _targetForCode(ref.read(detectedLanguageProvider));
@@ -2271,14 +2286,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Nothing would change — leave the toggle off so a press isn't a no-op.
     if (newSource == currentSource && newTarget == currentTarget) return;
 
-    _quickPreSwapSource = currentSource;
-    _quickPreSwapTarget = currentTarget;
+    _preSwapSource = currentSource;
+    _preSwapTarget = currentTarget;
     ref.read(sourceLanguageProvider.notifier).state = newSource;
     ref.read(targetLanguageProvider.notifier).state = newTarget;
     saveSourceLanguage(newSource);
     saveTargetLanguage(newTarget);
     _recordRecentTarget(newTarget);
-    setState(() => _quickSwapped = true);
+    setState(() => _langSwapped = true);
   }
 
   void _resetState() {
@@ -2293,6 +2308,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(detectedLanguageProvider.notifier).state = null;
     _wordTimestampsPerLine.clear();
     _sonioxService.contextText = null;
+    // Fresh session: current languages become the new swap baseline.
+    _langSwapped = false;
     _ttsService.stop();
     // Conversation state
     ref.read(conversationMessagesProvider.notifier).state = [];
@@ -2608,7 +2625,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   onSourceChanged: (lang) {
                     ref.read(sourceLanguageProvider.notifier).state = lang;
                     saveSourceLanguage(lang);
-                    if (_quickSwapped) setState(() => _quickSwapped = false);
+                    if (_langSwapped) setState(() => _langSwapped = false);
                   },
                   speakerEnabled: quickTtsEnabled,
                   onSpeakerChanged: (v) {
@@ -2622,10 +2639,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     ref.read(targetLanguageProvider.notifier).state = lang;
                     saveTargetLanguage(lang);
                     _recordRecentTarget(lang);
-                    if (_quickSwapped) setState(() => _quickSwapped = false);
+                    if (_langSwapped) setState(() => _langSwapped = false);
                   },
-                  swapActive: _quickSwapped,
-                  onSwap: _swapQuickLanguages,
+                  swapActive: _langSwapped,
+                  onSwap: _swapLanguages,
                 ),
               ),
             ] else if (displayMode == DisplayMode.conversation) ...[
@@ -2741,14 +2758,48 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               ref.read(sourceLanguageProvider.notifier).state =
                                   lang;
                               saveSourceLanguage(lang);
+                              if (_langSwapped) {
+                                setState(() => _langSwapped = false);
+                              }
                             },
                           ),
-                          const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 12),
-                            child: Icon(
-                              Icons.arrow_forward,
-                              size: 27,
-                              color: AppConstants.textPrimary,
+                          // Tappable swap arrow: flips source ↔ target (or, with
+                          // an "Any" source mid-session, points the target at the
+                          // last-detected language so the listener can reply).
+                          // A second press reverts. Disabled while recording —
+                          // Soniox is configured with the target at connect time.
+                          GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: isRecordingOrProcessing
+                                ? null
+                                : () {
+                                    HapticFeedback.selectionClick();
+                                    _swapLanguages();
+                                  },
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 6),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 150),
+                                width: 40,
+                                height: 40,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: _langSwapped
+                                      ? AppConstants.micButtonColor
+                                      : Colors.transparent,
+                                ),
+                                child: Icon(
+                                  _langSwapped
+                                      ? Icons.swap_horiz
+                                      : Icons.arrow_forward,
+                                  size: 27,
+                                  color: _langSwapped
+                                      ? Colors.white
+                                      : AppConstants.textPrimary,
+                                ),
+                              ),
                             ),
                           ),
                           PopupMenuButton<TargetLanguage>(
@@ -2757,6 +2808,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               ref.read(targetLanguageProvider.notifier).state =
                                   lang;
                               saveTargetLanguage(lang);
+                              _recordRecentTarget(lang);
+                              if (_langSwapped) {
+                                setState(() => _langSwapped = false);
+                              }
                             },
                             offset: const Offset(0, -160),
                             itemBuilder: (context) => TargetLanguage.values
