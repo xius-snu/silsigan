@@ -10,7 +10,6 @@ enum TargetLanguage {
   japanese('Japanese', 'ja'),
   thai('Thai', 'th'),
   malay('Malay', 'ms'),
-  uzbek('Uzbek', 'uz'),
   russian('Russian', 'ru'),
   indonesian('Indonesian', 'id');
 
