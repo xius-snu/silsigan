@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick) and eight target languages.
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick) and eleven target languages.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -135,7 +135,7 @@ server/
 
 ## Target Languages
 
-Eight languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese, Korean, Japanese, Thai, Malay**. Each has a `displayName` and ISO `code`. TTS support matches the locale map in `tts_service.dart`.
+Eleven languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese, Korean, Japanese, Thai, Malay, Uzbek, Russian, Indonesian**. Each has a `displayName` and ISO `code`. TTS support matches the locale map in `tts_service.dart`.
 
 **Source language** is also selectable (left side, `sourceLanguageProvider`; `null` = **Any**/auto-detect). A pinned source is sent to Soniox as a `language_hints` entry (`SourceLanguageSelector`), enabling e.g. English → Vietnamese. Applies to line-by-line, split, and quick modes; conversation has its own two-language slots. While recording with "Any", the box shows the detected language.
 

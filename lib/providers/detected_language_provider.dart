@@ -51,6 +51,7 @@ const languageDisplayNames = <String, String>{
   'gu': 'Gujarati',
   'mr': 'Marathi',
   'pa': 'Punjabi',
+  'uz': 'Uzbek',
 };
 
 String languageDisplayName(String code) {

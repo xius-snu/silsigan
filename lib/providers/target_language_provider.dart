@@ -9,7 +9,10 @@ enum TargetLanguage {
   korean('Korean', 'ko'),
   japanese('Japanese', 'ja'),
   thai('Thai', 'th'),
-  malay('Malay', 'ms');
+  malay('Malay', 'ms'),
+  uzbek('Uzbek', 'uz'),
+  russian('Russian', 'ru'),
+  indonesian('Indonesian', 'id');
 
   const TargetLanguage(this.displayName, this.code);
   final String displayName;
