@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
+import '../../utils/text_direction_utils.dart';
 import 'tts_control_button.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -242,6 +243,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                                 _draftInline &&
                                 (widget.draft.isNotEmpty || widget.showEllipsis)
                             ? Text.rich(
+                                textDirection: directionOf(widget.history[i]),
                                 TextSpan(
                                   children: [
                                     TextSpan(
@@ -268,6 +270,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                               )
                             : Text(
                                 widget.history[i],
+                                textDirection: directionOf(widget.history[i]),
                                 style: TextStyle(
                                   fontSize: AppConstants.contentFontSize,
                                   color: AppConstants.textPrimary
@@ -283,6 +286,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
                         _cleanLineStart(_buildDraftText()),
+                        textDirection: directionOf(_buildDraftText()),
                         style: const TextStyle(
                           fontSize: AppConstants.contentFontSize,
                           color: AppConstants.textPrimary,

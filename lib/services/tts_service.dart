@@ -21,6 +21,8 @@ class TtsService {
     'ms': 'ms-MY',
     'ru': 'ru-RU',
     'id': 'id-ID',
+    'ar': 'ar-SA',
+    'fa': 'fa-IR',
   };
 
   final FlutterTts _tts = FlutterTts();

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
 import '../../utils/constants.dart';
+import '../../utils/text_direction_utils.dart';
 import 'tts_control_button.dart';
 import 'source_language_selector.dart';
 
@@ -178,6 +179,7 @@ class _QuickPanelState extends State<QuickPanel>
     String? placeholder,
   }) {
     final display = text.isNotEmpty ? text : (placeholder ?? '');
+    final isRtl = isRtlText(display);
     final showReplay = showSpeaker &&
         !_isRecording &&
         !_isProcessing &&
@@ -230,9 +232,11 @@ class _QuickPanelState extends State<QuickPanel>
                       vertical: 8,
                     ),
                     child: Align(
-                      alignment: Alignment.topLeft,
+                      alignment: isRtl ? Alignment.topRight : Alignment.topLeft,
                       child: Text(
                         display,
+                        textDirection:
+                            isRtl ? TextDirection.rtl : TextDirection.ltr,
                         style: const TextStyle(
                           fontSize: AppConstants.quickFontSize,
                           color: AppConstants.textPrimary,

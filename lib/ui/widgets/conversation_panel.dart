@@ -6,6 +6,7 @@ import '../../providers/conversation_provider.dart';
 import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
 import '../../utils/constants.dart';
+import '../../utils/text_direction_utils.dart';
 
 /// Color scheme for the two halves
 class _ConvColors {
@@ -469,6 +470,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
         ),
         child: Text(
           text,
+          textDirection: directionOf(text),
           style: TextStyle(
             fontSize: AppConstants.contentFontSize,
             color: textColor,
@@ -534,6 +536,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
         ),
         child: Text(
           text,
+          textDirection: directionOf(text),
           style: TextStyle(
             fontSize: AppConstants.contentFontSize,
             color: textColor,

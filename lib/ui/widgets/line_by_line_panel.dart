@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../services/tts_service.dart';
 import '../../utils/constants.dart';
+import '../../utils/text_direction_utils.dart';
 import 'tts_control_button.dart';
 
 class LineByLinePanel extends StatefulWidget {
@@ -324,7 +325,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         color: const Color(0xFFF0F0F0),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(text, style: baseStyle),
+      child: Text(text, style: baseStyle, textDirection: directionOf(text)),
     );
   }
 
@@ -365,11 +366,15 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
+          // RTL lines (e.g. Arabic) lay the row out right-to-left, so the
+          // text right-aligns and the speaker icon moves to the left edge.
+          textDirection: directionOf(text),
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
               child: Text(
                 text,
+                textDirection: directionOf(text),
                 style: TextStyle(
                   fontSize: AppConstants.contentFontSize,
                   color: isDraft
@@ -391,7 +396,8 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                   return GestureDetector(
                     onTap: () => widget.onSpeakLine?.call(text),
                     child: Padding(
-                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      padding:
+                          const EdgeInsetsDirectional.only(start: 8, top: 2),
                       child: _buildLineIcon(
                           isThisLine ? state.status : TtsLineStatus.idle),
                     ),

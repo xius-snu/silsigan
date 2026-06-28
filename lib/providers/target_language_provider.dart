@@ -11,7 +11,9 @@ enum TargetLanguage {
   thai('Thai', 'th'),
   malay('Malay', 'ms'),
   russian('Russian', 'ru'),
-  indonesian('Indonesian', 'id');
+  indonesian('Indonesian', 'id'),
+  arabic('Arabic', 'ar'),
+  persian('Persian', 'fa');
 
   const TargetLanguage(this.displayName, this.code);
   final String displayName;

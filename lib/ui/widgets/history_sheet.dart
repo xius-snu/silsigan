@@ -14,6 +14,7 @@ import '../../services/database_service.dart';
 import '../../services/sync_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
+import '../../utils/text_direction_utils.dart';
 import 'session_card.dart';
 
 class HistorySheet extends ConsumerStatefulWidget {
@@ -815,6 +816,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Text.rich(
                   _buildTappableSpans(lineIdx, line, timestamps[lineIdx]),
+                  textDirection: directionOf(line),
                 ),
               );
             }
@@ -823,6 +825,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 line,
+                textDirection: directionOf(line),
                 style: const TextStyle(
                   fontSize: AppConstants.contentFontSize,
                   color: AppConstants.textPrimary,
