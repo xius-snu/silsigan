@@ -1,6 +1,6 @@
 # Privacy Policy for Silsigan
 
-**Last updated: March 10, 2026**
+**Last updated: July 1, 2026**
 
 Silsigan ("the App") is a real-time speech translation app. This policy describes what data the App collects, how it is used, and your choices.
 
@@ -20,10 +20,20 @@ The App records when you last opened it and when you last started a recording. T
 - **Audio recordings** are saved locally on your device and are never uploaded to our server.
 - **Local database** of sessions is stored on-device using SQLite.
 
-## Third-Party Services
+## Third-Party AI Processing
 
-### Soniox
-The App streams audio to Soniox for real-time transcription and translation. Audio is processed in real time and is not stored by Soniox after processing. See [Soniox's privacy policy](https://soniox.com/privacy) for details.
+### Soniox (speech-to-text and translation)
+To provide real-time translation, the App shares your personal data with a third-party AI service:
+
+- **What is shared:** the voice audio captured by your microphone while you are recording, and the text transcribed from that audio.
+- **Who it is shared with:** [Soniox, Inc.](https://soniox.com), which operates a speech-to-text and machine-translation service. Audio is routed through our own secure server, which forwards it to Soniox.
+- **How it is used:** solely to transcribe your speech and translate it in real time. The audio is processed in real time and is **not stored by Soniox after processing**, and it is not used to train models on your data.
+- **When it is shared:** only after you grant permission on first launch and only while you are actively recording. No audio is sent at any other time.
+
+We confirm that Soniox provides protections for this data comparable to those described in this policy. See [Soniox's privacy policy](https://soniox.com/privacy) for details.
+
+### Your consent
+On first launch the App shows a disclosure screen explaining what data is sent and to whom, and asks for your agreement before any audio is shared. You can withdraw consent at any time by discontinuing use of the App and deleting it.
 
 ## Data We Do NOT Collect
 
