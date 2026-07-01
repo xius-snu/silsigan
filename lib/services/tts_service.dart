@@ -26,7 +26,11 @@ class TtsService {
   };
 
   final FlutterTts _tts = FlutterTts();
-  final Queue<String> _queue = Queue();
+  // Each item pins the language chosen when it was enqueued — the shared
+  // _languageCode can change (e.g. Conversation mode alternates sides) before a
+  // queued item is dequeued, so reading it at speak-time would voice an
+  // utterance in the wrong language.
+  final Queue<({String text, String lang})> _queue = Queue();
 
   String _languageCode = 'vi';
   double _rateMultiplier = 1.0;
@@ -124,7 +128,7 @@ class TtsService {
 
   void speak(String text) {
     if (!_enabled || text.trim().isEmpty) return;
-    _queue.add(text.trim());
+    _queue.add((text: text.trim(), lang: _languageCode));
     if (_drainCompleter == null || _drainCompleter!.isCompleted) {
       _drainCompleter = Completer<void>();
     }
@@ -142,9 +146,9 @@ class TtsService {
     if (_isProcessing || _queue.isEmpty) return;
     _isProcessing = true;
     while (_queue.isNotEmpty && _enabled) {
-      final text = _queue.removeFirst();
+      final item = _queue.removeFirst();
       try {
-        await _ttsSpeak(text);
+        await _ttsSpeak(item.text, item.lang);
       } catch (e) {
         onError?.call('TTS: $e');
       }
@@ -155,9 +159,9 @@ class TtsService {
     }
   }
 
-  Future<void> _ttsSpeak(String text) async {
+  Future<void> _ttsSpeak(String text, String langCode) async {
     await _ensureInitialized();
-    final lang = _langMap[_languageCode] ?? 'en-US';
+    final lang = _langMap[langCode] ?? 'en-US';
     try {
       await _tts.setLanguage(lang);
     } catch (_) {
@@ -198,7 +202,7 @@ class TtsService {
     await _stopPlayback();
     lineState.value = (text: trimmed, status: TtsLineStatus.loading);
     try {
-      await _ttsSpeak(trimmed);
+      await _ttsSpeak(trimmed, _languageCode);
     } catch (e) {
       onError?.call('TTS: $e');
     }

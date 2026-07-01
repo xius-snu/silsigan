@@ -7,6 +7,7 @@ import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'listening_indicator.dart';
 
 /// Color scheme for the two halves
 class _ConvColors {
@@ -34,12 +35,16 @@ class ConversationPanel extends StatefulWidget {
   final String draftTranslated;
   final ConversationSpeaker? activeSpeaker;
   final RecordingState recordingState;
+
+  /// True while the session is connecting (mic tapped, audio not yet streaming).
+  final bool connecting;
   final TargetLanguage myLanguage;
   final TargetLanguage theirLanguage;
-  final VoidCallback onBottomMicStart;
-  final VoidCallback onBottomMicStop;
-  final VoidCallback onTopMicStart;
-  final VoidCallback onTopMicStop;
+
+  /// Starts / stops the shared two-way listening session. Either side's button
+  /// toggles it — once on, both people speak in turn and each utterance is
+  /// auto-routed by detected language.
+  final VoidCallback onToggleListening;
   final VoidCallback onSwapLanguages;
   final VoidCallback onClear;
   final ValueChanged<TargetLanguage> onMyLanguageChanged;
@@ -52,12 +57,10 @@ class ConversationPanel extends StatefulWidget {
     required this.draftTranslated,
     required this.activeSpeaker,
     required this.recordingState,
+    required this.connecting,
     required this.myLanguage,
     required this.theirLanguage,
-    required this.onBottomMicStart,
-    required this.onBottomMicStop,
-    required this.onTopMicStart,
-    required this.onTopMicStop,
+    required this.onToggleListening,
     required this.onSwapLanguages,
     required this.onClear,
     required this.onMyLanguageChanged,
@@ -77,9 +80,6 @@ class _ConversationPanelState extends State<ConversationPanel> {
   Timer? _topResumeTimer;
   Timer? _ellipsisTimer;
   int _ellipsisCount = 3;
-  // Tracks the single in-flight press-and-hold pointer (only one side can
-  // record at a time).
-  int? _activeMicPointer;
 
   @override
   void initState() {
@@ -358,12 +358,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           ),
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
-            child: _buildMicButton(
-              side: ConversationSpeaker.top,
-              onStart: widget.onTopMicStart,
-              onStop: widget.onTopMicStop,
-              tealTheme: true,
-            ),
+            child: _buildMicButton(tealTheme: true),
           ),
         ],
       ),
@@ -385,12 +380,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
           ),
           Padding(
             padding: const EdgeInsets.only(bottom: 16, top: 8),
-            child: _buildMicButton(
-              side: ConversationSpeaker.bottom,
-              onStart: widget.onBottomMicStart,
-              onStop: widget.onBottomMicStop,
-              tealTheme: false,
-            ),
+            child: _buildMicButton(tealTheme: false),
           ),
         ],
       ),
@@ -403,6 +393,20 @@ class _ConversationPanelState extends State<ConversationPanel> {
     ConversationSpeaker perspective,
     ScrollController scrollController,
   ) {
+    // Warm-up window: session is live but nobody has been detected speaking
+    // yet — show a pulse (per-side colour) so each half isn't mistaken for a
+    // freeze while the stream warms up.
+    if (_isRecording &&
+        widget.messages.isEmpty &&
+        widget.activeSpeaker == null) {
+      final isTop = perspective == ConversationSpeaker.top;
+      return Center(
+        child: ListeningIndicator(
+          color: isTop ? Colors.white70 : AppConstants.textSecondary,
+        ),
+      );
+    }
+
     // Build items in normal order, then reverse for the reversed ListView
     final items = <Widget>[
       for (final msg in widget.messages) _buildMessageBubble(msg, perspective),
@@ -549,28 +553,20 @@ class _ConversationPanelState extends State<ConversationPanel> {
 
   // ── Mic Button ──
 
-  /// Press-and-hold mic for one side. Holding starts recording as [side];
-  /// releasing stops input (the parent then speaks the translation aloud).
-  /// Only one side can record at a time — the other mic is disabled while busy.
-  Widget _buildMicButton({
-    required ConversationSpeaker side,
-    required VoidCallback onStart,
-    required VoidCallback onStop,
-    required bool tealTheme,
-  }) {
+  /// Single tap-to-toggle control for the shared two-way session. Both sides
+  /// render one; tapping either starts or stops listening. While listening,
+  /// both people just speak in turn — each utterance is auto-routed to the
+  /// correct box by its detected language (no button holding).
+  Widget _buildMicButton({required bool tealTheme}) {
     const size = 64.0;
-    final thisActive = widget.activeSpeaker == side;
     final hintColor =
         tealTheme ? Colors.white.withOpacity(0.85) : Colors.grey.shade600;
 
-    // Build the mic widget for the current state, plus the hint shown beneath
-    // it. The hint makes the press-and-hold (walkie-talkie) behaviour obvious,
-    // distinguishing it from the tap-to-toggle mic used in the other modes.
     Widget mic;
     String hint;
 
-    if (_isProcessing && thisActive) {
-      // This side just released and is awaiting the translation/TTS.
+    if (_isProcessing) {
+      // Session is finishing — flushing the last translation/TTS.
       mic = Container(
         width: size,
         height: size,
@@ -589,44 +585,42 @@ class _ConversationPanelState extends State<ConversationPanel> {
           ),
         ),
       );
-      hint = 'Translating…';
-    } else if ((_isRecording || _isProcessing) && !thisActive) {
-      // Busy on the other side — disable this mic.
-      mic = Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color:
-              tealTheme ? Colors.white.withOpacity(0.2) : Colors.grey.shade300,
-        ),
-        child: Icon(
-          Icons.mic_off,
-          size: 28,
-          color:
-              tealTheme ? Colors.white.withOpacity(0.4) : Colors.grey.shade500,
+      hint = 'Finishing…';
+    } else if (widget.connecting) {
+      // Connecting — keep it tappable so the tap can be cancelled before the
+      // session goes live.
+      mic = GestureDetector(
+        onTap: () {
+          HapticFeedback.mediumImpact();
+          widget.onToggleListening();
+        },
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: tealTheme ? Colors.white : AppConstants.micButtonColor,
+          ),
+          child: Center(
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                valueColor: AlwaysStoppedAnimation(
+                    tealTheme ? _ConvColors.topBg : Colors.white),
+              ),
+            ),
+          ),
         ),
       );
-      hint = '';
+      hint = 'Connecting…';
     } else {
-      final active = _isRecording && thisActive;
-      mic = Listener(
-        onPointerDown: (event) {
-          if (_activeMicPointer != null) return;
-          if (widget.recordingState != RecordingState.idle) return;
-          _activeMicPointer = event.pointer;
+      final listening = _isRecording;
+      mic = GestureDetector(
+        onTap: () {
           HapticFeedback.mediumImpact();
-          onStart();
-        },
-        onPointerUp: (event) {
-          if (event.pointer != _activeMicPointer) return;
-          _activeMicPointer = null;
-          onStop();
-        },
-        onPointerCancel: (event) {
-          if (event.pointer != _activeMicPointer) return;
-          _activeMicPointer = null;
-          onStop();
+          widget.onToggleListening();
         },
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
@@ -635,12 +629,12 @@ class _ConversationPanelState extends State<ConversationPanel> {
           height: size,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: active
+            color: listening
                 ? Colors.red
                 : (tealTheme ? Colors.white : AppConstants.micButtonColor),
             boxShadow: [
               BoxShadow(
-                color: active
+                color: listening
                     ? Colors.red.withOpacity(0.3)
                     : Colors.black.withOpacity(0.15),
                 blurRadius: 10,
@@ -649,15 +643,15 @@ class _ConversationPanelState extends State<ConversationPanel> {
             ],
           ),
           child: Icon(
-            Icons.mic,
+            listening ? Icons.stop : Icons.mic,
             size: 28,
-            color: active
+            color: listening
                 ? Colors.white
                 : (tealTheme ? _ConvColors.topBg : Colors.white),
           ),
         ),
       );
-      hint = active ? 'Listening…' : 'Hold to talk';
+      hint = listening ? 'Listening — tap to stop' : 'Tap to start';
     }
 
     return Column(

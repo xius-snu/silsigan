@@ -16,6 +16,11 @@ class TtsControlButton extends ConsumerStatefulWidget {
   final Color? activeColor;
   final Color? inactiveColor;
 
+  /// Optional async gate run when the user taps to ENABLE. If it resolves
+  /// false, the toggle is cancelled (stays off, no speed popup). Used by
+  /// Conversation mode to prompt for headphones before turning the speaker on.
+  final Future<bool> Function()? confirmEnable;
+
   const TtsControlButton({
     super.key,
     required this.enabled,
@@ -23,6 +28,7 @@ class TtsControlButton extends ConsumerStatefulWidget {
     this.iconSize = 20,
     this.activeColor,
     this.inactiveColor,
+    this.confirmEnable,
   });
 
   @override
@@ -42,8 +48,7 @@ class _TtsControlButtonState extends ConsumerState<TtsControlButton> {
   void _showPopup() {
     if (_overlay != null) return;
 
-    final renderBox =
-        _iconKey.currentContext?.findRenderObject() as RenderBox?;
+    final renderBox = _iconKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
     final iconPos = renderBox.localToGlobal(Offset.zero);
     final iconSize = renderBox.size;
@@ -180,8 +185,13 @@ class _TtsControlButtonState extends ConsumerState<TtsControlButton> {
     _overlay = null;
   }
 
-  void _onTap() {
+  Future<void> _onTap() async {
     final wasEnabled = widget.enabled;
+    if (!wasEnabled && widget.confirmEnable != null) {
+      // Gate the enable (e.g. Conversation's headphone prompt). Bail on decline.
+      final ok = await widget.confirmEnable!();
+      if (!ok || !mounted) return;
+    }
     widget.onEnabledChanged(!wasEnabled);
     if (!wasEnabled) {
       // Just turned on — show the speed popup.

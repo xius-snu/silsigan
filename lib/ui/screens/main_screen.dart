@@ -110,12 +110,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // swap button when the reply language can't be inferred from the transcript.
   List<TargetLanguage> _recentTargets = [];
 
-  // ── Conversation Mode (press-and-hold) state ───────────────────────
-  // Translation accumulated during the current turn, spoken aloud on release.
-  String _convTranslationConfirmed = '';
-  // True between mic press and release; true while the start handler connects.
-  bool _convHolding = false;
+  // ── Conversation Mode (two-way toggle) state ───────────────────────
+  // Desired session state: set true on start-tap, false on stop-tap. Lets a
+  // stop-tap that lands mid-connect cancel the session once it finishes.
+  bool _convWantActive = false;
+  // True while the async start handler is still connecting.
   bool _convStarting = false;
+  // A translation that completed before its originating utterance's message
+  // existed (can happen on the final flush at disconnect, where translation is
+  // emitted before transcription). Keyed by speaker; drained when the matching
+  // original lands so the pairing survives the ordering.
+  final Map<ConversationSpeaker, String> _convPendingTranslation = {};
 
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
@@ -395,7 +400,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     if (recordingState == RecordingState.recording) {
       final displayMode = ref.read(displayModeProvider);
       if (displayMode == DisplayMode.conversation) {
-        await _stopConversationRecording();
+        await _stopConversationSession();
       } else if (displayMode == DisplayMode.quick) {
         await _stopQuickRecording();
       } else {
@@ -1232,7 +1237,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
       _lastErrorShown = now;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transcription error: $error')),
+        SnackBar(content: Text(error)),
       );
     };
 
@@ -1752,17 +1757,26 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   void _setupConversationCallbacks() {
     _sonioxService.onTranscriptionDraft = (draft) {
+      // Route the in-progress transcript to whichever side is speaking now,
+      // detected live from the source-token language.
+      _setConversationSpeaker(
+          _speakerForLanguage(_sonioxService.currentSourceLanguage));
       ref.read(conversationDraftOriginalProvider.notifier).state = draft;
     };
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
       if (transcript.isNotEmpty) {
-        // Speaker is whichever mic is being held (set on press).
-        final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
-            ConversationSpeaker.bottom;
+        final speaker =
+            _speakerForLanguage(_sonioxService.lastCompletedSourceLanguage) ??
+                ref.read(activeConversationSpeakerProvider) ??
+                ConversationSpeaker.bottom;
+        // A translation that landed before this original existed (final-flush
+        // ordering) was stashed by speaker — attach it now.
+        final pending = _convPendingTranslation.remove(speaker) ?? '';
         final msg = ConversationMessage(
-          speaker: currentSpeaker,
+          speaker: speaker,
           originalText: _cleanLineStart(transcript),
+          translatedText: pending,
         );
         ref.read(conversationMessagesProvider.notifier).update(
               (state) => [...state, msg],
@@ -1778,29 +1792,44 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sonioxService.onTranslationCompleted = (translation) {
       if (translation.isNotEmpty) {
         final clean = _cleanLineStart(translation);
-        // Accumulate for the spoken-on-release TTS.
-        _convTranslationConfirmed =
-            _quickJoin(_convTranslationConfirmed, clean);
-        final currentSpeaker = ref.read(activeConversationSpeakerProvider) ??
+        // The side that SPOKE this utterance — the translation names its own
+        // source language, so routing survives the other side already having
+        // started the next turn. Fall back to the live source language, then
+        // the active side.
+        final srcSpeaker = _speakerForLanguage(
+                _sonioxService.lastCompletedTranslationSourceLanguage) ??
+            _speakerForLanguage(_sonioxService.currentSourceLanguage) ??
+            ref.read(activeConversationSpeakerProvider) ??
             ConversationSpeaker.bottom;
+        bool filled = false;
         ref.read(conversationMessagesProvider.notifier).update((state) {
           final updated = List<ConversationMessage>.from(state);
-          for (int i = updated.length - 1; i >= 0; i--) {
-            if (updated[i].speaker == currentSpeaker &&
+          // Oldest-first: translations complete in the same order as their
+          // originals, so fill this speaker's oldest still-untranslated message.
+          // (Newest-first would swap consecutive same-speaker turns when their
+          // translations lag past the next endpoint.)
+          for (int i = 0; i < updated.length; i++) {
+            if (updated[i].speaker == srcSpeaker &&
                 updated[i].translatedText.isEmpty) {
               updated[i] = updated[i].copyWith(translatedText: clean);
+              filled = true;
               break;
             }
           }
           return updated;
         });
+        if (!filled) _convPendingTranslation[srcSpeaker] = clean;
+        // Voice it in the listener's (opposite side's) language.
+        _speakConversationTranslation(srcSpeaker, clean);
       }
       ref.read(conversationDraftTranslatedProvider.notifier).state = '';
     };
 
     _sonioxService.onLanguageDetected = (language) {
-      // Speaker is determined by the held mic (push-to-talk), not detection.
       ref.read(detectedLanguageProvider.notifier).state = language;
+      // A new person starting to speak flips the active side; cut any TTS still
+      // voicing the previous turn so the device isn't talking over the speaker.
+      _setConversationSpeaker(_speakerForLanguage(language), flushTts: true);
     };
 
     _sonioxService.onError = (error) {
@@ -1812,12 +1841,105 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
       _lastErrorShown = now;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transcription error: $error')),
+        SnackBar(content: Text(error)),
       );
     };
   }
 
-  Future<void> _startConversationRecording(ConversationSpeaker speaker) async {
+  /// Set the currently-speaking side. On an actual change, clears stale drafts
+  /// so the previous turn's in-progress text/translation doesn't bleed into the
+  /// new speaker's boxes, and optionally cuts TTS still voicing the old turn.
+  /// A null [speaker] (unrecognized language) leaves the current side unchanged.
+  void _setConversationSpeaker(ConversationSpeaker? speaker,
+      {bool flushTts = false}) {
+    if (speaker == null) return;
+    if (ref.read(activeConversationSpeakerProvider) == speaker) return;
+    ref.read(activeConversationSpeakerProvider.notifier).state = speaker;
+    ref.read(conversationDraftOriginalProvider.notifier).state = '';
+    ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+    if (flushTts) _ttsService.flush();
+  }
+
+  /// Headphone prompt shown before the Conversation speaker is turned on.
+  /// Returns true if the user confirms (then TTS is enabled), false otherwise.
+  Future<bool> _confirmEnableConversationSpeaker() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use headphones'),
+        content: const Text(
+          'With the speaker on, each translation is played out loud. Because '
+          'both people share one microphone, put on headphones first so it '
+          "doesn't pick up the audio and echo.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Turn on'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  /// Maps a Soniox-detected ISO language code to the conversation side that
+  /// speaks it, or null when it's neither configured language.
+  ConversationSpeaker? _speakerForLanguage(String? code) {
+    if (code == null) return null;
+    if (code == ref.read(myLanguageProvider).code) {
+      return ConversationSpeaker.bottom;
+    }
+    if (code == ref.read(theirLanguageProvider).code) {
+      return ConversationSpeaker.top;
+    }
+    return null;
+  }
+
+  /// Speak a completed translation aloud in the LISTENER's language — the side
+  /// opposite [srcSpeaker] — when Conversation TTS is enabled.
+  void _speakConversationTranslation(
+      ConversationSpeaker srcSpeaker, String text) {
+    if (!ref.read(conversationTtsEnabledProvider)) return;
+    // If the other side has already taken the floor, this trailing translation
+    // would talk over the live speaker — skip voicing it (the text still shows
+    // on-screen). Voicing resumes for the next turn.
+    final active = ref.read(activeConversationSpeakerProvider);
+    if (active != null && active != srcSpeaker) return;
+    final myLang = ref.read(myLanguageProvider);
+    final theirLang = ref.read(theirLanguageProvider);
+    final ttsLangCode =
+        srcSpeaker == ConversationSpeaker.bottom ? theirLang.code : myLang.code;
+    if (TtsService.supportsLanguage(ttsLangCode)) {
+      _ttsService.setLanguageCode(ttsLangCode);
+      _ttsService.speak(text);
+    }
+  }
+
+  /// Tap-to-toggle the shared two-way listening session. Either side's mic
+  /// starts it; once on, both people speak in turn with no button holding.
+  Future<void> _toggleConversationSession() async {
+    if (_convStarting) {
+      // Tapped again mid-connect — request cancel; the start handler tears the
+      // session down once its connect completes (recordingState is still idle
+      // during connect, so this path, not the stop branch, handles the cancel).
+      _convWantActive = false;
+      return;
+    }
+    final st = ref.read(recordingStateProvider);
+    if (st == RecordingState.processing) return; // busy finishing
+    if (st == RecordingState.idle) {
+      await _startConversationSession();
+    } else {
+      await _stopConversationSession();
+    }
+  }
+
+  Future<void> _startConversationSession() async {
     if (_convStarting) return;
     final st = ref.read(recordingStateProvider);
     if (st == RecordingState.recording || st == RecordingState.processing) {
@@ -1830,7 +1952,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       return;
     }
 
-    _convHolding = true;
+    _convWantActive = true;
     _convStarting = true;
 
     final needsPermission = Platform.isAndroid || Platform.isIOS;
@@ -1838,16 +1960,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
         ? await Permission.microphone.request()
         : PermissionStatus.granted;
     if (!status.isGranted) {
-      _convHolding = false;
+      _convWantActive = false;
       _convStarting = false;
       return;
     }
 
-    // Cut off any translation still being spoken from the previous turn.
+    // Fresh session: clear stale drafts, stashed translations, and any TTS.
+    // Show the connecting affordance so the tap gives immediate feedback.
+    ref.read(conversationConnectingProvider.notifier).state = true;
     _ttsService.flush();
-
-    _convTranslationConfirmed = '';
-    ref.read(activeConversationSpeakerProvider.notifier).state = speaker;
+    _convPendingTranslation.clear();
+    ref.read(activeConversationSpeakerProvider.notifier).state = null;
     ref.read(conversationDraftOriginalProvider.notifier).state = '';
     ref.read(conversationDraftTranslatedProvider.notifier).state = '';
 
@@ -1876,7 +1999,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     } catch (e) {
       await BackgroundService.stopRecordingService();
       _convStarting = false;
-      _convHolding = false;
+      _convWantActive = false;
+      ref.read(conversationConnectingProvider.notifier).state = false;
       ref.read(activeConversationSpeakerProvider.notifier).state = null;
       if (mounted) {
         ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
@@ -1888,15 +2012,18 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
 
     _convStarting = false;
+    ref.read(conversationConnectingProvider.notifier).state = false;
 
-    // The user may have released before the connection finished — stop now.
-    if (!_convHolding) {
-      await _stopConversationRecording();
+    // A cancel-tap during connect, or a usage-limit 4005 that closed the socket
+    // mid-connect, means the session should not stay live — tear it down now.
+    if (!_convWantActive || _sonioxService.isClosed) {
+      await _stopConversationSession();
     }
   }
 
-  Future<void> _stopConversationRecording() async {
-    _convHolding = false;
+  Future<void> _stopConversationSession() async {
+    _convWantActive = false;
+    ref.read(conversationConnectingProvider.notifier).state = false;
 
     if (_convStarting) return;
     if (ref.read(recordingStateProvider) != RecordingState.recording) return;
@@ -1909,7 +2036,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.stop().timeout(const Duration(seconds: 5));
     } catch (_) {}
 
-    // Finalize, let trailing translation tokens land, then disconnect.
+    // Finalize, let trailing translation tokens land (each voiced as it lands
+    // via onTranslationCompleted), then disconnect.
     try {
       _sonioxService.finalize();
     } catch (_) {}
@@ -1938,23 +2066,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _fetchUsage();
     }
 
-    // Speak the translation aloud in the LISTENER's language — the side
-    // opposite the speaker who just held their mic (unless TTS is muted).
-    final speaker = ref.read(activeConversationSpeakerProvider);
-    final text = _convTranslationConfirmed.trim();
-    if (speaker != null &&
-        text.isNotEmpty &&
-        ref.read(conversationTtsEnabledProvider)) {
-      final myLang = ref.read(myLanguageProvider);
-      final theirLang = ref.read(theirLanguageProvider);
-      final ttsLangCode =
-          speaker == ConversationSpeaker.bottom ? theirLang.code : myLang.code;
-      if (TtsService.supportsLanguage(ttsLangCode)) {
-        _ttsService.setLanguageCode(ttsLangCode);
-        _ttsService.speak(text);
-      }
-    }
-
     ref.read(activeConversationSpeakerProvider.notifier).state = null;
     if (mounted) {
       ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
@@ -1965,6 +2076,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(conversationMessagesProvider.notifier).state = [];
     ref.read(conversationDraftOriginalProvider.notifier).state = '';
     ref.read(conversationDraftTranslatedProvider.notifier).state = '';
+    _convPendingTranslation.clear();
   }
 
   void _swapConversationLanguages() {
@@ -2040,7 +2152,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
       _lastErrorShown = now;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transcription error: $error')),
+        SnackBar(content: Text(error)),
       );
     };
   }
@@ -2137,12 +2249,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.stop().timeout(const Duration(seconds: 5));
     } catch (_) {}
 
-    // Finalize, give the trailing translation tokens a moment to land, then
-    // disconnect (which flushes anything still pending into the providers).
+    // Finalize and WAIT for the trailing translation to actually finish
+    // streaming (even though the user already released), then disconnect —
+    // which flushes the settled translation into the providers. A fixed delay
+    // here would cut off translations that lag the source.
     try {
-      _sonioxService.finalize();
+      await _sonioxService.finalizeAndWait();
     } catch (_) {}
-    await Future.delayed(const Duration(milliseconds: 700));
     try {
       await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
     } catch (_) {}
@@ -2328,6 +2441,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(conversationDraftOriginalProvider.notifier).state = '';
     ref.read(conversationDraftTranslatedProvider.notifier).state = '';
     ref.read(activeConversationSpeakerProvider.notifier).state = null;
+    ref.read(conversationConnectingProvider.notifier).state = false;
+    _convPendingTranslation.clear();
   }
 
   @override
@@ -2419,6 +2534,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       onEnabledChanged: (v) => ref
                           .read(conversationTtsEnabledProvider.notifier)
                           .state = v,
+                      confirmEnable: _confirmEnableConversationSpeaker,
                       iconSize: 24,
                     ),
                     const SizedBox(width: 16),
@@ -2672,14 +2788,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       ref.watch(conversationDraftTranslatedProvider),
                   activeSpeaker: ref.watch(activeConversationSpeakerProvider),
                   recordingState: recordingState,
+                  connecting: ref.watch(conversationConnectingProvider),
                   myLanguage: ref.watch(myLanguageProvider),
                   theirLanguage: ref.watch(theirLanguageProvider),
-                  onBottomMicStart: () =>
-                      _startConversationRecording(ConversationSpeaker.bottom),
-                  onBottomMicStop: _stopConversationRecording,
-                  onTopMicStart: () =>
-                      _startConversationRecording(ConversationSpeaker.top),
-                  onTopMicStop: _stopConversationRecording,
+                  onToggleListening: _toggleConversationSession,
                   onSwapLanguages: _swapConversationLanguages,
                   onClear: _clearConversation,
                   onMyLanguageChanged: (lang) {
@@ -2703,6 +2815,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     label: 'Transcription',
                     showCursor:
                         isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                    isRecording: isRecordingOrProcessing,
                     roundedTop: true,
                   ),
                 ),
@@ -2714,6 +2827,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     label: 'Transcription',
                     showCursor:
                         isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                    isRecording: isRecordingOrProcessing,
                     roundedTop: true,
                   ),
                 ),

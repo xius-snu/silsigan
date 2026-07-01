@@ -24,17 +24,27 @@ class ConversationMessage {
   }
 }
 
-/// Which side is currently recording (null = nobody)
+/// Which side is currently speaking, auto-detected from the spoken language
+/// while the shared two-way session is listening (null = nobody detected yet).
+/// Drives which side shows the live draft bubble.
 final activeConversationSpeakerProvider =
     StateProvider<ConversationSpeaker?>((ref) => null);
 
-/// Whether Conversation mode speaks the translation aloud on release.
-/// Defaults ON; toggled via the speaker button in the header. Not persisted.
-final conversationTtsEnabledProvider = StateProvider<bool>((ref) => true);
+/// Whether Conversation mode speaks each completed translation aloud in the
+/// listener's language. Defaults OFF — playing translations out loud on a
+/// two-way session invites echo/feedback, so the user opts in (and is prompted
+/// to use headphones first). Toggled via the speaker button in the header. Not
+/// persisted.
+final conversationTtsEnabledProvider = StateProvider<bool>((ref) => false);
 
 /// Completed conversation messages
 final conversationMessagesProvider =
     StateProvider<List<ConversationMessage>>((ref) => []);
+
+/// True while the shared session is connecting (after the mic tap, before audio
+/// starts streaming). Drives a "connecting" affordance on the mic so the tap
+/// gives immediate feedback and stays cancellable.
+final conversationConnectingProvider = StateProvider<bool>((ref) => false);
 
 /// Live draft text (original) while someone is speaking
 final conversationDraftOriginalProvider = StateProvider<String>((ref) => '');

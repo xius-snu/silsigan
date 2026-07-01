@@ -120,16 +120,16 @@ class _ConsentScreenState extends State<ConsentScreen> {
             title: 'What we send',
             body:
                 'When you record, your voice audio and the text transcribed '
-                'from it are streamed off your device to be transcribed and '
-                'translated in real time.',
+                'from it are streamed off your device to be processed in real '
+                'time.',
           ),
           _DisclosureItem(
             icon: Icons.cloud_outlined,
             title: 'Who receives it',
             body:
                 'Audio is sent through our secure server to a third-party AI '
-                'speech-to-text and translation service, which processes it in '
-                'real time and does not store it afterward.',
+                'service, which processes it in real time and does not store '
+                'it afterward.',
           ),
           _DisclosureItem(
             icon: Icons.verified_user_outlined,
@@ -186,9 +186,9 @@ class _ConsentScreenState extends State<ConsentScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Speech recognition and translation are handled by a '
-                  'third-party AI service. Audio is processed in real time '
-                  'and is not stored after processing.',
+                  'Speech recognition is handled by a third-party AI '
+                  'service. Audio is processed in real time and is not '
+                  'stored after processing.',
                   style: TextStyle(
                     fontSize: 12.5,
                     height: 1.4,

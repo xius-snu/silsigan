@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/word_timestamp.dart';
@@ -40,6 +40,19 @@ class SonioxRealtimeService {
   // Language identification
   String? _lastDetectedLanguage;
 
+  // ─── Two-way translation routing (Conversation mode) ───
+  // Soniox `two_way` translation auto-detects which of the two languages the
+  // speaker used: original tokens carry the spoken `language`, and translation
+  // tokens carry `source_language` (the language they were translated FROM).
+  // We surface the live value (for routing the in-progress draft) and the value
+  // locked at each completion (read synchronously inside onTranscriptionCompleted
+  // / onTranslationCompleted), so the caller can route every utterance to the
+  // correct side by detected language instead of by which mic was pressed.
+  String? currentSourceLanguage;
+  String? lastCompletedSourceLanguage;
+  String? currentTranslationSourceLanguage;
+  String? lastCompletedTranslationSourceLanguage;
+
   // Word timestamps — per-utterance accumulation
   final List<WordTimestamp> _pendingWords = [];
 
@@ -66,6 +79,15 @@ class SonioxRealtimeService {
   Timer? _lateTranslationTimer;
   static const _lateTranslationFlushMs = 800;
 
+  // Finalize settle — press-and-hold callers (Quick/Conversation) stop on user
+  // release and await finalizeAndWait(), which resolves once the provider has
+  // gone quiet (no new tokens for _settleQuiet) or acknowledges with
+  // `finished: true`. Translation lags the source, so this lets trailing
+  // translation tokens land BEFORE disconnect() tears the socket down.
+  Completer<void>? _settleCompleter;
+  Timer? _settleQuietTimer;
+  Duration _settleQuiet = const Duration(milliseconds: 500);
+
   // Callbacks
   Function(String draft)? onTranscriptionDraft;
   Function(String transcript)? onTranscriptionCompleted;
@@ -89,6 +111,14 @@ class SonioxRealtimeService {
       AppConstants.endpointLatencyAdjustmentLevel;
 
   bool get isConnected => _channel != null && !_isReconnecting;
+
+  /// True once the session has been intentionally torn down (usage-limit 4005
+  /// or explicit disconnect). Lets a caller detect a session that died during
+  /// its own awaited connect window.
+  bool get isClosed => _intentionallyClosed;
+
+  bool get _isTwoWay =>
+      _twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2;
 
   Future<void> connect({
     String? targetLanguageCode,
@@ -295,7 +325,7 @@ class SonioxRealtimeService {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
       // Only emit if it's not garbage (passes repetition check)
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text);
+        _emitTranslationCompleted(text);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -304,7 +334,7 @@ class SonioxRealtimeService {
       final text = (_pendingUtterance + _provisionalText).trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         lastCompletedWords = List.from(_pendingWords);
-        onTranscriptionCompleted?.call(text);
+        _emitTranscriptionCompleted(text);
       }
       _pendingUtterance = '';
       _provisionalText = '';
@@ -339,6 +369,23 @@ class SonioxRealtimeService {
     return maxFreq >= words.length * 0.4;
   }
 
+  // ─── Completion emitters ───
+  // All transcription/translation completions funnel through these so the
+  // detected source language is locked alongside the text. Non-conversation
+  // callers simply ignore the `lastCompleted*Language` fields.
+
+  void _emitTranscriptionCompleted(String text) {
+    lastCompletedSourceLanguage = currentSourceLanguage;
+    final cb = onTranscriptionCompleted;
+    if (cb != null) cb(text);
+  }
+
+  void _emitTranslationCompleted(String text) {
+    lastCompletedTranslationSourceLanguage = currentTranslationSourceLanguage;
+    final cb = onTranslationCompleted;
+    if (cb != null) cb(text);
+  }
+
   // ─── Token processing ───
 
   void _handleMessage(dynamic message) {
@@ -346,16 +393,26 @@ class SonioxRealtimeService {
       final data = jsonDecode(message as String) as Map<String, dynamic>;
 
       if (data['error_code'] != null) {
-        final errorMsg =
-            data['error_message'] as String? ?? 'Unknown Soniox error';
-        onError?.call(errorMsg);
+        // Log the provider's raw error for diagnostics, but surface only a
+        // generic message so vendor-identifying text never reaches the UI.
+        final rawError = data['error_message'] as String? ?? 'unknown error';
+        debugPrint('Transcription service error: $rawError');
+        onError?.call('A transcription error occurred. Please try again.');
         return;
       }
 
-      if (data['finished'] == true) return;
+      if (data['finished'] == true) {
+        _completeSettle();
+        return;
+      }
 
       final tokens = data['tokens'] as List<dynamic>?;
       if (tokens == null || tokens.isEmpty) return;
+
+      // A token arrived — if a finalize-settle wait is active, extend it so we
+      // keep waiting while the provider is still streaming (e.g. trailing
+      // translation tokens that arrive after the source finalized).
+      _armSettleTimer();
 
       final sourceTokens = <Map<String, dynamic>>[];
       final translationTokens = <Map<String, dynamic>>[];
@@ -376,7 +433,8 @@ class SonioxRealtimeService {
         _processTranslationTokens(translationTokens);
       }
     } catch (e) {
-      onError?.call('Failed to parse message: $e');
+      debugPrint('Failed to parse transcription message: $e');
+      onError?.call('A transcription error occurred. Please try again.');
     }
   }
 
@@ -388,7 +446,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.isEmpty && _provisionalTranslation.isEmpty) return;
     final text = (_pendingTranslation + _provisionalTranslation).trim();
     if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-      onTranslationCompleted?.call(text);
+      _emitTranslationCompleted(text);
     }
     _pendingTranslation = '';
     _provisionalTranslation = '';
@@ -416,9 +474,14 @@ class SonioxRealtimeService {
       final text = token['text'] as String? ?? '';
       final isFinal = token['is_final'] as bool? ?? false;
       final language = token['language'] as String?;
-      if (language != null && language != _lastDetectedLanguage) {
-        _lastDetectedLanguage = language;
-        onLanguageDetected?.call(language);
+      if (language != null) {
+        // Track the spoken language of the current utterance for two-way
+        // routing; also notify on change for the detected-language UI.
+        currentSourceLanguage = language;
+        if (language != _lastDetectedLanguage) {
+          _lastDetectedLanguage = language;
+          onLanguageDetected?.call(language);
+        }
       }
       if (text.startsWith('<') && text.endsWith('>')) continue;
       if (isFinal) {
@@ -440,7 +503,7 @@ class SonioxRealtimeService {
       final text = _pendingUtterance.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
         lastCompletedWords = List.from(_pendingWords);
-        onTranscriptionCompleted?.call(text);
+        _emitTranscriptionCompleted(text);
       }
       _pendingUtterance = '';
       _provisionalText = '';
@@ -471,24 +534,46 @@ class SonioxRealtimeService {
 
       // Always signal translation completion at endpoint (even if empty)
       // so line-by-line slot alignment stays in sync.
-      onTranslationCompleted?.call(fullTranslation);
+      _emitTranslationCompleted(fullTranslation);
       _pendingTranslation = '';
       _provisionalTranslation = '';
 
       lastCompletedWords = List.from(_pendingWords);
       _pendingWords.clear();
-      onTranscriptionCompleted?.call(_pendingUtterance.trim());
+      _emitTranscriptionCompleted(_pendingUtterance.trim());
       _pendingUtterance = '';
     }
   }
 
   void _processTranslationTokens(List<Map<String, dynamic>> tokens) {
+    // Two-way: translation tokens name the language they were translated FROM.
+    // When that flips while a previous speaker's translation is still buffered
+    // (their trailing tokens lagged past the next speaker's turn), flush it
+    // first — routed to the previous speaker via the still-current source
+    // language — so two speakers' translations never merge into one bubble.
+    if (_isTwoWay &&
+        currentTranslationSourceLanguage != null &&
+        (_pendingTranslation.isNotEmpty ||
+            _provisionalTranslation.isNotEmpty)) {
+      for (final token in tokens) {
+        final s = token['source_language'] as String?;
+        if (s == null) continue;
+        if (s != currentTranslationSourceLanguage) _flushLateTranslation();
+        break;
+      }
+    }
+
     String newProvisionalText = '';
     String newFinalText = '';
 
     for (final token in tokens) {
       final text = token['text'] as String? ?? '';
       final isFinal = token['is_final'] as bool? ?? false;
+      // In two-way mode each translation token names the language it was
+      // translated FROM — the authoritative signal for which side spoke it,
+      // robust even if the other speaker has already begun the next turn.
+      final srcLang = token['source_language'] as String?;
+      if (srcLang != null) currentTranslationSourceLanguage = srcLang;
       if (text.startsWith('<') && text.endsWith('>')) continue;
       if (isFinal) {
         newFinalText += text;
@@ -513,7 +598,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.length > 2000) {
       final text = _pendingTranslation.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text);
+        _emitTranslationCompleted(text);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -580,6 +665,51 @@ class SonioxRealtimeService {
     try {
       _channel!.sink.add(jsonEncode({'type': 'finalize'}));
     } catch (_) {}
+  }
+
+  /// Sends the finalize signal and resolves once the provider has flushed all
+  /// trailing tokens — detected by `finished: true` or by the token stream
+  /// going quiet for [quiet] — capped by [timeout] as a safety net.
+  ///
+  /// Translation lags the source, so press-and-hold callers that stop on
+  /// release must await this BEFORE [disconnect]; otherwise the socket closes
+  /// before the translation arrives and it's silently dropped.
+  Future<void> finalizeAndWait({
+    Duration quiet = const Duration(milliseconds: 500),
+    Duration timeout = const Duration(seconds: 6),
+  }) async {
+    if (_channel == null) return;
+    _completeSettle(); // clear any stale waiter
+    final completer = Completer<void>();
+    _settleCompleter = completer;
+    _settleQuiet = quiet;
+
+    try {
+      _channel!.sink.add(jsonEncode({'type': 'finalize'}));
+    } catch (_) {
+      _settleCompleter = null;
+      return;
+    }
+
+    // Hard cap so a stalled stream can't hang the stop flow forever.
+    Timer(timeout, _completeSettle);
+    // Quiet-period timer; reset on every incoming token via _armSettleTimer.
+    _armSettleTimer();
+    return completer.future;
+  }
+
+  void _armSettleTimer() {
+    if (_settleCompleter == null) return;
+    _settleQuietTimer?.cancel();
+    _settleQuietTimer = Timer(_settleQuiet, _completeSettle);
+  }
+
+  void _completeSettle() {
+    _settleQuietTimer?.cancel();
+    _settleQuietTimer = null;
+    final c = _settleCompleter;
+    _settleCompleter = null;
+    if (c != null && !c.isCompleted) c.complete();
   }
 
   /// Drop everything in flight (in-flight tokens AND buffered audio) and
@@ -661,11 +791,14 @@ class SonioxRealtimeService {
 
   void _resetTokenState() {
     _lateTranslationTimer?.cancel();
+    _completeSettle();
     _pendingUtterance = '';
     _provisionalText = '';
     _pendingTranslation = '';
     _provisionalTranslation = '';
     _pendingWords.clear();
+    currentSourceLanguage = null;
+    currentTranslationSourceLanguage = null;
   }
 
   Future<void> disconnect() async {
@@ -674,6 +807,7 @@ class SonioxRealtimeService {
     _isRotating = false;
     _stopRotationTimer();
     _lateTranslationTimer?.cancel();
+    _completeSettle();
     _clearAudioBuffer();
     _subscription?.cancel();
     _subscription = null;
@@ -682,7 +816,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        onTranslationCompleted?.call(text);
+        _emitTranslationCompleted(text);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -695,7 +829,7 @@ class SonioxRealtimeService {
       if (text.isNotEmpty) {
         lastCompletedWords = List.from(_pendingWords);
         _pendingWords.clear();
-        onTranscriptionCompleted?.call(text);
+        _emitTranscriptionCompleted(text);
       }
       _pendingUtterance = '';
       _provisionalText = '';

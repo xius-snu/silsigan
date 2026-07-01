@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../../services/tts_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'listening_indicator.dart';
 import 'tts_control_button.dart';
 
 class LineByLinePanel extends StatefulWidget {
@@ -276,33 +277,38 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
             ),
           ),
           Expanded(
-            child: SelectionArea(
-              child: ListView(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppConstants.panelPaddingH,
-                  vertical: 8,
-                ),
-                children: [
-                  ...widgets,
-                  // Live transcription draft (always at bottom — current speech)
-                  if (widget.transcriptionDraft.isNotEmpty) ...[
-                    if (widgets.isNotEmpty) const SizedBox(height: 12),
-                    _buildTranscriptionBlock(
-                      widget.transcriptionDraft,
-                      isDraft: true,
+            child: (!_hasText && widget.isRecording)
+                // Warm-up window: session is live but the first tokens haven't
+                // arrived yet — show a pulse so the empty panel isn't mistaken
+                // for a freeze.
+                ? const Center(child: ListeningIndicator())
+                : SelectionArea(
+                    child: ListView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppConstants.panelPaddingH,
+                        vertical: 8,
+                      ),
+                      children: [
+                        ...widgets,
+                        // Live transcription draft (always at bottom — current speech)
+                        if (widget.transcriptionDraft.isNotEmpty) ...[
+                          if (widgets.isNotEmpty) const SizedBox(height: 12),
+                          _buildTranscriptionBlock(
+                            widget.transcriptionDraft,
+                            isDraft: true,
+                          ),
+                        ],
+                        // Translation draft at bottom only if not already shown in-place
+                        if (!translationDraftPlaced &&
+                            widget.translationDraft.isNotEmpty)
+                          _buildTranslationBlock(
+                            '${widget.translationDraft}${'.' * _ellipsisCount}',
+                            isDraft: true,
+                          ),
+                      ],
                     ),
-                  ],
-                  // Translation draft at bottom only if not already shown in-place
-                  if (!translationDraftPlaced &&
-                      widget.translationDraft.isNotEmpty)
-                    _buildTranslationBlock(
-                      '${widget.translationDraft}${'.' * _ellipsisCount}',
-                      isDraft: true,
-                    ),
-                ],
-              ),
-            ),
+                  ),
           ),
         ],
       ),

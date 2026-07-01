@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'listening_indicator.dart';
 import 'tts_control_button.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -23,6 +24,10 @@ class TranscriptPanel extends StatefulWidget {
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
 
+  /// When true and the panel has no text yet, shows a "Listening…" pulse so the
+  /// warm-up window (before the first tokens arrive) doesn't look frozen.
+  final bool isRecording;
+
   /// When true, force the draft to render standalone (on a new line) even if
   /// this panel's own history doesn't have a trailing empty entry. Used by
   /// the translation panel to mirror the transcription panel's paragraph
@@ -40,6 +45,7 @@ class TranscriptPanel extends StatefulWidget {
     this.showSpeakerToggle = false,
     this.speakerEnabled = false,
     this.onSpeakerToggle,
+    this.isRecording = false,
     this.forceDraftStandalone = false,
   });
 
@@ -227,27 +233,57 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
             ),
           ),
           Expanded(
-            child: SelectionArea(
-              child: ListView(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppConstants.panelPaddingH,
-                  vertical: 8,
-                ),
-                children: [
-                  for (int i = 0; i < widget.history.length; i++)
-                    if (widget.history[i].trim().isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: _isLastNonEmptyLine(i) &&
-                                _draftInline &&
-                                (widget.draft.isNotEmpty || widget.showEllipsis)
-                            ? Text.rich(
-                                textDirection: directionOf(widget.history[i]),
-                                TextSpan(
-                                  children: [
-                                    TextSpan(
-                                      text: widget.history[i],
+            child: (!_hasText && widget.isRecording)
+                ? const Center(child: ListeningIndicator())
+                : SelectionArea(
+                    child: ListView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppConstants.panelPaddingH,
+                        vertical: 8,
+                      ),
+                      children: [
+                        for (int i = 0; i < widget.history.length; i++)
+                          if (widget.history[i].trim().isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: _isLastNonEmptyLine(i) &&
+                                      _draftInline &&
+                                      (widget.draft.isNotEmpty ||
+                                          widget.showEllipsis)
+                                  ? Text.rich(
+                                      textDirection:
+                                          directionOf(widget.history[i]),
+                                      TextSpan(
+                                        children: [
+                                          TextSpan(
+                                            text: widget.history[i],
+                                            style: TextStyle(
+                                              fontSize:
+                                                  AppConstants.contentFontSize,
+                                              color: AppConstants.textPrimary
+                                                  .withOpacity(AppConstants
+                                                      .historyOpacity),
+                                              height: 1.5,
+                                            ),
+                                          ),
+                                          TextSpan(
+                                            text: ' ${_buildDraftText()}',
+                                            style: const TextStyle(
+                                              fontSize:
+                                                  AppConstants.contentFontSize,
+                                              color: AppConstants.textPrimary,
+                                              fontWeight: FontWeight.w400,
+                                              height: 1.5,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    )
+                                  : Text(
+                                      widget.history[i],
+                                      textDirection:
+                                          directionOf(widget.history[i]),
                                       style: TextStyle(
                                         fontSize: AppConstants.contentFontSize,
                                         color: AppConstants.textPrimary
@@ -256,48 +292,26 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                                         height: 1.5,
                                       ),
                                     ),
-                                    TextSpan(
-                                      text: ' ${_buildDraftText()}',
-                                      style: const TextStyle(
-                                        fontSize: AppConstants.contentFontSize,
-                                        color: AppConstants.textPrimary,
-                                        fontWeight: FontWeight.w400,
-                                        height: 1.5,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              )
-                            : Text(
-                                widget.history[i],
-                                textDirection: directionOf(widget.history[i]),
-                                style: TextStyle(
-                                  fontSize: AppConstants.contentFontSize,
-                                  color: AppConstants.textPrimary
-                                      .withOpacity(AppConstants.historyOpacity),
-                                  height: 1.5,
-                                ),
+                            ),
+                        // Draft standalone: no history yet, or new paragraph started (trailing empty line)
+                        if (!_draftInline &&
+                            (widget.draft.isNotEmpty || widget.showEllipsis))
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              _cleanLineStart(_buildDraftText()),
+                              textDirection: directionOf(_buildDraftText()),
+                              style: const TextStyle(
+                                fontSize: AppConstants.contentFontSize,
+                                color: AppConstants.textPrimary,
+                                fontWeight: FontWeight.w400,
+                                height: 1.5,
                               ),
-                      ),
-                  // Draft standalone: no history yet, or new paragraph started (trailing empty line)
-                  if (!_draftInline &&
-                      (widget.draft.isNotEmpty || widget.showEllipsis))
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        _cleanLineStart(_buildDraftText()),
-                        textDirection: directionOf(_buildDraftText()),
-                        style: const TextStyle(
-                          fontSize: AppConstants.contentFontSize,
-                          color: AppConstants.textPrimary,
-                          fontWeight: FontWeight.w400,
-                          height: 1.5,
-                        ),
-                      ),
+                            ),
+                          ),
+                      ],
                     ),
-                ],
-              ),
-            ),
+                  ),
           ),
         ],
       ),

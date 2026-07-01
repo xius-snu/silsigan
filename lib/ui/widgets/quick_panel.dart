@@ -134,6 +134,11 @@ class _QuickPanelState extends State<QuickPanel>
             text: widget.transcript,
             controller: _transcriptScroll,
             roundedTop: true,
+            // Warm-up window: mic is live but the first tokens haven't arrived
+            // yet — show a pulse so the panel isn't mistaken for a freeze.
+            placeholder: _isRecording && widget.transcript.isEmpty
+                ? '.' * _ellipsisCount
+                : null,
           ),
         ),
         Container(height: 5, color: AppConstants.dividerColor),
