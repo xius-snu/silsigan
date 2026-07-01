@@ -29,7 +29,8 @@ class _ConsentScreenState extends State<ConsentScreen> {
   // Third-party processor's own privacy policy. Linked (not named) so the
   // recipient stays identifiable for compliance without putting the vendor
   // name in our copy.
-  static const _providerPrivacyUrl = 'https://soniox.com/privacy';
+  static const _providerPrivacyUrl =
+      'https://soniox.com/policies/privacy-policy';
 
   bool _detailsExpanded = false;
 
