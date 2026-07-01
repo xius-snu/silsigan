@@ -1,7 +1,7 @@
 name: silsigan
 description: "Korean to Vietnamese live translation app"
 publish_to: 'none'
-version: 1.0.10+40
+version: 1.0.10+41
 
 environment:
   sdk: '>=3.4.3 <4.0.0'
