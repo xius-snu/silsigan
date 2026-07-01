@@ -1252,10 +1252,22 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // language → hint it. forceTranslation keeps the translation config for
       // every non-transcription target (incl. source==target echo cases).
       final sourceLang = ref.read(sourceLanguageProvider);
+      // Line-by-line pairs each endpoint 1:1, so hold the endpoint until a
+      // fuller/sentence boundary — otherwise mid-sentence fragments get
+      // translated without their subject. Other modes keep neutral defaults.
+      final isLineByLine =
+          ref.read(displayModeProvider) == DisplayMode.lineByLine;
       await _sonioxService.connect(
         targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
         forceTranslation: !isTranscriptionOnly,
         languageHint: sourceLang?.code ?? '',
+        maxEndpointDelayMs:
+            isLineByLine ? AppConstants.lineByLineEndpointDelayMs : null,
+        endpointSensitivity:
+            isLineByLine ? AppConstants.lineByLineEndpointSensitivity : null,
+        endpointLatencyAdjustmentLevel: isLineByLine
+            ? AppConstants.lineByLineEndpointLatencyAdjustmentLevel
+            : null,
       );
       await _audioService.start();
       ref.read(recordingStateProvider.notifier).state =
@@ -2565,6 +2577,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                           fontSize: 13,
                                           fontWeight: FontWeight.w500,
                                         ),
+                                        // Long totals (e.g. 100h 30m/200h 30m)
+                                        // won't fit the 200px popup on one line —
+                                        // wrap to a second line (which shifts the
+                                        // bar down) instead of clipping the end.
+                                        softWrap: true,
+                                        maxLines: 2,
                                         overflow: TextOverflow.ellipsis,
                                       ),
                                       const SizedBox(height: 6),

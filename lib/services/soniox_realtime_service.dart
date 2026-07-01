@@ -79,6 +79,15 @@ class SonioxRealtimeService {
   bool _forceTranslation = false;
   String? _languageHint;
 
+  // Endpoint tuning — defaults to the neutral global constants; the caller can
+  // override per display mode (e.g. line-by-line uses fuller/later endpoints so
+  // Soniox translates complete clauses instead of subjectless fragments).
+  // Stored so rotation/reconnect rebuild the session with the same settings.
+  int _maxEndpointDelayMs = AppConstants.endpointDelayMs;
+  double _endpointSensitivity = AppConstants.endpointSensitivity;
+  int _endpointLatencyAdjustmentLevel =
+      AppConstants.endpointLatencyAdjustmentLevel;
+
   bool get isConnected => _channel != null && !_isReconnecting;
 
   Future<void> connect({
@@ -86,6 +95,9 @@ class SonioxRealtimeService {
     List<String>? twoWayLanguageCodes,
     bool forceTranslation = false,
     String? languageHint,
+    int? maxEndpointDelayMs,
+    double? endpointSensitivity,
+    int? endpointLatencyAdjustmentLevel,
   }) async {
     _intentionallyClosed = false;
     _reconnectAttempts = 0;
@@ -93,6 +105,11 @@ class SonioxRealtimeService {
     _twoWayLanguageCodes = twoWayLanguageCodes;
     _forceTranslation = forceTranslation;
     _languageHint = languageHint;
+    _maxEndpointDelayMs = maxEndpointDelayMs ?? AppConstants.endpointDelayMs;
+    _endpointSensitivity =
+        endpointSensitivity ?? AppConstants.endpointSensitivity;
+    _endpointLatencyAdjustmentLevel = endpointLatencyAdjustmentLevel ??
+        AppConstants.endpointLatencyAdjustmentLevel;
     _resetTokenState();
     _clearAudioBuffer();
     await _doConnect();
@@ -122,11 +139,10 @@ class SonioxRealtimeService {
         'sample_rate': AppConstants.sampleRate,
         'num_channels': AppConstants.numChannels,
         'enable_endpoint_detection': true,
-        'max_endpoint_delay_ms': AppConstants.endpointDelayMs,
+        'max_endpoint_delay_ms': _maxEndpointDelayMs,
         // v5 semantic-endpointing tuning (ignored by pre-v5 models).
-        'endpoint_sensitivity': AppConstants.endpointSensitivity,
-        'endpoint_latency_adjustment_level':
-            AppConstants.endpointLatencyAdjustmentLevel,
+        'endpoint_sensitivity': _endpointSensitivity,
+        'endpoint_latency_adjustment_level': _endpointLatencyAdjustmentLevel,
         'enable_language_identification': true,
       };
 

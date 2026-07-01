@@ -27,6 +27,18 @@ class AppConstants {
   static const newLinePauseMs = 2000;
   static const maxParagraphSentences = 4;
 
+  // Line-by-line endpoint tuning. In line-by-line mode each Soniox endpoint
+  // becomes its own aligned line, so mid-sentence endpoints produce fragments
+  // that Soniox translates without the sentence's subject (Korean is
+  // subject-first + pro-drop). Delaying the endpoint until a fuller/sentence
+  // boundary lets Soniox translate a complete clause, at the cost of a bit
+  // more latency before each line appears. Split mode masks the same
+  // fragmentation by concatenating fragments into paragraphs, so it keeps the
+  // snappier neutral defaults above.
+  static const lineByLineEndpointDelayMs = 5000;
+  static const lineByLineEndpointSensitivity = -0.4;
+  static const lineByLineEndpointLatencyAdjustmentLevel = 2;
+
   // UI — Figma design tokens
   static const Color bgColor = Color(0xFFEAEAEA);
   static const Color panelColor = Color(0xFFFCFCFC);
