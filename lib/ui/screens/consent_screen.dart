@@ -26,6 +26,10 @@ class ConsentScreen extends StatefulWidget {
 
 class _ConsentScreenState extends State<ConsentScreen> {
   static const _privacyUrl = 'https://xius-snu.github.io/silsigan/privacy';
+  // Third-party processor's own privacy policy. Linked (not named) so the
+  // recipient stays identifiable for compliance without putting the vendor
+  // name in our copy.
+  static const _providerPrivacyUrl = 'https://soniox.com/privacy';
 
   bool _detailsExpanded = false;
 
@@ -177,30 +181,36 @@ class _ConsentScreenState extends State<ConsentScreen> {
           firstChild: const SizedBox(width: double.infinity),
           secondChild: Padding(
             padding: const EdgeInsets.only(left: 22, top: 8),
-            child: Text.rich(
-              TextSpan(
-                style: TextStyle(
-                  fontSize: 12.5,
-                  height: 1.4,
-                  color: Colors.grey[600],
-                ),
-                children: const [
-                  TextSpan(
-                    text:
-                        'Speech recognition and translation are provided by '
-                        'Soniox, a third-party service. Audio is processed in '
-                        'real time and is not stored after processing. See our ',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Speech recognition and translation are handled by a '
+                  'third-party AI service. Audio is processed in real time '
+                  'and is not stored after processing.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.4,
+                    color: Colors.grey[600],
                   ),
-                  TextSpan(
-                    text: 'Privacy Policy',
+                ),
+                const SizedBox(height: 6),
+                GestureDetector(
+                  onTap: () => launchUrl(
+                    Uri.parse(_providerPrivacyUrl),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                  child: const Text(
+                    "View the provider's privacy policy",
                     style: TextStyle(
-                      decoration: TextDecoration.underline,
+                      fontSize: 12.5,
                       color: AppConstants.textPrimary,
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.underline,
                     ),
                   ),
-                  TextSpan(text: ' for full details.'),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
