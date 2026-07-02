@@ -65,6 +65,15 @@ class SonioxRealtimeService {
   /// Read this synchronously inside the onTranscriptionCompleted callback.
   int? lastCompletedSpeaker;
 
+  /// True when the translation completion being delivered arrived AFTER its
+  /// utterance's source endpoint (late flush) — it belongs to the LAST
+  /// completed transcript line, not to the utterance completing now. A single
+  /// utterance can produce several completions (Soniox translates sentence by
+  /// sentence, so trailing sentences flush late); this flag lets the caller
+  /// merge them into the right line instead of treating each as a new segment.
+  /// Read this synchronously inside the onTranslationCompleted callback.
+  bool lastTranslationWasLate = false;
+
   // Final-token counts per speaker for the in-progress utterance — an
   // utterance that mixes speakers is attributed to its dominant one.
   final Map<int, int> _pendingSpeakerCounts = {};
@@ -349,20 +358,30 @@ class SonioxRealtimeService {
   /// Flush accumulated pending tokens to callbacks without losing data.
   void _flushPendingTokens() {
     _lateTranslationTimer?.cancel();
+    // The transcription flush below drops empty/looping text, so the
+    // translation's pairing must follow what will ACTUALLY be emitted: with an
+    // emittable pending transcript it pairs with that upcoming line
+    // (isLate: false); with no pending transcript it belongs to the last
+    // completed line (isLate: true); and when the transcript is discarded as
+    // a repetition loop, its translation is discarded with it — emitting it
+    // would orphan a translation line with no transcript to pair with.
+    final utteranceText = (_pendingUtterance + _provisionalText).trim();
+    final willEmitTranscript =
+        utteranceText.isNotEmpty && !_hasRepetitionLoop(utteranceText);
     if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
-      // Only emit if it's not garbage (passes repetition check)
-      if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        _emitTranslationCompleted(text);
+      if (text.isNotEmpty &&
+          !_hasRepetitionLoop(text) &&
+          (willEmitTranscript || utteranceText.isEmpty)) {
+        _emitTranslationCompleted(text, isLate: !willEmitTranscript);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
     }
     if (_pendingUtterance.isNotEmpty || _provisionalText.isNotEmpty) {
-      final text = (_pendingUtterance + _provisionalText).trim();
-      if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
+      if (willEmitTranscript) {
         lastCompletedWords = List.from(_pendingWords);
-        _emitTranscriptionCompleted(text);
+        _emitTranscriptionCompleted(utteranceText);
       }
       _pendingUtterance = '';
       _provisionalText = '';
@@ -433,7 +452,8 @@ class SonioxRealtimeService {
     return null;
   }
 
-  void _emitTranslationCompleted(String text) {
+  void _emitTranslationCompleted(String text, {bool isLate = false}) {
+    lastTranslationWasLate = isLate;
     lastCompletedTranslationSourceLanguage = currentTranslationSourceLanguage;
     final cb = onTranslationCompleted;
     if (cb != null) cb(text);
@@ -499,7 +519,7 @@ class SonioxRealtimeService {
     if (_pendingTranslation.isEmpty && _provisionalTranslation.isEmpty) return;
     final text = (_pendingTranslation + _provisionalTranslation).trim();
     if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-      _emitTranslationCompleted(text);
+      _emitTranslationCompleted(text, isLate: true);
     }
     _pendingTranslation = '';
     _provisionalTranslation = '';
@@ -664,7 +684,10 @@ class SonioxRealtimeService {
     if (_pendingTranslation.length > 2000) {
       final text = _pendingTranslation.trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        _emitTranslationCompleted(text);
+        _emitTranslationCompleted(
+          text,
+          isLate: (_pendingUtterance + _provisionalText).trim().isEmpty,
+        );
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';
@@ -882,11 +905,15 @@ class SonioxRealtimeService {
     _subscription?.cancel();
     _subscription = null;
 
-    // Flush translation first (fills the last segment's empty slot)
+    // Flush translation first (pairs with the pending utterance flushed
+    // below; with no pending utterance to flush it's late — it belongs to
+    // the last completed line). Trim-based so a whitespace-only source
+    // buffer, which the transcript flush below drops, counts as no pairing.
+    final pendingSourceText = (_pendingUtterance + _provisionalText).trim();
     if (_pendingTranslation.isNotEmpty || _provisionalTranslation.isNotEmpty) {
       final text = (_pendingTranslation + _provisionalTranslation).trim();
       if (text.isNotEmpty && !_hasRepetitionLoop(text)) {
-        _emitTranslationCompleted(text);
+        _emitTranslationCompleted(text, isLate: pendingSourceText.isEmpty);
       }
       _pendingTranslation = '';
       _provisionalTranslation = '';

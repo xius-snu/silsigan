@@ -1061,11 +1061,22 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ref.read(koreanHistoryProvider.notifier).update(
                 (state) => [...state, _cleanLineStart(transcript)],
               );
-          // Pre-create empty slot — will be filled by onTranslationCompleted
-          // which fires immediately after (flushed at source boundary).
-          ref.read(vietnameseHistoryProvider.notifier).update(
-                (state) => [...state, ''],
-              );
+          // Keep the translation column index-aligned: pad it to this line's
+          // slot (left '' when the translation lags the endpoint — a late
+          // completion fills it) and close older still-empty slots, whose
+          // translation window has passed, so the in-place "..." indicator
+          // can't linger on a line that will never get one.
+          final lineCount = ref.read(koreanHistoryProvider).length;
+          ref.read(vietnameseHistoryProvider.notifier).update((state) {
+            final updated = List<String>.from(state);
+            for (int i = 0; i < updated.length && i < lineCount - 1; i++) {
+              if (updated[i].isEmpty) updated[i] = ' ';
+            }
+            while (updated.length < lineCount) {
+              updated.add('');
+            }
+            return updated;
+          });
           // Track word timestamps for this line
           _wordTimestampsPerLine.add(words);
           // No timer needed — segments are endpoint-delimited
@@ -1182,30 +1193,32 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ref.read(displayModeProvider) == DisplayMode.lineByLine;
 
       if (isLineByLine) {
-        // Line-by-line: fill the earliest empty slot.
-        // Always consume the slot even if translation is empty (short
-        // utterance with no translation) — use ' ' placeholder so the
-        // slot counts as filled and alignment stays in sync.
-        ref.read(vietnameseHistoryProvider.notifier).update((state) {
-          if (state.isEmpty) {
-            return translation.isNotEmpty
-                ? [_cleanLineStart(translation)]
-                : state;
-          }
-          final updated = List<String>.from(state);
-          for (int i = 0; i < updated.length; i++) {
-            if (updated[i].isEmpty) {
-              updated[i] =
-                  translation.isNotEmpty ? _cleanLineStart(translation) : ' ';
+        // Line-by-line: transcript line i owns translation slot i. A normal
+        // completion fires at the source endpoint, just BEFORE its transcript
+        // is appended, so it targets index = history length; a late completion
+        // (Soniox translates sentence by sentence, so trailing sentences flush
+        // after the endpoint) belongs to the last appended line. Set-or-merge
+        // at the owning index — consuming "the next empty slot" per completion
+        // shifted the whole column down whenever one utterance's translation
+        // arrived in several bursts.
+        final clean = _cleanLineStart(translation);
+        if (clean.isNotEmpty) {
+          final lineCount = ref.read(koreanHistoryProvider).length;
+          final target =
+              _sonioxService.lastTranslationWasLate ? lineCount - 1 : lineCount;
+          if (target >= 0) {
+            ref.read(vietnameseHistoryProvider.notifier).update((state) {
+              final updated = List<String>.from(state);
+              while (updated.length <= target) {
+                updated.add('');
+              }
+              updated[target] = updated[target].trim().isEmpty
+                  ? clean
+                  : '${updated[target]} $clean';
               return updated;
-            }
+            });
           }
-          // No empty slot — add as new entry
-          if (translation.isNotEmpty) {
-            return [...updated, _cleanLineStart(translation)];
-          }
-          return updated;
-        });
+        }
       } else if (translation.isNotEmpty) {
         // Split mode: append to the current paragraph line.
         // If a paragraph break ('') was already pushed, insert before it
