@@ -15,6 +15,7 @@ import '../../providers/translation_provider.dart';
 import '../../providers/session_history_provider.dart';
 import '../../providers/display_mode_provider.dart';
 import '../../providers/detected_language_provider.dart';
+import '../../providers/diarization_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
@@ -88,6 +89,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Guard against multiple stop taps
   bool _isStopping = false;
+
+  // Locks the diarization toggle from the moment the Soniox session config
+  // is captured in _startRecording until recordingState flips to recording.
+  // Without this, a toggle tap landing in that async window (mic/audio-session
+  // startup) flips the icon but is silently ignored for the whole session.
+  bool _isStartingRecording = false;
 
   // ── Quick Mode (press-and-hold) state ──────────────────────────────
   // Confirmed (endpoint-completed) text accumulated during the current hold.
@@ -1127,6 +1134,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
           }
         }
 
+        _recordSpeakerForLastLine();
+
         // Update context for next rotation with recent transcript
         final history = ref.read(koreanHistoryProvider);
         _sonioxService.contextText =
@@ -1262,10 +1271,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // translated without their subject. Other modes keep neutral defaults.
       final isLineByLine =
           ref.read(displayModeProvider) == DisplayMode.lineByLine;
+      // The diarization value is captured synchronously below — lock the
+      // toggle before the connect/audio-start awaits so a tap in that window
+      // can't diverge from what the session was configured with.
+      setState(() => _isStartingRecording = true);
       await _sonioxService.connect(
         targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
         forceTranslation: !isTranscriptionOnly,
         languageHint: sourceLang?.code ?? '',
+        enableSpeakerDiarization: ref.read(diarizationEnabledProvider),
         maxEndpointDelayMs:
             isLineByLine ? AppConstants.lineByLineEndpointDelayMs : null,
         endpointSensitivity:
@@ -1275,6 +1289,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
             : null,
       );
       await _audioService.start();
+      // The recording state now holds the toggle gate; the flag must clear
+      // here or the toggle would stay dimmed after the session ends.
+      _isStartingRecording = false;
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
       // Start periodic autosave (every 15 seconds)
@@ -1287,13 +1304,41 @@ class _MainScreenState extends ConsumerState<MainScreen>
         'mode': ref.read(displayModeProvider).name,
       });
     } catch (e) {
+      _isStartingRecording = false;
       await BackgroundService.stopRecordingService();
       if (mounted) {
+        setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to start: $e')),
         );
       }
     }
+  }
+
+  /// Attribute the just-completed utterance's speaker to the transcript line
+  /// it landed on. Padded with nulls up to the history length so restored
+  /// autosave lines (which carry no speaker data) never shift attribution.
+  /// A split-mode paragraph keeps the first speaker attributed to it — a
+  /// label that's already on screen shouldn't flip retroactively.
+  void _recordSpeakerForLastLine() {
+    final speaker = _sonioxService.lastCompletedSpeaker;
+    final historyLen = ref.read(koreanHistoryProvider).length;
+    if (historyLen == 0) return;
+    ref.read(speakerHistoryProvider.notifier).update((state) {
+      final updated = List<int?>.from(state);
+      while (updated.length < historyLen) {
+        updated.add(null);
+      }
+      if (speaker != null && updated[historyLen - 1] == null) {
+        updated[historyLen - 1] = speaker;
+      }
+      return updated;
+    });
+  }
+
+  void _onDiarizationChanged(bool enabled) {
+    ref.read(diarizationEnabledProvider.notifier).state = enabled;
+    saveDiarizationEnabled(enabled);
   }
 
   Future<void> _stopRecording() async {
@@ -1680,6 +1725,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(displayModeProvider.notifier).state = displayMode;
     final ttsRate = await loadSavedTtsRate();
     ref.read(ttsRateProvider.notifier).state = ttsRate;
+    final diarization = await loadSavedDiarizationEnabled();
+    ref.read(diarizationEnabledProvider.notifier).state = diarization;
   }
 
   Future<void> _restoreAutosaveDraft() async {
@@ -2431,6 +2478,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(vietnameseDraftProvider.notifier).state = '';
     ref.read(vietnameseHistoryProvider.notifier).state = [];
     ref.read(detectedLanguageProvider.notifier).state = null;
+    ref.read(speakerHistoryProvider.notifier).state = [];
     _wordTimestampsPerLine.clear();
     _sonioxService.contextText = null;
     // Fresh session: current languages become the new swap baseline.
@@ -2458,6 +2506,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final displayMode = ref.watch(displayModeProvider);
     final ttsEnabled = ref.watch(ttsEnabledProvider);
     final detectedLanguage = ref.watch(detectedLanguageProvider);
+    final diarizationEnabled = ref.watch(diarizationEnabledProvider);
+    final speakerHistory = ref.watch(speakerHistoryProvider);
 
     // Sync TTS service state with provider. In Conversation mode the TTS
     // language is chosen per-turn (the listener's side) at release time, so
@@ -2817,6 +2867,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         isRecordingOrProcessing && koreanDraft.isNotEmpty,
                     isRecording: isRecordingOrProcessing,
                     roundedTop: true,
+                    speakers: speakerHistory,
+                    showDiarizationToggle: true,
+                    diarizationEnabled: diarizationEnabled,
+                    onDiarizationChanged: _onDiarizationChanged,
+                    diarizationInteractive:
+                        !isRecordingOrProcessing && !_isStartingRecording,
                   ),
                 ),
               ] else if (displayMode == DisplayMode.split) ...[
@@ -2829,6 +2885,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         isRecordingOrProcessing && koreanDraft.isNotEmpty,
                     isRecording: isRecordingOrProcessing,
                     roundedTop: true,
+                    speakers: speakerHistory,
+                    showDiarizationToggle: true,
+                    diarizationEnabled: diarizationEnabled,
+                    onDiarizationChanged: _onDiarizationChanged,
+                    diarizationInteractive:
+                        !isRecordingOrProcessing && !_isStartingRecording,
                   ),
                 ),
                 Container(
@@ -2845,6 +2907,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     showSpeakerToggle: showTtsToggle,
                     speakerEnabled: ttsEnabled,
                     onSpeakerToggle: _toggleTts,
+                    // Translation paragraphs mirror transcription paragraphs
+                    // 1:1, so the same per-paragraph speaker list applies.
+                    speakers: speakerHistory,
                     // Mirror the transcription panel's paragraph-break state:
                     // if the transcription has a trailing empty entry (timer
                     // fired after 4s silence), force the translation draft to
@@ -2867,6 +2932,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     onSpeakerToggle: _toggleTts,
                     onSpeakLine: (text) => _ttsService.speakOnce(text),
                     ttsLineState: showTtsToggle ? _ttsService.lineState : null,
+                    speakers: speakerHistory,
+                    showDiarizationToggle: true,
+                    diarizationEnabled: diarizationEnabled,
+                    onDiarizationChanged: _onDiarizationChanged,
+                    diarizationInteractive:
+                        !isRecordingOrProcessing && !_isStartingRecording,
                   ),
                 ),
 

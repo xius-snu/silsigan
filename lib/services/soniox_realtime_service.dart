@@ -53,6 +53,22 @@ class SonioxRealtimeService {
   String? currentTranslationSourceLanguage;
   String? lastCompletedTranslationSourceLanguage;
 
+  // ─── Speaker diarization ───
+  // With `enable_speaker_diarization`, Soniox labels every token with a
+  // numeric speaker string ("1", "2", ...). Labels on non-final tokens can
+  // flip before stabilizing, so speaker state is tracked from FINAL tokens
+  // only. Numbering is per-WebSocket-session: rotation/reconnect restarts it,
+  // so a label may not identify the same person across a rotation.
+  int? currentSpeaker;
+
+  /// Dominant speaker of the most recently completed utterance.
+  /// Read this synchronously inside the onTranscriptionCompleted callback.
+  int? lastCompletedSpeaker;
+
+  // Final-token counts per speaker for the in-progress utterance — an
+  // utterance that mixes speakers is attributed to its dominant one.
+  final Map<int, int> _pendingSpeakerCounts = {};
+
   // Word timestamps — per-utterance accumulation
   final List<WordTimestamp> _pendingWords = [];
 
@@ -96,10 +112,12 @@ class SonioxRealtimeService {
   Function(String error)? onError;
   Function()? onConnected;
   Function(String language)? onLanguageDetected;
+  Function(int speaker)? onSpeakerChanged;
   Function()? onUsageLimitReached;
 
   bool _forceTranslation = false;
   String? _languageHint;
+  bool _enableSpeakerDiarization = false;
 
   // Endpoint tuning — defaults to the neutral global constants; the caller can
   // override per display mode (e.g. line-by-line uses fuller/later endpoints so
@@ -125,6 +143,7 @@ class SonioxRealtimeService {
     List<String>? twoWayLanguageCodes,
     bool forceTranslation = false,
     String? languageHint,
+    bool enableSpeakerDiarization = false,
     int? maxEndpointDelayMs,
     double? endpointSensitivity,
     int? endpointLatencyAdjustmentLevel,
@@ -135,6 +154,7 @@ class SonioxRealtimeService {
     _twoWayLanguageCodes = twoWayLanguageCodes;
     _forceTranslation = forceTranslation;
     _languageHint = languageHint;
+    _enableSpeakerDiarization = enableSpeakerDiarization;
     _maxEndpointDelayMs = maxEndpointDelayMs ?? AppConstants.endpointDelayMs;
     _endpointSensitivity =
         endpointSensitivity ?? AppConstants.endpointSensitivity;
@@ -147,6 +167,13 @@ class SonioxRealtimeService {
   }
 
   Future<void> _doConnect() async {
+    // Every _doConnect opens a fresh Soniox session, and speaker numbering
+    // restarts per session — that includes the plain reconnect and iOS-resume
+    // paths, which (unlike connect/rotation) skip _resetTokenState to keep the
+    // interrupted utterance's text. Drop only the speaker state here so
+    // old-session counts never merge into the new session's numbering space.
+    currentSpeaker = null;
+    _pendingSpeakerCounts.clear();
     try {
       final wsPath = _usePrivate
           ? AppConstants.sonioxProxyUrl
@@ -174,6 +201,7 @@ class SonioxRealtimeService {
         'endpoint_sensitivity': _endpointSensitivity,
         'endpoint_latency_adjustment_level': _endpointLatencyAdjustmentLevel,
         'enable_language_identification': true,
+        if (_enableSpeakerDiarization) 'enable_speaker_diarization': true,
       };
 
       // Language hints
@@ -376,8 +404,33 @@ class SonioxRealtimeService {
 
   void _emitTranscriptionCompleted(String text) {
     lastCompletedSourceLanguage = currentSourceLanguage;
+    lastCompletedSpeaker = _dominantPendingSpeaker();
+    _pendingSpeakerCounts.clear();
     final cb = onTranscriptionCompleted;
     if (cb != null) cb(text);
+  }
+
+  /// The speaker with the most final tokens in the in-progress utterance,
+  /// falling back to the last attributed speaker (an utterance whose tokens
+  /// carried no speaker labels inherits the current one for continuity).
+  int? _dominantPendingSpeaker() {
+    int? dominant;
+    var best = 0;
+    _pendingSpeakerCounts.forEach((speaker, count) {
+      if (count > best) {
+        best = count;
+        dominant = speaker;
+      }
+    });
+    return dominant ?? currentSpeaker;
+  }
+
+  /// Soniox sends speaker labels as numeric strings ("1", "2", ...); accept
+  /// ints defensively.
+  static int? _parseSpeakerLabel(dynamic value) {
+    if (value is int) return value;
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
   void _emitTranslationCompleted(String text) {
@@ -481,6 +534,19 @@ class SonioxRealtimeService {
         if (language != _lastDetectedLanguage) {
           _lastDetectedLanguage = language;
           onLanguageDetected?.call(language);
+        }
+      }
+      // Diarization: attribute by FINAL tokens only — non-final labels can
+      // flip before stabilizing ("temporary speaker switches" per Soniox).
+      if (isFinal) {
+        final speaker = _parseSpeakerLabel(token['speaker']);
+        if (speaker != null) {
+          _pendingSpeakerCounts[speaker] =
+              (_pendingSpeakerCounts[speaker] ?? 0) + 1;
+          if (speaker != currentSpeaker) {
+            currentSpeaker = speaker;
+            onSpeakerChanged?.call(speaker);
+          }
         }
       }
       if (text.startsWith('<') && text.endsWith('>')) continue;
@@ -799,6 +865,10 @@ class SonioxRealtimeService {
     _pendingWords.clear();
     currentSourceLanguage = null;
     currentTranslationSourceLanguage = null;
+    // Speaker numbering restarts with each Soniox session (rotation/reconnect
+    // included) — drop the old session's attribution state.
+    currentSpeaker = null;
+    _pendingSpeakerCounts.clear();
   }
 
   Future<void> disconnect() async {

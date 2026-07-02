@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 import '../../services/tts_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'diarization_toggle_button.dart';
 import 'listening_indicator.dart';
+import 'speaker_label.dart';
 import 'tts_control_button.dart';
 
 class LineByLinePanel extends StatefulWidget {
@@ -20,6 +22,17 @@ class LineByLinePanel extends StatefulWidget {
   final Function(String text)? onSpeakLine;
   final ValueNotifier<({String? text, TtsLineStatus status})>? ttsLineState;
 
+  /// Per-line speaker ids, index-aligned with [transcriptionHistory]. When at
+  /// least two distinct speakers are present, a small "SPEAKER N" label is
+  /// shown above each transcription line where the speaker changes.
+  final List<int?> speakers;
+
+  /// Diarization toggle in the header, next to the TTS speaker toggle.
+  final bool showDiarizationToggle;
+  final bool diarizationEnabled;
+  final ValueChanged<bool>? onDiarizationChanged;
+  final bool diarizationInteractive;
+
   const LineByLinePanel({
     super.key,
     required this.transcriptionHistory,
@@ -32,6 +45,11 @@ class LineByLinePanel extends StatefulWidget {
     this.onSpeakerToggle,
     this.onSpeakLine,
     this.ttsLineState,
+    this.speakers = const [],
+    this.showDiarizationToggle = false,
+    this.diarizationEnabled = false,
+    this.onDiarizationChanged,
+    this.diarizationInteractive = true,
   });
 
   @override
@@ -159,6 +177,17 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     );
   }
 
+  /// Whether at least two distinct speakers were attributed — labels stay
+  /// hidden for single-speaker sessions so they never distract.
+  bool get _showSpeakerLabels {
+    final distinct = <int>{};
+    for (final s in widget.speakers) {
+      if (s != null) distinct.add(s);
+      if (distinct.length >= 2) return true;
+    }
+    return false;
+  }
+
   /// Builds paired widgets using raw indices. Shows translation draft
   /// in-place within the first empty slot rather than at the bottom.
   ({List<Widget> widgets, bool translationDraftPlaced}) _buildPairedWidgets() {
@@ -167,6 +196,8 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         widget.transcriptionHistory.length, widget.translationHistory.length);
     bool addedAny = false;
     bool translationDraftPlaced = false;
+    final labelsOn = _showSpeakerLabels;
+    int? prevSpeaker;
 
     for (int i = 0; i < rawCount; i++) {
       final hasTranscript = i < widget.transcriptionHistory.length &&
@@ -181,6 +212,14 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       if (addedAny) widgets.add(const SizedBox(height: 12));
 
       if (hasTranscript) {
+        final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
+        if (labelsOn && speaker != null && speaker != prevSpeaker) {
+          widgets.add(Padding(
+            padding: const EdgeInsets.only(left: 2, bottom: 3),
+            child: SpeakerLabel(speaker),
+          ));
+        }
+        if (speaker != null) prevSpeaker = speaker;
         widgets.add(_buildTranscriptionBlock(
           widget.transcriptionHistory[i],
         ));
@@ -253,6 +292,16 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                   ),
                 ),
                 const Spacer(),
+                if (widget.showDiarizationToggle)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: DiarizationToggleButton(
+                      enabled: widget.diarizationEnabled,
+                      interactive: widget.diarizationInteractive,
+                      onEnabledChanged: (v) =>
+                          widget.onDiarizationChanged?.call(v),
+                    ),
+                  ),
                 if (widget.showSpeakerToggle)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),

@@ -68,4 +68,19 @@ class AppConstants {
 
   static const historyOpacity = 0.6;
   static const previewMaxLength = 80;
+
+  // Speaker diarization label colors — one per detected speaker, cycled.
+  // Muted-but-distinct hues that stay readable on the light panels
+  // (#FCFCFC / #F0F0F0). Soniox supports up to 15 speakers per session;
+  // beyond the palette the colors repeat.
+  static const List<Color> speakerColors = [
+    Color(0xFF1A73E8), // blue
+    Color(0xFFC5221F), // red
+    Color(0xFF188038), // green
+    Color(0xFF9334E6), // purple
+    Color(0xFFE8710A), // orange
+    Color(0xFF12805C), // teal
+    Color(0xFFB80672), // magenta
+    Color(0xFF5F6368), // gray
+  ];
 }

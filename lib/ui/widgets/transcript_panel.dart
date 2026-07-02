@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'diarization_toggle_button.dart';
 import 'listening_indicator.dart';
+import 'speaker_label.dart';
 import 'tts_control_button.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -23,6 +25,17 @@ class TranscriptPanel extends StatefulWidget {
   final bool showSpeakerToggle;
   final bool speakerEnabled;
   final VoidCallback? onSpeakerToggle;
+
+  /// Per-line speaker ids, index-aligned with [history]. When at least two
+  /// distinct speakers are present, a small "SPEAKER N" label is shown above
+  /// each line where the speaker changes from the previous one.
+  final List<int?> speakers;
+
+  /// Diarization toggle in the header (transcription panel only).
+  final bool showDiarizationToggle;
+  final bool diarizationEnabled;
+  final ValueChanged<bool>? onDiarizationChanged;
+  final bool diarizationInteractive;
 
   /// When true and the panel has no text yet, shows a "Listening…" pulse so the
   /// warm-up window (before the first tokens arrive) doesn't look frozen.
@@ -45,6 +58,11 @@ class TranscriptPanel extends StatefulWidget {
     this.showSpeakerToggle = false,
     this.speakerEnabled = false,
     this.onSpeakerToggle,
+    this.speakers = const [],
+    this.showDiarizationToggle = false,
+    this.diarizationEnabled = false,
+    this.onDiarizationChanged,
+    this.diarizationInteractive = true,
     this.isRecording = false,
     this.forceDraftStandalone = false,
   });
@@ -209,6 +227,16 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                   ),
                 ),
                 const Spacer(),
+                if (widget.showDiarizationToggle)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: DiarizationToggleButton(
+                      enabled: widget.diarizationEnabled,
+                      interactive: widget.diarizationInteractive,
+                      onEnabledChanged: (v) =>
+                          widget.onDiarizationChanged?.call(v),
+                    ),
+                  ),
                 if (widget.showSpeakerToggle)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
@@ -243,56 +271,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                         vertical: 8,
                       ),
                       children: [
-                        for (int i = 0; i < widget.history.length; i++)
-                          if (widget.history[i].trim().isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: _isLastNonEmptyLine(i) &&
-                                      _draftInline &&
-                                      (widget.draft.isNotEmpty ||
-                                          widget.showEllipsis)
-                                  ? Text.rich(
-                                      textDirection:
-                                          directionOf(widget.history[i]),
-                                      TextSpan(
-                                        children: [
-                                          TextSpan(
-                                            text: widget.history[i],
-                                            style: TextStyle(
-                                              fontSize:
-                                                  AppConstants.contentFontSize,
-                                              color: AppConstants.textPrimary
-                                                  .withOpacity(AppConstants
-                                                      .historyOpacity),
-                                              height: 1.5,
-                                            ),
-                                          ),
-                                          TextSpan(
-                                            text: ' ${_buildDraftText()}',
-                                            style: const TextStyle(
-                                              fontSize:
-                                                  AppConstants.contentFontSize,
-                                              color: AppConstants.textPrimary,
-                                              fontWeight: FontWeight.w400,
-                                              height: 1.5,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    )
-                                  : Text(
-                                      widget.history[i],
-                                      textDirection:
-                                          directionOf(widget.history[i]),
-                                      style: TextStyle(
-                                        fontSize: AppConstants.contentFontSize,
-                                        color: AppConstants.textPrimary
-                                            .withOpacity(
-                                                AppConstants.historyOpacity),
-                                        height: 1.5,
-                                      ),
-                                    ),
-                            ),
+                        ..._buildHistoryLines(),
                         // Draft standalone: no history yet, or new paragraph started (trailing empty line)
                         if (!_draftInline &&
                             (widget.draft.isNotEmpty || widget.showEllipsis))
@@ -316,6 +295,93 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
         ],
       ),
     );
+  }
+
+  /// Whether at least two distinct speakers were attributed — labels stay
+  /// hidden for single-speaker sessions so they never distract.
+  bool get _showSpeakerLabels {
+    final distinct = <int>{};
+    for (final s in widget.speakers) {
+      if (s != null) distinct.add(s);
+      if (distinct.length >= 2) return true;
+    }
+    return false;
+  }
+
+  /// History paragraphs, each optionally preceded by a "SPEAKER N" label when
+  /// the speaker changes from the previous visible paragraph.
+  List<Widget> _buildHistoryLines() {
+    final lines = <Widget>[];
+    final labelsOn = _showSpeakerLabels;
+    int? prevSpeaker;
+
+    for (int i = 0; i < widget.history.length; i++) {
+      if (widget.history[i].trim().isEmpty) continue;
+
+      final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
+      final showLabel = labelsOn && speaker != null && speaker != prevSpeaker;
+      if (speaker != null) prevSpeaker = speaker;
+
+      final Widget text = _isLastNonEmptyLine(i) &&
+              _draftInline &&
+              (widget.draft.isNotEmpty || widget.showEllipsis)
+          ? Text.rich(
+              textDirection: directionOf(widget.history[i]),
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: widget.history[i],
+                    style: TextStyle(
+                      fontSize: AppConstants.contentFontSize,
+                      color: AppConstants.textPrimary
+                          .withOpacity(AppConstants.historyOpacity),
+                      height: 1.5,
+                    ),
+                  ),
+                  TextSpan(
+                    text: ' ${_buildDraftText()}',
+                    style: const TextStyle(
+                      fontSize: AppConstants.contentFontSize,
+                      color: AppConstants.textPrimary,
+                      fontWeight: FontWeight.w400,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : Text(
+              widget.history[i],
+              textDirection: directionOf(widget.history[i]),
+              style: TextStyle(
+                fontSize: AppConstants.contentFontSize,
+                color: AppConstants.textPrimary
+                    .withOpacity(AppConstants.historyOpacity),
+                height: 1.5,
+              ),
+            );
+
+      lines.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: showLabel
+            // stretch, not start: start gives the line loose width, which
+            // shrink-wraps short RTL (Arabic/Persian) lines onto the LEFT
+            // edge; stretch keeps the full-width layout unlabeled lines get
+            // from the ListView, so their right-alignment is preserved.
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: SpeakerLabel(speaker),
+                  ),
+                  text,
+                ],
+              )
+            : text,
+      ));
+    }
+    return lines;
   }
 
   /// Draft attaches inline only if the last history entry is non-empty

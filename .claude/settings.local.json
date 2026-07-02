@@ -9,7 +9,14 @@
       "Bash(\"/c/Users/Hajun/AppData/Local/Android/sdk/cmdline-tools/latest/bin/sdkmanager.bat\":*)",
       "Bash(python3:*)",
       "Bash(python:*)",
-      "Bash(flutter clean:*)"
+      "Bash(flutter clean:*)",
+      "WebFetch(domain:soniox.com)",
+      "Bash(head -c 5000 \"/c/Users/Hajun/Downloads/saved_sessions \\(2\\).csv\")",
+      "Bash(wc -l \"/c/Users/Hajun/Downloads/saved_sessions \\(2\\).csv\")",
+      "Bash(\"C:/Users/Hajun/Desktop/Silsigan/analyze_sessions.py\":*)",
+      "Bash(echo \"done: $?\")",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(pip install openpyxl)"
     ]
   }
 }
