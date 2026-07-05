@@ -52,6 +52,20 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: true }
 });
 
+// A dropped idle connection (Render Postgres maintenance, failover, or a
+// network blip) makes node-postgres emit 'error' on the pool. With no
+// listener that is an unhandled exception that crashes the entire process,
+// taking every live /ws/session relay and in-flight request with it. Log and
+// swallow — the pool reconnects transparently on the next query.
+pool.on('error', (err) => {
+    fastify.log.error('pg pool error (idle client): ' + err.message);
+});
+// Last-resort backstop so a stray async rejection can't kill the process either.
+process.on('unhandledRejection', (reason) => {
+    fastify.log.error('unhandledRejection: ' +
+        (reason && reason.message ? reason.message : reason));
+});
+
 // ============================================
 // IN-MEMORY SESSION ROOMS
 // ============================================
@@ -210,6 +224,13 @@ async function start() {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    // Idempotency key — a client-generated UUID sent with every purchase
+    // attempt (initial + retries). Unlike transaction_id (which can be NULL
+    // when RevenueCat hasn't surfaced the transaction yet), this is always
+    // present and unique per purchase, so it is the reliable dedup key that
+    // makes retries safe. Partial-unique so legacy NULL rows don't collide.
+    await pool.query(`ALTER TABLE purchases ADD COLUMN IF NOT EXISTS idempotency_key TEXT`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_idempotency ON purchases(idempotency_key) WHERE idempotency_key IS NOT NULL`);
 
     // Session invites table
     await pool.query(`
@@ -481,7 +502,7 @@ async function start() {
     const REVENUECAT_API_KEY = process.env.REVENUECAT_API_KEY || '';
 
     fastify.post('/api/user/purchase', async (req, reply) => {
-        const { userId, minutes, productId, transactionId } = req.body;
+        const { userId, minutes, productId, transactionId, idempotencyKey } = req.body;
         if (!userId || !productId) {
             return reply.code(400).send({ error: 'Missing fields' });
         }
@@ -532,12 +553,43 @@ async function start() {
             return reply.code(403).send({ error: 'Purchase verification failed' });
         }
 
+        // Standard "already credited" success payload used by the idempotency
+        // short-circuits below. Caller must ROLLBACK before calling.
+        const creditedResponse = async () => {
+            const cur = await pool.query(
+                'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                [userId]
+            );
+            return {
+                success: true,
+                added_minutes: expectedMinutes,
+                used_seconds: parseInt(cur.rows[0].used_seconds),
+                limit_minutes: parseInt(cur.rows[0].limit_minutes),
+            };
+        };
+
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
 
-            // Prevent duplicate crediting — check by transaction_id or
-            // by (user_id, product_id) within a short window for null txn IDs.
+            // Primary idempotency guard: a client-generated key is sent with
+            // every attempt (initial + retries), so if this exact purchase is
+            // already recorded it has been credited — return success without
+            // crediting again. Covers cold-start retries and the null
+            // transaction_id case uniformly.
+            if (idempotencyKey) {
+                const dupKey = await client.query(
+                    'SELECT id FROM purchases WHERE idempotency_key = $1',
+                    [idempotencyKey]
+                );
+                if (dupKey.rows.length > 0) {
+                    await client.query('ROLLBACK');
+                    return await creditedResponse();
+                }
+            }
+
+            // Secondary guard on the RevenueCat transaction id (also covers
+            // legacy clients that send no idempotency key).
             if (transactionId) {
                 const dup = await client.query(
                     'SELECT id FROM purchases WHERE transaction_id = $1',
@@ -545,19 +597,12 @@ async function start() {
                 );
                 if (dup.rows.length > 0) {
                     await client.query('ROLLBACK');
-                    const cur = await pool.query(
-                        'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
-                        [userId]
-                    );
-                    return {
-                        success: true,
-                        added_minutes: expectedMinutes,
-                        used_seconds: parseInt(cur.rows[0].used_seconds),
-                        limit_minutes: parseInt(cur.rows[0].limit_minutes),
-                    };
+                    return await creditedResponse();
                 }
-            } else {
-                // No transaction ID — guard against duplicate calls within 60s
+            } else if (!idempotencyKey) {
+                // Legacy path only (no idempotency key AND no txn id): guard
+                // against duplicate calls within 60s. New clients always send a
+                // key, so this no longer risks deduping two distinct purchases.
                 const dup = await client.query(
                     `SELECT id FROM purchases WHERE user_id = $1 AND product_id = $2
                      AND transaction_id IS NULL AND created_at > NOW() - INTERVAL '60 seconds'`,
@@ -565,24 +610,25 @@ async function start() {
                 );
                 if (dup.rows.length > 0) {
                     await client.query('ROLLBACK');
-                    const cur = await pool.query(
-                        'SELECT COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
-                        [userId]
-                    );
-                    return {
-                        success: true,
-                        added_minutes: expectedMinutes,
-                        used_seconds: parseInt(cur.rows[0].used_seconds),
-                        limit_minutes: parseInt(cur.rows[0].limit_minutes),
-                    };
+                    return await creditedResponse();
                 }
             }
 
-            // Record the purchase
-            await client.query(
-                'INSERT INTO purchases (user_id, transaction_id, product_id, minutes) VALUES ($1, $2, $3, $4)',
-                [userId, transactionId || null, productId, expectedMinutes]
+            // Record the purchase. ON CONFLICT closes the tiny window where two
+            // concurrent retries with the same key race past the SELECT above.
+            const inserted = await client.query(
+                `INSERT INTO purchases (user_id, transaction_id, product_id, minutes, idempotency_key)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                 RETURNING id`,
+                [userId, transactionId || null, productId, expectedMinutes, idempotencyKey || null]
             );
+            if (inserted.rows.length === 0 && idempotencyKey) {
+                // Lost the race — another request already inserted this key and
+                // will credit it. Do not double-credit.
+                await client.query('ROLLBACK');
+                return await creditedResponse();
+            }
 
             // Add minutes to user's limit
             await client.query(
@@ -1170,6 +1216,14 @@ async function start() {
         });
 
         socket.on('close', () => {
+            // Only remove this user if the room still maps them to THIS socket.
+            // A reconnect can replace the socket (room.set above) before this
+            // delayed close fires; without the identity check we'd evict the
+            // LIVE socket and silently break the relay for that user.
+            if (room.get(userId) !== socket) {
+                fastify.log.info(`Stale socket closed for ${userId} in ${sessionId}`);
+                return;
+            }
             room.delete(userId);
             for (const [, ws] of room) {
                 if (ws.readyState === 1) {
