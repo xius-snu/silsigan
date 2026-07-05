@@ -201,6 +201,64 @@ class AudioService {
 
   bool get hasRecording => _pcmBytesWritten > 0;
 
+  /// After a crash mid-recording the in-memory temp-file pointer is lost, but
+  /// the PCM the recorder streamed to disk survives. Find the most recent
+  /// orphaned chunk and adopt it so a subsequent [saveRecordingAsWav] includes
+  /// the recovered audio. Returns true if an orphan was adopted. Only acts when
+  /// idle (no active recording and no temp file already known).
+  Future<bool> adoptOrphanRecording() async {
+    if (isRecording || _tempFilePath != null || _pcmBytesWritten > 0) {
+      return false;
+    }
+    try {
+      final orphans = await _listOrphanPcmFiles();
+      if (orphans.isEmpty) return false;
+      // Newest first by modified time.
+      orphans.sort(
+          (a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+      final newest = orphans.first;
+      final len = await newest.length();
+      if (len <= 0) {
+        try {
+          newest.deleteSync();
+        } catch (_) {}
+        return false;
+      }
+      _tempFilePath = newest.path;
+      _pcmBytesWritten = len;
+      // Drop older orphans so they don't accumulate.
+      for (final f in orphans.skip(1)) {
+        try {
+          f.deleteSync();
+        } catch (_) {}
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Delete orphaned PCM chunks from a previous crash without adopting them —
+  /// used when there is no draft to attach them to.
+  Future<void> clearOrphanRecordings() async {
+    if (isRecording || _tempFilePath != null) return;
+    try {
+      for (final f in await _listOrphanPcmFiles()) {
+        try {
+          f.deleteSync();
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  Future<List<File>> _listOrphanPcmFiles() async {
+    final tempDir = await getTemporaryDirectory();
+    return tempDir.listSync().whereType<File>().where((f) {
+      final name = f.uri.pathSegments.isNotEmpty ? f.uri.pathSegments.last : '';
+      return name.startsWith('silsigan_recording_') && name.endsWith('.pcm');
+    }).toList();
+  }
+
   Uint8List _buildWavHeader(int pcmDataSize) {
     const sampleRate = AppConstants.sampleRate;
     const numChannels = AppConstants.numChannels;

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -15,6 +16,15 @@ class SonioxRealtimeService {
   bool _intentionallyClosed = false;
   bool _isReconnecting = false;
   bool _isRotating = false;
+  // Cancelable handle for the scheduled reconnect, so a deliberate (re)connect
+  // (iOS resume, rotation, stop/restart) can cancel a stale pending reconnect
+  // instead of letting it fire and open a duplicate socket.
+  Timer? _reconnectTimer;
+  // True while a _doConnect attempt is in flight — prevents two overlapping
+  // connects (e.g. a scheduled reconnect racing ensureConnected) from opening
+  // two channels and leaking one.
+  bool _connecting = false;
+  static final Random _rand = Random();
 
   // Auth credentials for proxy — set before calling connect()
   String? userId;
@@ -159,6 +169,8 @@ class SonioxRealtimeService {
   }) async {
     _intentionallyClosed = false;
     _reconnectAttempts = 0;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _targetLanguageCode = targetLanguageCode;
     _twoWayLanguageCodes = twoWayLanguageCodes;
     _forceTranslation = forceTranslation;
@@ -181,81 +193,83 @@ class SonioxRealtimeService {
     // paths, which (unlike connect/rotation) skip _resetTokenState to keep the
     // interrupted utterance's text. Drop only the speaker state here so
     // old-session counts never merge into the new session's numbering space.
-    currentSpeaker = null;
-    _pendingSpeakerCounts.clear();
+    // Guard against overlapping connect attempts (e.g. a scheduled reconnect
+    // firing while an iOS-resume ensureConnected() is already reconnecting).
+    // Without this, two channels could open and one would leak — holding a
+    // scarce Soniox slot and later tearing down the healthy socket.
+    if (_connecting) return;
+    _connecting = true;
     try {
-      final wsPath = _usePrivate
-          ? AppConstants.sonioxProxyUrl
-          : AppConstants.sonioxLimitedProxyUrl;
-      final proxyUrl = Uri.parse(wsPath).replace(
-        queryParameters: {
-          if (userId != null) 'userId': userId!,
-          if (authToken != null) 'token': authToken!,
-          if (_usePrivate) 'private': '1',
-        },
-      );
-      _channel = IOWebSocketChannel.connect(
-        proxyUrl,
-        pingInterval: const Duration(seconds: 15),
-      );
+      // A deliberate (re)connect supersedes any pending scheduled reconnect.
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
 
-      final config = <String, dynamic>{
-        'model': AppConstants.sonioxModel,
-        'audio_format': AppConstants.audioFormat,
-        'sample_rate': AppConstants.sampleRate,
-        'num_channels': AppConstants.numChannels,
-        'enable_endpoint_detection': true,
-        'max_endpoint_delay_ms': _maxEndpointDelayMs,
-        // v5 semantic-endpointing tuning (ignored by pre-v5 models).
-        'endpoint_sensitivity': _endpointSensitivity,
-        'endpoint_latency_adjustment_level': _endpointLatencyAdjustmentLevel,
-        'enable_language_identification': true,
-        if (_enableSpeakerDiarization) 'enable_speaker_diarization': true,
-      };
+      currentSpeaker = null;
+      _pendingSpeakerCounts.clear();
 
-      // Language hints
-      if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
-        config['language_hints'] = _twoWayLanguageCodes;
-      } else {
-        final hint = _languageHint ?? AppConstants.transcriptionLanguage;
-        if (hint.isNotEmpty) {
-          config['language_hints'] = [hint];
-        }
-      }
-
-      // Translation config
-      if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
-        config['translation'] = {
-          'type': 'two_way',
-          'language_a': _twoWayLanguageCodes![0],
-          'language_b': _twoWayLanguageCodes![1],
-        };
-      } else if (_targetLanguageCode != null &&
-          (_forceTranslation ||
-              _targetLanguageCode != AppConstants.transcriptionLanguage)) {
-        config['translation'] = {
-          'type': 'one_way',
-          'target_language': _targetLanguageCode,
-        };
-      }
-
-      // Context — helps model with domain understanding and recurring terms
-      final context = <String, dynamic>{
-        'general': [
-          {
-            'key': 'domain',
-            'value': 'Real-time spoken conversation translation',
+      final WebSocketChannel channel;
+      try {
+        final wsPath = _usePrivate
+            ? AppConstants.sonioxProxyUrl
+            : AppConstants.sonioxLimitedProxyUrl;
+        final proxyUrl = Uri.parse(wsPath).replace(
+          queryParameters: {
+            if (userId != null) 'userId': userId!,
+            if (authToken != null) 'token': authToken!,
+            if (_usePrivate) 'private': '1',
           },
-        ],
-      };
-      if (contextText != null && contextText!.isNotEmpty) {
-        context['text'] = contextText;
+        );
+        channel = IOWebSocketChannel.connect(
+          proxyUrl,
+          pingInterval: const Duration(seconds: 15),
+        );
+      } catch (e) {
+        // Synchronous failure (e.g. malformed URI) — schedule a retry.
+        _handleDisconnect('connect error: $e');
+        return;
       }
-      config['context'] = context;
 
-      _channel!.sink.add(jsonEncode(config));
+      // IOWebSocketChannel.connect is LAZY: it returns before the handshake
+      // completes and never throws synchronously on a failed connection — the
+      // failure only surfaces via `ready` (or the stream). Await it so we never
+      // declare the connection live, reset the retry counter, flush buffered
+      // audio, or fire onConnected for a socket that never actually opened.
+      try {
+        // Bound the handshake so a black-hole connection (associated to a
+        // network but silently dropping packets) fails fast into the backoff
+        // reconnect instead of pinning _connecting until the OS TCP timeout.
+        await channel.ready.timeout(const Duration(seconds: 10));
+      } catch (e) {
+        try {
+          await channel.sink.close();
+        } catch (_) {}
+        _handleDisconnect('handshake failed: $e');
+        return;
+      }
 
-      _subscription = _channel!.stream.listen(
+      // Torn down (usage-limit 4005 or disconnect) while awaiting the
+      // handshake — abandon this now-orphan channel.
+      if (_intentionallyClosed) {
+        try {
+          await channel.sink.close();
+        } catch (_) {}
+        return;
+      }
+
+      // Adopt the new channel, closing any prior one so a race can never leak a
+      // live socket.
+      _subscription?.cancel();
+      _subscription = null;
+      final previous = _channel;
+      _channel = channel;
+      if (previous != null && previous != channel) {
+        try {
+          await previous.sink.close();
+        } catch (_) {}
+      }
+
+      // Listen before sending config so no early server response is missed.
+      _subscription = channel.stream.listen(
         _handleMessage,
         onError: (error) {
           _handleDisconnect('stream error: $error');
@@ -263,17 +277,83 @@ class SonioxRealtimeService {
         onDone: () {
           _handleDisconnect('stream closed');
         },
+        cancelOnError: true,
       );
 
+      try {
+        channel.sink.add(jsonEncode(_buildConfig()));
+      } catch (e) {
+        _handleDisconnect('config send failed: $e');
+        return;
+      }
+
+      // The connection is proven live — only NOW is it safe to reset retry
+      // state, flush buffered audio, and notify the caller.
       _reconnectAttempts = 0;
       _isReconnecting = false;
       _isRotating = false;
-
       _flushAudioBuffer();
       onConnected?.call();
-    } catch (e) {
-      _handleDisconnect('connect error: $e');
+    } finally {
+      _connecting = false;
     }
+  }
+
+  Map<String, dynamic> _buildConfig() {
+    final config = <String, dynamic>{
+      'model': AppConstants.sonioxModel,
+      'audio_format': AppConstants.audioFormat,
+      'sample_rate': AppConstants.sampleRate,
+      'num_channels': AppConstants.numChannels,
+      'enable_endpoint_detection': true,
+      'max_endpoint_delay_ms': _maxEndpointDelayMs,
+      // v5 semantic-endpointing tuning (ignored by pre-v5 models).
+      'endpoint_sensitivity': _endpointSensitivity,
+      'endpoint_latency_adjustment_level': _endpointLatencyAdjustmentLevel,
+      'enable_language_identification': true,
+      if (_enableSpeakerDiarization) 'enable_speaker_diarization': true,
+    };
+
+    // Language hints
+    if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
+      config['language_hints'] = _twoWayLanguageCodes;
+    } else {
+      final hint = _languageHint ?? AppConstants.transcriptionLanguage;
+      if (hint.isNotEmpty) {
+        config['language_hints'] = [hint];
+      }
+    }
+
+    // Translation config
+    if (_twoWayLanguageCodes != null && _twoWayLanguageCodes!.length == 2) {
+      config['translation'] = {
+        'type': 'two_way',
+        'language_a': _twoWayLanguageCodes![0],
+        'language_b': _twoWayLanguageCodes![1],
+      };
+    } else if (_targetLanguageCode != null &&
+        (_forceTranslation ||
+            _targetLanguageCode != AppConstants.transcriptionLanguage)) {
+      config['translation'] = {
+        'type': 'one_way',
+        'target_language': _targetLanguageCode,
+      };
+    }
+
+    // Context — helps model with domain understanding and recurring terms
+    final context = <String, dynamic>{
+      'general': [
+        {
+          'key': 'domain',
+          'value': 'Real-time spoken conversation translation',
+        },
+      ],
+    };
+    if (contextText != null && contextText!.isNotEmpty) {
+      context['text'] = contextText;
+    }
+    config['context'] = context;
+    return config;
   }
 
   void _handleDisconnect(String reason) {
@@ -323,6 +403,9 @@ class SonioxRealtimeService {
   Future<void> _rotateSession() async {
     if (_intentionallyClosed || _isReconnecting || _isRotating) return;
     _isRotating = true;
+    // A rotation supersedes any pending scheduled reconnect.
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     // Finalize current session
     finalize();
@@ -813,6 +896,8 @@ class SonioxRealtimeService {
     if (_intentionallyClosed) return;
     if (_isReconnecting || _isRotating) return;
     _isRotating = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     _subscription?.cancel();
     _subscription = null;
@@ -842,6 +927,8 @@ class SonioxRealtimeService {
 
   void _tryReconnect() {
     if (_intentionallyClosed) return;
+    // A reconnect is already scheduled — don't stack a second chain.
+    if (_reconnectTimer != null) return;
     if (_reconnectAttempts >= _maxReconnectAttempts) {
       onError
           ?.call('Connection lost. Please check your internet and try again.');
@@ -851,10 +938,17 @@ class SonioxRealtimeService {
     _isReconnecting = true;
     _reconnectAttempts++;
 
-    final delaySeconds =
-        (_reconnectAttempts <= 4) ? (1 << (_reconnectAttempts - 1)) : 15;
+    // Exponential backoff (1,2,4,8,16) capped at 30s, with ±30% jitter so a
+    // fleet of clients dropped by the same proxy restart doesn't reconnect in
+    // lockstep and hammer the proxy/Soniox in synchronized waves.
+    final baseSeconds =
+        (_reconnectAttempts <= 5) ? (1 << (_reconnectAttempts - 1)) : 30;
+    final cappedSeconds = baseSeconds > 30 ? 30 : baseSeconds;
+    final delayMs =
+        (cappedSeconds * 1000 * (0.7 + _rand.nextDouble() * 0.6)).round();
 
-    Future.delayed(Duration(seconds: delaySeconds), () {
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+      _reconnectTimer = null;
       if (!_intentionallyClosed) {
         _doConnect();
       }
@@ -865,6 +959,10 @@ class SonioxRealtimeService {
     if (_intentionallyClosed) return;
     if (_channel != null && !_isReconnecting) return;
 
+    // Cancel any pending reconnect so it can't fire during the async teardown
+    // below and open a duplicate socket alongside the one we're about to make.
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _reconnectAttempts = 0;
     _isReconnecting = true;
 
@@ -898,6 +996,8 @@ class SonioxRealtimeService {
     _intentionallyClosed = true;
     _isReconnecting = false;
     _isRotating = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _stopRotationTimer();
     _lateTranslationTimer?.cancel();
     _completeSettle();

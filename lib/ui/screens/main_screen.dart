@@ -67,6 +67,10 @@ class MainScreen extends ConsumerStatefulWidget {
 class _MainScreenState extends ConsumerState<MainScreen>
     with WidgetsBindingObserver {
   final AudioService _audioService = AudioService();
+  // Path of a WAV already produced during a save attempt whose DB insert then
+  // failed. Reused on retry so the audio isn't regenerated from a temp PCM
+  // that saveRecordingAsWav has already consumed (which would lose it).
+  String? _pendingSaveAudioPath;
   final SonioxRealtimeService _sonioxService = SonioxRealtimeService();
   final TtsService _ttsService = TtsService();
   Timer? _newLineTimer;
@@ -977,6 +981,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
       return;
     }
 
+    // A new or continued recording invalidates any WAV left by a previous save
+    // attempt whose DB insert failed — otherwise the next save could silently
+    // attach that stale (shorter) audio to the continued session.
+    await _cleanupPendingSaveAudio();
+
     final needsPermission = Platform.isAndroid || Platform.isIOS;
     final status = needsPermission
         ? await Permission.microphone.request()
@@ -1511,12 +1520,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
       timestampsJson = jsonEncode(tsPerLine);
     }
 
-    // Save audio file if available
-    String? audioPath;
-    if (_audioService.hasRecording) {
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      audioPath =
-          await _audioService.saveRecordingAsWav('session_$timestamp.wav');
+    // Save audio file if available. Reuse a WAV already produced by a prior
+    // failed save attempt so a retry never regenerates from a temp PCM that
+    // saveRecordingAsWav has already consumed (which would silently lose it).
+    String? audioPath = _pendingSaveAudioPath;
+    if (audioPath == null && _audioService.hasRecording) {
+      try {
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        audioPath =
+            await _audioService.saveRecordingAsWav('session_$timestamp.wav');
+        _pendingSaveAudioPath = audioPath;
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Could not save audio — try again'),
+              action: SnackBarAction(label: 'Retry', onPressed: _saveSession),
+            ),
+          );
+        }
+        return;
+      }
     }
 
     final session = TranscriptSession(
@@ -1538,6 +1562,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final id = await DatabaseService.instance.insertSession(session);
       ref.invalidate(sessionHistoryProvider);
       _audioService.clearRecording();
+      _pendingSaveAudioPath = null; // WAV now owned by the saved session
+
       // Upload to server (fire-and-forget)
       SyncService.instance.uploadSession(session);
       UserService.instance.reportActivity('session_save', {
@@ -1581,8 +1607,20 @@ class _MainScreenState extends ConsumerState<MainScreen>
       ),
     );
     if (confirmed != true) return;
+    await _cleanupPendingSaveAudio();
     _audioService.clearRecording();
     _resetState();
+  }
+
+  /// Delete a WAV left behind by a save attempt that never committed to the DB.
+  Future<void> _cleanupPendingSaveAudio() async {
+    final path = _pendingSaveAudioPath;
+    _pendingSaveAudioPath = null;
+    if (path == null) return;
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
   }
 
   void _showHistorySheet(BuildContext context, WidgetRef ref) {
@@ -1748,7 +1786,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (ref.read(recordingStateProvider) != RecordingState.idle) return;
 
       final draft = await DatabaseService.instance.getAutosaveDraft();
-      if (draft == null) return;
+      if (draft == null) {
+        // No draft to attach recovered audio to — clear any crash leftovers.
+        await _audioService.clearOrphanRecordings();
+        return;
+      }
 
       // Re-check after async gap — widget may be disposed or user tapped mic
       if (!mounted) return;
@@ -1764,6 +1806,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // Don't restore empty drafts
       if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) {
         await DatabaseService.instance.clearAutosaveDraft();
+        await _audioService.clearOrphanRecordings();
         return;
       }
 
@@ -1797,6 +1840,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // Set state to postRecording so user sees save/discard buttons
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.postRecording;
+
+      // Recover audio from the crash: the PCM the recorder streamed to disk may
+      // still be there. Adopt it so a subsequent Save includes the audio.
+      await _audioService.adoptOrphanRecording();
 
       // Show recovery notification
       if (mounted) {

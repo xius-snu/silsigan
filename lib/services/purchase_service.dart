@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
@@ -22,6 +23,7 @@ class PurchaseService {
 
   static const _apiKey = 'appl_CtsSSvxoAlcxysdpTOomFleNOof';
   static const _pendingKey = 'pending_purchases';
+  static final Random _rand = Random();
 
   bool _initialized = false;
   Offerings? _offerings;
@@ -83,12 +85,19 @@ class PurchaseService {
         transactionId = txns.last.transactionIdentifier;
       }
 
+      // Stable per-purchase idempotency key. Unlike transactionId (which can be
+      // null when RevenueCat hasn't surfaced the transaction yet), this is
+      // always present and unique, so the server dedups retries correctly and
+      // we can remove exactly this pending entry on success.
+      final idempotencyKey = _generateIdempotencyKey();
+
       // Save as pending BEFORE calling the server, so if the app crashes or
       // network fails we can retry on next launch.
       await _savePendingPurchase(
         productId: productId,
         minutes: minutes,
         transactionId: transactionId,
+        idempotencyKey: idempotencyKey,
       );
 
       // Tell our server to credit the minutes (with retries).
@@ -96,10 +105,11 @@ class PurchaseService {
         minutes: minutes,
         productId: productId,
         transactionId: transactionId,
+        idempotencyKey: idempotencyKey,
       );
 
       if (credited) {
-        await _removePendingPurchase(transactionId ?? productId);
+        await _removePendingPurchase(idempotencyKey);
       }
       // Return minutes even if server credit failed — the purchase is saved
       // locally and will be retried. The user paid, so show success.
@@ -124,6 +134,7 @@ class PurchaseService {
     required int minutes,
     required String productId,
     String? transactionId,
+    String? idempotencyKey,
   }) async {
     final userId = UserService.instance.userId;
     if (userId == null) return false;
@@ -144,6 +155,7 @@ class PurchaseService {
                 'minutes': minutes,
                 'productId': productId,
                 if (transactionId != null) 'transactionId': transactionId,
+                if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
               }),
             )
             .timeout(const Duration(seconds: 15));
@@ -167,10 +179,20 @@ class PurchaseService {
   // PENDING PURCHASE PERSISTENCE
   // ==================
 
+  /// Stable, unique per-purchase idempotency key — generated once and reused
+  /// across retries via the persisted pending entry.
+  String _generateIdempotencyKey() {
+    final ts = DateTime.now().microsecondsSinceEpoch;
+    final a = _rand.nextInt(1 << 31);
+    final b = _rand.nextInt(1 << 31);
+    return 'idem_${ts}_${a}_$b';
+  }
+
   Future<void> _savePendingPurchase({
     required String productId,
     required int minutes,
     String? transactionId,
+    required String idempotencyKey,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final pending = prefs.getStringList(_pendingKey) ?? [];
@@ -178,7 +200,8 @@ class PurchaseService {
       'productId': productId,
       'minutes': minutes,
       'transactionId': transactionId,
-      'key': transactionId ?? productId,
+      'idempotencyKey': idempotencyKey,
+      'key': idempotencyKey,
     });
     pending.add(entry);
     await prefs.setStringList(_pendingKey, pending);
@@ -212,6 +235,7 @@ class PurchaseService {
           minutes: data['minutes'] as int,
           productId: data['productId'] as String,
           transactionId: data['transactionId'] as String?,
+          idempotencyKey: data['idempotencyKey'] as String?,
         );
         if (credited) {
           await _removePendingPurchase(data['key'] as String);
