@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectionStatus;
 import 'package:flutter/services.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
@@ -74,6 +75,12 @@ class TranscriptPanel extends StatefulWidget {
 class _TranscriptPanelState extends State<TranscriptPanel> {
   final ScrollController _scrollController = ScrollController();
   bool _userScrolledUp = false;
+  // Selection state is read on demand from this notifier (geometry-based
+  // ground truth) rather than latched from SelectionArea.onSelectionChanged,
+  // which only fires for gestures and would stay stale when selected text is
+  // removed programmatically (clear / new session).
+  final SelectionListenerNotifier _selectionNotifier =
+      SelectionListenerNotifier();
   Timer? _resumeTimer;
   Timer? _cursorTimer;
   bool _cursorVisible = true;
@@ -110,7 +117,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       _ellipsisTimer?.cancel();
       _ellipsisTimer = null;
     }
-    if (!_userScrolledUp) {
+    if (!_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -130,8 +137,16 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     _resumeTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _selectionNotifier.dispose();
     super.dispose();
   }
+
+  // While a text selection is active, auto-scroll must stay off: a jump to
+  // the bottom mid-drag extends the selection over everything that scrolls
+  // past, highlighting the whole transcript.
+  bool get _hasActiveSelection =>
+      _selectionNotifier.registered &&
+      _selectionNotifier.selection.status == SelectionStatus.uncollapsed;
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
@@ -151,6 +166,13 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
 
   void _resumeAutoScroll() {
     if (!mounted) return;
+    if (_hasActiveSelection) {
+      // Still selecting — retry later instead of leaving _userScrolledUp
+      // latched true, which would kill auto-scroll for the session.
+      _resumeTimer?.cancel();
+      _resumeTimer = Timer(const Duration(seconds: 3), _resumeAutoScroll);
+      return;
+    }
     _userScrolledUp = false;
     if (_scrollController.hasClients) {
       _scrollController.animateTo(
@@ -264,31 +286,39 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
             child: (!_hasText && widget.isRecording)
                 ? const Center(child: ListeningIndicator())
                 : SelectionArea(
-                    child: ListView(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppConstants.panelPaddingH,
-                        vertical: 8,
-                      ),
-                      children: [
-                        ..._buildHistoryLines(),
-                        // Draft standalone: no history yet, or new paragraph started (trailing empty line)
-                        if (!_draftInline &&
-                            (widget.draft.isNotEmpty || widget.showEllipsis))
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                              _cleanLineStart(_buildDraftText()),
-                              textDirection: directionOf(_buildDraftText()),
-                              style: const TextStyle(
-                                fontSize: AppConstants.contentFontSize,
-                                color: AppConstants.textPrimary,
-                                fontWeight: FontWeight.w400,
-                                height: 1.5,
+                    child: SelectionListener(
+                      selectionNotifier: _selectionNotifier,
+                      child: ListView(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppConstants.panelPaddingH,
+                          vertical: 8,
+                        ),
+                        children: [
+                          ..._buildHistoryLines(),
+                          // Draft standalone: no history yet, or new paragraph started (trailing empty line)
+                          if (!_draftInline &&
+                              (widget.draft.isNotEmpty || widget.showEllipsis))
+                            // Draft text mutates as tokens stream in — keep it
+                            // out of the selection so an active selection can't
+                            // re-anchor onto text that just changed.
+                            SelectionContainer.disabled(
+                              child: Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Text(
+                                  _cleanLineStart(_buildDraftText()),
+                                  textDirection: directionOf(_buildDraftText()),
+                                  style: const TextStyle(
+                                    fontSize: AppConstants.contentFontSize,
+                                    color: AppConstants.textPrimary,
+                                    fontWeight: FontWeight.w400,
+                                    height: 1.5,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
           ),
@@ -325,29 +355,37 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       final Widget text = _isLastNonEmptyLine(i) &&
               _draftInline &&
               (widget.draft.isNotEmpty || widget.showEllipsis)
-          ? Text.rich(
-              textDirection: directionOf(widget.history[i]),
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: widget.history[i],
-                    style: TextStyle(
-                      fontSize: AppConstants.contentFontSize,
-                      color: AppConstants.textPrimary
-                          .withOpacity(AppConstants.historyOpacity),
-                      height: 1.5,
+          // The in-progress paragraph fuses committed text with the draft
+          // (cursor '|' / ellipsis dots / streaming tokens) in one selectable
+          // paragraph that mutates several times a second — a selection
+          // touching it would flicker, re-anchor onto new words, and copy
+          // draft artifacts. Keep the whole line out of the selection until
+          // its paragraph completes.
+          ? SelectionContainer.disabled(
+              child: Text.rich(
+                textDirection: directionOf(widget.history[i]),
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: widget.history[i],
+                      style: TextStyle(
+                        fontSize: AppConstants.contentFontSize,
+                        color: AppConstants.textPrimary
+                            .withOpacity(AppConstants.historyOpacity),
+                        height: 1.5,
+                      ),
                     ),
-                  ),
-                  TextSpan(
-                    text: ' ${_buildDraftText()}',
-                    style: const TextStyle(
-                      fontSize: AppConstants.contentFontSize,
-                      color: AppConstants.textPrimary,
-                      fontWeight: FontWeight.w400,
-                      height: 1.5,
+                    TextSpan(
+                      text: ' ${_buildDraftText()}',
+                      style: const TextStyle(
+                        fontSize: AppConstants.contentFontSize,
+                        color: AppConstants.textPrimary,
+                        fontWeight: FontWeight.w400,
+                        height: 1.5,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             )
           : Text(

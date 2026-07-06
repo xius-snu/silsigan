@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectionStatus;
 import 'package:flutter/services.dart';
 import '../../providers/conversation_provider.dart';
 import '../../providers/recording_provider.dart';
@@ -76,8 +77,23 @@ class _ConversationPanelState extends State<ConversationPanel> {
   final ScrollController _topScrollController = ScrollController();
   bool _bottomUserScrolled = false;
   bool _topUserScrolled = false;
+  // Selection state per half, read on demand (geometry-based ground truth)
+  // rather than latched from SelectionArea.onSelectionChanged, which only
+  // fires for gestures and would stay stale when selected bubbles are
+  // removed programmatically (clear / new session).
+  final SelectionListenerNotifier _bottomSelectionNotifier =
+      SelectionListenerNotifier();
+  final SelectionListenerNotifier _topSelectionNotifier =
+      SelectionListenerNotifier();
   Timer? _bottomResumeTimer;
   Timer? _topResumeTimer;
+
+  // While a text selection is active in a half, that half's auto-scroll must
+  // stay off: a jump mid-drag extends the selection over everything that
+  // scrolls past, highlighting the whole list.
+  bool _hasActiveSelection(SelectionListenerNotifier notifier) =>
+      notifier.registered &&
+      notifier.selection.status == SelectionStatus.uncollapsed;
   Timer? _ellipsisTimer;
   int _ellipsisCount = 3;
 
@@ -99,7 +115,8 @@ class _ConversationPanelState extends State<ConversationPanel> {
             widget.draftTranslated != oldWidget.draftTranslated;
     if (!contentChanged) return;
 
-    if (!_bottomUserScrolled) {
+    if (!_bottomUserScrolled &&
+        !_hasActiveSelection(_bottomSelectionNotifier)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_bottomScrollController.hasClients) {
           _bottomScrollController.animateTo(
@@ -110,7 +127,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
         }
       });
     }
-    if (!_topUserScrolled) {
+    if (!_topUserScrolled && !_hasActiveSelection(_topSelectionNotifier)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_topScrollController.hasClients) {
           _topScrollController.animateTo(
@@ -138,6 +155,8 @@ class _ConversationPanelState extends State<ConversationPanel> {
     _topScrollController.removeListener(_onTopScroll);
     _bottomScrollController.dispose();
     _topScrollController.dispose();
+    _bottomSelectionNotifier.dispose();
+    _topSelectionNotifier.dispose();
     super.dispose();
   }
 
@@ -169,6 +188,14 @@ class _ConversationPanelState extends State<ConversationPanel> {
 
   void _resumeBottomAutoScroll() {
     if (!mounted) return;
+    if (_hasActiveSelection(_bottomSelectionNotifier)) {
+      // Still selecting — retry later instead of leaving _bottomUserScrolled
+      // latched true, which would kill auto-scroll for the session.
+      _bottomResumeTimer?.cancel();
+      _bottomResumeTimer =
+          Timer(const Duration(seconds: 3), _resumeBottomAutoScroll);
+      return;
+    }
     _bottomUserScrolled = false;
     if (_bottomScrollController.hasClients) {
       _bottomScrollController.animateTo(
@@ -181,6 +208,13 @@ class _ConversationPanelState extends State<ConversationPanel> {
 
   void _resumeTopAutoScroll() {
     if (!mounted) return;
+    if (_hasActiveSelection(_topSelectionNotifier)) {
+      // Still selecting — retry later instead of leaving _topUserScrolled
+      // latched true, which would kill auto-scroll for the session.
+      _topResumeTimer?.cancel();
+      _topResumeTimer = Timer(const Duration(seconds: 3), _resumeTopAutoScroll);
+      return;
+    }
     _topUserScrolled = false;
     if (_topScrollController.hasClients) {
       _topScrollController.animateTo(
@@ -411,19 +445,27 @@ class _ConversationPanelState extends State<ConversationPanel> {
     final items = <Widget>[
       for (final msg in widget.messages) _buildMessageBubble(msg, perspective),
       if (_isRecording && widget.activeSpeaker != null)
-        _buildDraftBubble(perspective),
+        // Draft text mutates as tokens stream in — keep it out of the
+        // selection so an active selection can't re-anchor onto text that
+        // just changed.
+        SelectionContainer.disabled(child: _buildDraftBubble(perspective)),
     ];
     final reversed = items.reversed.toList();
 
+    final isTop = perspective == ConversationSpeaker.top;
     return SelectionArea(
-      child: ListView(
-        controller: scrollController,
-        reverse: true,
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppConstants.panelPaddingH,
-          vertical: 12,
+      child: SelectionListener(
+        selectionNotifier:
+            isTop ? _topSelectionNotifier : _bottomSelectionNotifier,
+        child: ListView(
+          controller: scrollController,
+          reverse: true,
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppConstants.panelPaddingH,
+            vertical: 12,
+          ),
+          children: reversed,
         ),
-        children: reversed,
       ),
     );
   }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectionStatus;
 import 'package:flutter/services.dart';
 import '../../services/tts_service.dart';
 import '../../utils/constants.dart';
@@ -59,6 +60,12 @@ class LineByLinePanel extends StatefulWidget {
 class _LineByLinePanelState extends State<LineByLinePanel> {
   final ScrollController _scrollController = ScrollController();
   bool _userScrolledUp = false;
+  // Selection state is read on demand from this notifier (geometry-based
+  // ground truth) rather than latched from SelectionArea.onSelectionChanged,
+  // which only fires for gestures and would stay stale when selected text is
+  // removed programmatically (clear / new session).
+  final SelectionListenerNotifier _selectionNotifier =
+      SelectionListenerNotifier();
   Timer? _resumeTimer;
   Timer? _ellipsisTimer;
   int _ellipsisCount = 3;
@@ -81,7 +88,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       _ellipsisTimer?.cancel();
       _ellipsisTimer = null;
     }
-    if (!_userScrolledUp) {
+    if (!_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -100,8 +107,16 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     _resumeTimer?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _selectionNotifier.dispose();
     super.dispose();
   }
+
+  // While a text selection is active, auto-scroll must stay off: a jump to
+  // the bottom mid-drag extends the selection over everything that scrolls
+  // past, highlighting the whole transcript.
+  bool get _hasActiveSelection =>
+      _selectionNotifier.registered &&
+      _selectionNotifier.selection.status == SelectionStatus.uncollapsed;
 
   void _startEllipsisTimer() {
     _ellipsisTimer?.cancel();
@@ -128,6 +143,13 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
 
   void _resumeAutoScroll() {
     if (!mounted) return;
+    if (_hasActiveSelection) {
+      // Still selecting — retry later instead of leaving _userScrolledUp
+      // latched true, which would kill auto-scroll for the session.
+      _resumeTimer?.cancel();
+      _resumeTimer = Timer(const Duration(seconds: 3), _resumeAutoScroll);
+      return;
+    }
     _userScrolledUp = false;
     if (_scrollController.hasClients) {
       _scrollController.animateTo(
@@ -332,30 +354,33 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                 // for a freeze.
                 ? const Center(child: ListeningIndicator())
                 : SelectionArea(
-                    child: ListView(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppConstants.panelPaddingH,
-                        vertical: 8,
-                      ),
-                      children: [
-                        ...widgets,
-                        // Live transcription draft (always at bottom — current speech)
-                        if (widget.transcriptionDraft.isNotEmpty) ...[
-                          if (widgets.isNotEmpty) const SizedBox(height: 12),
-                          _buildTranscriptionBlock(
-                            widget.transcriptionDraft,
-                            isDraft: true,
-                          ),
+                    child: SelectionListener(
+                      selectionNotifier: _selectionNotifier,
+                      child: ListView(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppConstants.panelPaddingH,
+                          vertical: 8,
+                        ),
+                        children: [
+                          ...widgets,
+                          // Live transcription draft (always at bottom — current speech)
+                          if (widget.transcriptionDraft.isNotEmpty) ...[
+                            if (widgets.isNotEmpty) const SizedBox(height: 12),
+                            _buildTranscriptionBlock(
+                              widget.transcriptionDraft,
+                              isDraft: true,
+                            ),
+                          ],
+                          // Translation draft at bottom only if not already shown in-place
+                          if (!translationDraftPlaced &&
+                              widget.translationDraft.isNotEmpty)
+                            _buildTranslationBlock(
+                              '${widget.translationDraft}${'.' * _ellipsisCount}',
+                              isDraft: true,
+                            ),
                         ],
-                        // Translation draft at bottom only if not already shown in-place
-                        if (!translationDraftPlaced &&
-                            widget.translationDraft.isNotEmpty)
-                          _buildTranslationBlock(
-                            '${widget.translationDraft}${'.' * _ellipsisCount}',
-                            isDraft: true,
-                          ),
-                      ],
+                      ),
                     ),
                   ),
           ),
@@ -373,7 +398,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       height: 1.5,
     );
 
-    return Container(
+    final block = Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -382,6 +407,9 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       ),
       child: Text(text, style: baseStyle, textDirection: directionOf(text)),
     );
+    // Draft text mutates as tokens stream in — keep it out of the selection
+    // so an active selection can't re-anchor onto text that just changed.
+    return isDraft ? SelectionContainer.disabled(child: block) : block;
   }
 
   Widget _buildLineIcon(TtsLineStatus status) {
@@ -411,7 +439,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
   }
 
   Widget _buildTranslationBlock(String text, {bool isDraft = false}) {
-    return Padding(
+    final block = Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Container(
         width: double.infinity,
@@ -463,6 +491,8 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         ),
       ),
     );
+    // See _buildTranscriptionBlock: drafts stay outside the selection.
+    return isDraft ? SelectionContainer.disabled(child: block) : block;
   }
 }
 

@@ -33,6 +33,11 @@ class SilsiganApp extends StatelessWidget {
           seedColor: Colors.grey,
           brightness: Brightness.light,
         ),
+        textSelectionTheme: const TextSelectionThemeData(
+          cursorColor: AppConstants.textPrimary,
+          selectionColor: AppConstants.selectionHighlightColor,
+          selectionHandleColor: AppConstants.selectionHandleColor,
+        ),
         useMaterial3: true,
       ),
       home: const _ConsentGate(),

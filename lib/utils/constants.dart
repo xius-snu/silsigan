@@ -69,6 +69,13 @@ class AppConstants {
   static const historyOpacity = 0.6;
   static const previewMaxLength = 80;
 
+  // Text-selection highlight. Without an explicit theme, Material 3 derives
+  // the selection color from the grey seed (primary @ 40%), which paints
+  // selected transcript text with a gray film that reads as the text itself
+  // changing color.
+  static const Color selectionHighlightColor = Color(0x471A73E8);
+  static const Color selectionHandleColor = Color(0xFF1A73E8);
+
   // Speaker diarization label colors — one per detected speaker, cycled.
   // Muted-but-distinct hues that stay readable on the light panels
   // (#FCFCFC / #F0F0F0). Soniox supports up to 15 speakers per session;

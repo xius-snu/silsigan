@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectionStatus;
 import 'package:flutter/services.dart';
 import '../../providers/recording_provider.dart';
 import '../../providers/target_language_provider.dart';
@@ -67,6 +68,21 @@ class _QuickPanelState extends State<QuickPanel>
     with SingleTickerProviderStateMixin {
   final ScrollController _transcriptScroll = ScrollController();
   final ScrollController _translationScroll = ScrollController();
+  // Selection state per half, read on demand (geometry-based ground truth)
+  // rather than latched from SelectionArea.onSelectionChanged, which only
+  // fires for gestures and would stay stale when the selected text is
+  // replaced programmatically (next utterance / clear).
+  final SelectionListenerNotifier _transcriptSelectionNotifier =
+      SelectionListenerNotifier();
+  final SelectionListenerNotifier _translationSelectionNotifier =
+      SelectionListenerNotifier();
+
+  // While a text selection is active in a half, that half's auto-scroll must
+  // stay off: a jump mid-drag extends the selection over everything that
+  // scrolls past, highlighting all the text.
+  bool _hasActiveSelection(SelectionListenerNotifier notifier) =>
+      notifier.registered &&
+      notifier.selection.status == SelectionStatus.uncollapsed;
   late final AnimationController _scaleController;
   late final Animation<double> _scaleAnimation;
   int? _activePointer;
@@ -91,10 +107,12 @@ class _QuickPanelState extends State<QuickPanel>
   @override
   void didUpdateWidget(QuickPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.transcript != oldWidget.transcript) {
+    if (widget.transcript != oldWidget.transcript &&
+        !_hasActiveSelection(_transcriptSelectionNotifier)) {
       _scrollToBottom(_transcriptScroll);
     }
-    if (widget.translation != oldWidget.translation) {
+    if (widget.translation != oldWidget.translation &&
+        !_hasActiveSelection(_translationSelectionNotifier)) {
       _scrollToBottom(_translationScroll);
     }
   }
@@ -117,6 +135,8 @@ class _QuickPanelState extends State<QuickPanel>
     _scaleController.dispose();
     _transcriptScroll.dispose();
     _translationScroll.dispose();
+    _transcriptSelectionNotifier.dispose();
+    _translationSelectionNotifier.dispose();
     super.dispose();
   }
 
@@ -230,23 +250,29 @@ class _QuickPanelState extends State<QuickPanel>
               ),
               Expanded(
                 child: SelectionArea(
-                  child: SingleChildScrollView(
-                    controller: controller,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppConstants.panelPaddingH,
-                      vertical: 8,
-                    ),
-                    child: Align(
-                      alignment: isRtl ? Alignment.topRight : Alignment.topLeft,
-                      child: Text(
-                        display,
-                        textDirection:
-                            isRtl ? TextDirection.rtl : TextDirection.ltr,
-                        style: const TextStyle(
-                          fontSize: AppConstants.quickFontSize,
-                          color: AppConstants.textPrimary,
-                          fontWeight: FontWeight.w500,
-                          height: 1.35,
+                  child: SelectionListener(
+                    selectionNotifier: controller == _transcriptScroll
+                        ? _transcriptSelectionNotifier
+                        : _translationSelectionNotifier,
+                    child: SingleChildScrollView(
+                      controller: controller,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppConstants.panelPaddingH,
+                        vertical: 8,
+                      ),
+                      child: Align(
+                        alignment:
+                            isRtl ? Alignment.topRight : Alignment.topLeft,
+                        child: Text(
+                          display,
+                          textDirection:
+                              isRtl ? TextDirection.rtl : TextDirection.ltr,
+                          style: const TextStyle(
+                            fontSize: AppConstants.quickFontSize,
+                            color: AppConstants.textPrimary,
+                            fontWeight: FontWeight.w500,
+                            height: 1.35,
+                          ),
                         ),
                       ),
                     ),
