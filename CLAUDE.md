@@ -186,9 +186,9 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - Activity reporting: `UserService.reportActivity('event_name', metadata)` for analytics (app_open, recording_start/stop, session_save, …).
 
 ### Background Recording
-- Android: `flutter_foreground_task` with a low-importance notification keeps the process alive during recording.
-- iOS: no foreground service — on resume from paused, both WS and audio capture are restarted because iOS kills audio + network in background.
-- App lifecycle: `paused` triggers autosave + sets `_wasPaused`; `resumed` restarts audio only if `_wasPaused` (filters out transient `inactive` from Control Center, etc.).
+- Android: `flutter_foreground_task` foreground service (`foregroundServiceType="microphone"` + wake lock, low-importance notification) keeps capture + WS alive while backgrounded.
+- iOS: `UIBackgroundModes: audio` (Info.plist) + flutter_sound's active playAndRecord session keep capture + WS alive while backgrounded — no foreground service. Force-quit or an audio interruption (phone call, Siri) still stops capture.
+- App lifecycle: `paused` triggers autosave + sets `_wasPaused`; on `resumed` (if `_wasPaused`, filtering transient `inactive`), audio is restarted ONLY when capture actually died (`AudioService.isCapturingHealthy` — no recorder data in the last 2s). A session that survived the background stint is left untouched, so reopening causes no restart hitch or audio gap.
 
 ### Purchases
 - RevenueCat package identifiers: `hours_1`, `hours_5`, `hours_10`, `hours_30`, `hours_50` (60, 300, 600, 1800, 3000 minutes respectively).

@@ -116,6 +116,9 @@ class TtsService {
   }
 
   void setEnabled(bool value) {
+    // Callers sync this on every rebuild — bail before the platform-channel
+    // stop() below so an unchanged value costs nothing.
+    if (value == _enabled) return;
     _enabled = value;
     if (!value) {
       _queue.clear();

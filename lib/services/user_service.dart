@@ -155,7 +155,8 @@ class UserService {
         await prefs.setBool('hardware_id_synced', true);
         debugPrint('UserService: hardware ID linked to server');
       } else {
-        debugPrint('Link hardware failed: ${response.statusCode} ${response.body}');
+        debugPrint(
+            'Link hardware failed: ${response.statusCode} ${response.body}');
       }
     } catch (e) {
       debugPrint('Link hardware error: $e');

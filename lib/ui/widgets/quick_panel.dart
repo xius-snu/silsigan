@@ -99,14 +99,32 @@ class _QuickPanelState extends State<QuickPanel>
     _scaleAnimation = Tween<double>(begin: 1.0, end: 1.08).animate(
       CurvedAnimation(parent: _scaleController, curve: Curves.easeOut),
     );
-    _ellipsisTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
-      if (mounted) setState(() => _ellipsisCount = (_ellipsisCount % 3) + 1);
-    });
+    _syncEllipsisTimer();
+  }
+
+  // The animated dots only render in two narrow windows (recording with an
+  // empty transcript / processing with an empty translation). Running the
+  // timer unconditionally would setState the whole panel at 2.5Hz even while
+  // the app sits fully idle in Quick mode.
+  bool get _needsEllipsis =>
+      (_isRecording && widget.transcript.isEmpty) ||
+      (_isProcessing && widget.translation.isEmpty);
+
+  void _syncEllipsisTimer() {
+    if (_needsEllipsis && _ellipsisTimer == null) {
+      _ellipsisTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+        if (mounted) setState(() => _ellipsisCount = (_ellipsisCount % 3) + 1);
+      });
+    } else if (!_needsEllipsis && _ellipsisTimer != null) {
+      _ellipsisTimer?.cancel();
+      _ellipsisTimer = null;
+    }
   }
 
   @override
   void didUpdateWidget(QuickPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _syncEllipsisTimer();
     if (widget.transcript != oldWidget.transcript &&
         !_hasActiveSelection(_transcriptSelectionNotifier)) {
       _scrollToBottom(_transcriptScroll);

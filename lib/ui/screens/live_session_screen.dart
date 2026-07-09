@@ -87,8 +87,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
     // TTS speaks in MY language (I hear partner's words translated to my language)
     _ttsService.setLanguageCode(widget.myLanguage);
     _ttsService.setEnabled(
-        TtsService.supportsLanguage(widget.myLanguage) &&
-            TtsService.hasApiKey);
+        TtsService.supportsLanguage(widget.myLanguage) && TtsService.hasApiKey);
 
     // Mute mic while TTS plays to prevent feedback loop
     _ttsService.onPlaybackStateChanged = (playing) {
@@ -364,8 +363,7 @@ class _LiveSessionScreenState extends State<LiveSessionScreen> {
   @override
   Widget build(BuildContext context) {
     final showTtsToggle =
-        TtsService.supportsLanguage(widget.myLanguage) &&
-            TtsService.hasApiKey;
+        TtsService.supportsLanguage(widget.myLanguage) && TtsService.hasApiKey;
 
     return PopScope(
       canPop: false,

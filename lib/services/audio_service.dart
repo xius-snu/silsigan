@@ -16,8 +16,14 @@ class AudioService {
   StreamSubscription? _winStreamSubscription;
 
   Timer? _chunkTimer;
-  final List<int> _audioBuffer = [];
+  // Audio captured since the last chunk tick. BytesBuilder(copy: false) keeps
+  // the incoming Uint8List references and concatenates once per tick — no
+  // per-byte copying into a growable List<int>.
+  final BytesBuilder _pending = BytesBuilder(copy: false);
   bool _isInitialized = false;
+
+  // When the recorder last delivered data — used by [isCapturingHealthy].
+  DateTime? _lastDataAt;
 
   // Disk-based recording instead of in-memory list
   RandomAccessFile? _tempRaf;
@@ -42,11 +48,20 @@ class AudioService {
 
   bool get isRecording => _chunkTimer != null;
 
+  /// Whether capture is running AND the recorder delivered data recently.
+  /// Used on app-resume to decide if the recorder survived the background
+  /// stint (Android, where the foreground service keeps it alive) or must be
+  /// restarted (iOS suspension kills audio; some Android OEMs do too).
+  bool get isCapturingHealthy =>
+      isRecording &&
+      _lastDataAt != null &&
+      DateTime.now().difference(_lastDataAt!) < const Duration(seconds: 2);
+
   Future<void> start() async {
     // Stop any existing capture first (safe to call if already stopped)
     if (isRecording) await stop();
     if (!_isInitialized) await init();
-    _audioBuffer.clear();
+    _pending.clear();
 
     // Close any lingering file handle before (re)opening
     try {
@@ -86,18 +101,16 @@ class AudioService {
       ),
     );
     _winStreamSubscription = stream.listen((data) {
-      _audioBuffer.addAll(data);
-      // Write to disk instead of in-memory list
-      _writeToDisk(data);
+      _lastDataAt = DateTime.now();
+      _pending.add(data);
     });
   }
 
   Future<void> _startWithFlutterSound() async {
     final controller = StreamController<Uint8List>();
     _recorderSubscription = controller.stream.listen((data) {
-      _audioBuffer.addAll(data);
-      // Write to disk instead of in-memory list
-      _writeToDisk(data);
+      _lastDataAt = DateTime.now();
+      _pending.add(data);
     });
 
     await _recorder!.startRecorder(
@@ -118,9 +131,12 @@ class AudioService {
   }
 
   void _sendChunk() {
-    if (_audioBuffer.isEmpty) return;
-    final bytes = Uint8List.fromList(_audioBuffer);
-    _audioBuffer.clear();
+    if (_pending.isEmpty) return;
+    final bytes = _pending.takeBytes();
+    // One disk write per tick instead of one per recorder callback — the
+    // recorder delivers many small buffers per second and each writeFromSync
+    // was a blocking syscall on the UI isolate.
+    _writeToDisk(bytes);
     onAudioChunk?.call(bytes);
   }
 
@@ -138,6 +154,12 @@ class AudioService {
       if (_recorder != null && _recorder!.isRecording) {
         await _recorder!.stopRecorder();
       }
+    }
+
+    // Write the tail captured since the last chunk tick so the saved WAV
+    // doesn't lose the final ≤100ms.
+    if (_pending.isNotEmpty) {
+      _writeToDisk(_pending.takeBytes());
     }
 
     // Flush and keep temp file open for potential save

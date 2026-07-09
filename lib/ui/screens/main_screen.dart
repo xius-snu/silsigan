@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -55,6 +56,22 @@ String _cleanLineStart(String text) {
 /// Treats ellipsis (... or …) as a single sentence boundary.
 int _countSentences(String text) {
   return RegExp(r'\.{2,}|[.?!。…？！]').allMatches(text).length;
+}
+
+/// Isolate entry for autosave serialization (see `_autosave`). [args] is
+/// `[koreanHistory, vietnameseHistory, wordTimestampsPerLine]`; returns the
+/// three JSON strings in the same order.
+List<String> _encodeAutosaveDraft(List<Object> args) {
+  final koreanHistory = args[0] as List<String>;
+  final vietnameseHistory = args[1] as List<String>;
+  final timestamps = args[2] as List<List<WordTimestamp>>;
+  return [
+    jsonEncode(koreanHistory),
+    jsonEncode(vietnameseHistory),
+    jsonEncode(
+      timestamps.map((line) => line.map((w) => w.toJson()).toList()).toList(),
+    ),
+  ];
 }
 
 class MainScreen extends ConsumerStatefulWidget {
@@ -139,6 +156,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // Autosave: periodic timer + session start timestamp
   Timer? _autosaveTimer;
   String? _sessionCreatedAt;
+  // Cheap content fingerprint of the last successful autosave — lets the
+  // periodic timer skip the (session-sized) re-encode + DB write when
+  // nothing changed since the previous save.
+  String? _lastAutosaveFingerprint;
 
   // Analytics: track recording duration
   DateTime? _recordingStartedAt;
@@ -216,14 +237,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (recordingState != RecordingState.idle) {
         _autosave();
       }
-    } else if (state == AppLifecycleState.inactive) {
-      // Transient state (Control Center, notification, app switcher animation).
-      // Autosave defensively but don't restart audio on resume.
-      final recordingState = ref.read(recordingStateProvider);
-      if (recordingState != RecordingState.idle) {
-        _autosave();
-      }
     }
+    // AppLifecycleState.inactive intentionally does nothing: it fires for
+    // transient overlays (Control Center, permission dialogs, the app-switcher
+    // animation) and is always followed by `paused` when the app actually
+    // backgrounds — autosaving here serialized the whole session a second
+    // time at the exact moment the user swipes away. The 15s periodic
+    // autosave covers crash recovery while foregrounded.
   }
 
   /// Restart both WebSocket and audio capture after returning from background.
@@ -233,6 +253,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     try {
       await _sonioxService.ensureConnected();
     } catch (_) {}
+    // On Android the foreground service keeps capture alive in the
+    // background — restarting the recorder here costs a native stop/start
+    // round trip on the resume frame and drops audio during the gap. Only
+    // restart when capture actually died (iOS suspension; OEM kills).
+    if (_audioService.isCapturingHealthy) return;
     try {
       // Restart audio capture (appends to existing temp PCM file)
       await _audioService.start();
@@ -248,6 +273,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
   void _startIncomingPoll() {
     _incomingPollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       if (_outgoingInvite != null || _incomingInvite != null) return;
+      // No HTTP churn while capture is live — an invite can't reasonably be
+      // acted on mid-recording, and polling every 5s keeps the radio awake
+      // for the whole session (720 requests over an hour-long recording).
+      // postRecording still polls: the user can park there indefinitely with
+      // an unsaved session, and invites remain actionable in that state.
+      final recState = ref.read(recordingStateProvider);
+      if (recState == RecordingState.recording ||
+          recState == RecordingState.processing) {
+        return;
+      }
       final invite = await UserService.instance.getIncomingInvite();
       if (mounted && invite != null && _incomingInvite == null) {
         setState(() => _incomingInvite = invite);
@@ -396,6 +431,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
         _limitMinutes = usage['limitMinutes'] as int;
         _isPrivateUser = usage['isPrivate'] as bool;
       });
+    }
+  }
+
+  /// Write [value] only when it differs from the provider's current value.
+  /// StateProvider notifies on every assignment (identity, not equality), and
+  /// Soniox re-sends unchanged draft hypotheses several times a second — each
+  /// redundant notification rebuilt the visible panel for nothing.
+  void _setIfChanged<T>(StateProvider<T> provider, T value) {
+    if (ref.read(provider) != value) {
+      ref.read(provider.notifier).state = value;
     }
   }
 
@@ -1047,7 +1092,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Set up Soniox transcription callbacks
     _sonioxService.onTranscriptionDraft = (draft) {
-      ref.read(koreanDraftProvider.notifier).state = draft;
+      _setIfChanged(koreanDraftProvider, draft);
       // Cancel the newline timer while draft text is active so the
       // paragraph break can't fire mid-draft (which would make the
       // draft jump from inline to a new line unexpectedly).
@@ -1166,7 +1211,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Set up Soniox translation callbacks (used when target != Korean)
     _sonioxService.onTranslationDraft = (draft) {
-      ref.read(vietnameseDraftProvider.notifier).state = draft;
+      _setIfChanged(vietnameseDraftProvider, draft);
 
       // Auto-TTS: debounce — if draft text settles for 1.5s without a source
       // endpoint firing, speak it now rather than waiting.
@@ -1743,21 +1788,40 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Don't save empty sessions
     if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) return;
 
+    // Skip when nothing changed since the last successful save — covers
+    // silent stretches between 15s ticks and back-to-back lifecycle saves.
+    // Lengths + last entries suffice: every mutation either appends to a
+    // history/timestamp list or rewrites its last entry.
+    final fingerprint = '${koreanHistory.length}:${vietnameseHistory.length}:'
+        '${_wordTimestampsPerLine.length}:'
+        '${_wordTimestampsPerLine.isEmpty ? 0 : _wordTimestampsPerLine.last.length} '
+        '${koreanHistory.isEmpty ? '' : koreanHistory.last} '
+        '${vietnameseHistory.isEmpty ? '' : vietnameseHistory.last}';
+    if (fingerprint == _lastAutosaveFingerprint) return;
+
     _sessionCreatedAt ??= DateTime.now().toIso8601String();
 
+    // Shallow snapshot so the isolate copy below can't interleave with a
+    // concurrent line append (inner lists are never mutated once stored).
+    final timestamps = List<List<WordTimestamp>>.from(_wordTimestampsPerLine);
+
     try {
+      // The payload grows with the session (every line + every word
+      // timestamp) — encode it off the UI isolate so a long session doesn't
+      // jank a frame on every save.
+      final encoded = await compute(
+        _encodeAutosaveDraft,
+        [koreanHistory, vietnameseHistory, timestamps],
+      );
       await DatabaseService.instance.saveAutosaveDraft({
-        'korean_history': jsonEncode(koreanHistory),
-        'vietnamese_history': jsonEncode(vietnameseHistory),
-        'word_timestamps': jsonEncode(
-          _wordTimestampsPerLine
-              .map((line) => line.map((w) => w.toJson()).toList())
-              .toList(),
-        ),
+        'korean_history': encoded[0],
+        'vietnamese_history': encoded[1],
+        'word_timestamps': encoded[2],
         'target_language': ref.read(targetLanguageProvider).code,
         'created_at': _sessionCreatedAt!,
         'updated_at': DateTime.now().toIso8601String(),
       });
+      _lastAutosaveFingerprint = fingerprint;
     } catch (_) {
       // Silently ignore autosave failures — don't disrupt the user
     }
@@ -1868,7 +1932,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // detected live from the source-token language.
       _setConversationSpeaker(
           _speakerForLanguage(_sonioxService.currentSourceLanguage));
-      ref.read(conversationDraftOriginalProvider.notifier).state = draft;
+      _setIfChanged(conversationDraftOriginalProvider, draft);
     };
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
@@ -1893,7 +1957,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onTranslationDraft = (draft) {
-      ref.read(conversationDraftTranslatedProvider.notifier).state = draft;
+      _setIfChanged(conversationDraftTranslatedProvider, draft);
     };
 
     _sonioxService.onTranslationCompleted = (translation) {
@@ -2220,8 +2284,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _sonioxService.onTranscriptionDraft = (draft) {
       _maybeQuickReset(draft);
-      ref.read(quickTranscriptProvider.notifier).state =
-          _quickJoin(_quickTranscriptConfirmed, draft);
+      _setIfChanged(quickTranscriptProvider,
+          _quickJoin(_quickTranscriptConfirmed, draft));
     };
 
     _sonioxService.onTranscriptionCompleted = (transcript) {
@@ -2236,8 +2300,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onTranslationDraft = (draft) {
-      ref.read(quickTranslationProvider.notifier).state =
-          _quickJoin(_quickTranslationConfirmed, draft);
+      _setIfChanged(quickTranslationProvider,
+          _quickJoin(_quickTranslationConfirmed, draft));
     };
 
     _sonioxService.onTranslationCompleted = (translation) {
@@ -2531,6 +2595,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
   void _resetState() {
     _autosaveTimer?.cancel();
     _sessionCreatedAt = null;
+    _lastAutosaveFingerprint = null;
     DatabaseService.instance.clearAutosaveDraft();
     ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
     ref.read(koreanDraftProvider.notifier).state = '';
@@ -2555,19 +2620,18 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   @override
   Widget build(BuildContext context) {
+    // NOTE: the streaming providers (drafts, histories, speaker history,
+    // conversation/quick state) are deliberately NOT watched here — they
+    // update several times per second while recording, and watching them at
+    // this level rebuilt the entire screen per Soniox token. Each panel
+    // below watches what it needs inside its own Consumer.
     final recordingState = ref.watch(recordingStateProvider);
-    final koreanDraft = ref.watch(koreanDraftProvider);
-    final koreanHistory = ref.watch(koreanHistoryProvider);
-    final vietnameseDraft = ref.watch(vietnameseDraftProvider);
-    final vietnameseHistory = ref.watch(vietnameseHistoryProvider);
-
     final targetLanguage = ref.watch(targetLanguageProvider);
     final sourceLanguage = ref.watch(sourceLanguageProvider);
     final displayMode = ref.watch(displayModeProvider);
     final ttsEnabled = ref.watch(ttsEnabledProvider);
     final detectedLanguage = ref.watch(detectedLanguageProvider);
     final diarizationEnabled = ref.watch(diarizationEnabledProvider);
-    final speakerHistory = ref.watch(speakerHistoryProvider);
 
     // Sync TTS service state with provider. In Conversation mode the TTS
     // language is chosen per-turn (the listener's side) at release time, so
@@ -2859,146 +2923,167 @@ class _MainScreenState extends ConsumerState<MainScreen>
             // Content area: Quick / Conversation / Split / Line-by-Line
             if (displayMode == DisplayMode.quick) ...[
               Expanded(
-                child: QuickPanel(
-                  transcript: ref.watch(quickTranscriptProvider),
-                  translation: ref.watch(quickTranslationProvider),
-                  recordingState: recordingState,
-                  targetLanguage: targetLanguage,
-                  sourceLanguage: sourceLanguage,
-                  detectedLanguage: detectedLanguage,
-                  onSourceChanged: (lang) {
-                    ref.read(sourceLanguageProvider.notifier).state = lang;
-                    saveSourceLanguage(lang);
-                    if (_langSwapped) setState(() => _langSwapped = false);
-                  },
-                  speakerEnabled: quickTtsEnabled,
-                  onSpeakerChanged: (v) {
-                    ref.read(quickTtsEnabledProvider.notifier).state = v;
-                  },
-                  onMicPressStart: _startQuickRecording,
-                  onMicPressEnd: _stopQuickRecording,
-                  onClear: _clearQuick,
-                  onReplay: _replayQuick,
-                  onTargetLanguageChanged: (lang) {
-                    ref.read(targetLanguageProvider.notifier).state = lang;
-                    saveTargetLanguage(lang);
-                    _recordRecentTarget(lang);
-                    if (_langSwapped) setState(() => _langSwapped = false);
-                  },
-                  swapActive: _langSwapped,
-                  onSwap: _swapLanguages,
-                ),
+                child: Consumer(builder: (context, ref, _) {
+                  return QuickPanel(
+                    transcript: ref.watch(quickTranscriptProvider),
+                    translation: ref.watch(quickTranslationProvider),
+                    recordingState: recordingState,
+                    targetLanguage: targetLanguage,
+                    sourceLanguage: sourceLanguage,
+                    detectedLanguage: detectedLanguage,
+                    onSourceChanged: (lang) {
+                      ref.read(sourceLanguageProvider.notifier).state = lang;
+                      saveSourceLanguage(lang);
+                      if (_langSwapped) setState(() => _langSwapped = false);
+                    },
+                    speakerEnabled: quickTtsEnabled,
+                    onSpeakerChanged: (v) {
+                      ref.read(quickTtsEnabledProvider.notifier).state = v;
+                    },
+                    onMicPressStart: _startQuickRecording,
+                    onMicPressEnd: _stopQuickRecording,
+                    onClear: _clearQuick,
+                    onReplay: _replayQuick,
+                    onTargetLanguageChanged: (lang) {
+                      ref.read(targetLanguageProvider.notifier).state = lang;
+                      saveTargetLanguage(lang);
+                      _recordRecentTarget(lang);
+                      if (_langSwapped) setState(() => _langSwapped = false);
+                    },
+                    swapActive: _langSwapped,
+                    onSwap: _swapLanguages,
+                  );
+                }),
               ),
             ] else if (displayMode == DisplayMode.conversation) ...[
               Expanded(
-                child: ConversationPanel(
-                  messages: ref.watch(conversationMessagesProvider),
-                  draftOriginal: ref.watch(conversationDraftOriginalProvider),
-                  draftTranslated:
-                      ref.watch(conversationDraftTranslatedProvider),
-                  activeSpeaker: ref.watch(activeConversationSpeakerProvider),
-                  recordingState: recordingState,
-                  connecting: ref.watch(conversationConnectingProvider),
-                  myLanguage: ref.watch(myLanguageProvider),
-                  theirLanguage: ref.watch(theirLanguageProvider),
-                  onToggleListening: _toggleConversationSession,
-                  onSwapLanguages: _swapConversationLanguages,
-                  onClear: _clearConversation,
-                  onMyLanguageChanged: (lang) {
-                    ref.read(myLanguageProvider.notifier).state = lang;
-                    saveConversationLanguages(
-                        lang, ref.read(theirLanguageProvider));
-                  },
-                  onTheirLanguageChanged: (lang) {
-                    ref.read(theirLanguageProvider.notifier).state = lang;
-                    saveConversationLanguages(
-                        ref.read(myLanguageProvider), lang);
-                  },
-                ),
+                child: Consumer(builder: (context, ref, _) {
+                  return ConversationPanel(
+                    messages: ref.watch(conversationMessagesProvider),
+                    draftOriginal: ref.watch(conversationDraftOriginalProvider),
+                    draftTranslated:
+                        ref.watch(conversationDraftTranslatedProvider),
+                    activeSpeaker: ref.watch(activeConversationSpeakerProvider),
+                    recordingState: recordingState,
+                    connecting: ref.watch(conversationConnectingProvider),
+                    myLanguage: ref.watch(myLanguageProvider),
+                    theirLanguage: ref.watch(theirLanguageProvider),
+                    onToggleListening: _toggleConversationSession,
+                    onSwapLanguages: _swapConversationLanguages,
+                    onClear: _clearConversation,
+                    onMyLanguageChanged: (lang) {
+                      ref.read(myLanguageProvider.notifier).state = lang;
+                      saveConversationLanguages(
+                          lang, ref.read(theirLanguageProvider));
+                    },
+                    onTheirLanguageChanged: (lang) {
+                      ref.read(theirLanguageProvider.notifier).state = lang;
+                      saveConversationLanguages(
+                          ref.read(myLanguageProvider), lang);
+                    },
+                  );
+                }),
               ),
             ] else ...[
               if (displayMode == DisplayMode.transcription) ...[
                 Expanded(
-                  child: TranscriptPanel(
-                    history: koreanHistory,
-                    draft: koreanDraft,
-                    label: 'Transcription',
-                    showCursor:
-                        isRecordingOrProcessing && koreanDraft.isNotEmpty,
-                    isRecording: isRecordingOrProcessing,
-                    roundedTop: true,
-                    speakers: speakerHistory,
-                    showDiarizationToggle: true,
-                    diarizationEnabled: diarizationEnabled,
-                    onDiarizationChanged: _onDiarizationChanged,
-                    diarizationInteractive:
-                        !isRecordingOrProcessing && !_isStartingRecording,
-                  ),
+                  child: Consumer(builder: (context, ref, _) {
+                    final koreanHistory = ref.watch(koreanHistoryProvider);
+                    final koreanDraft = ref.watch(koreanDraftProvider);
+                    return TranscriptPanel(
+                      history: koreanHistory,
+                      draft: koreanDraft,
+                      label: 'Transcription',
+                      showCursor:
+                          isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                      isRecording: isRecordingOrProcessing,
+                      roundedTop: true,
+                      speakers: ref.watch(speakerHistoryProvider),
+                      showDiarizationToggle: true,
+                      diarizationEnabled: diarizationEnabled,
+                      onDiarizationChanged: _onDiarizationChanged,
+                      diarizationInteractive:
+                          !isRecordingOrProcessing && !_isStartingRecording,
+                    );
+                  }),
                 ),
               ] else if (displayMode == DisplayMode.split) ...[
                 Expanded(
-                  child: TranscriptPanel(
-                    history: koreanHistory,
-                    draft: koreanDraft,
-                    label: 'Transcription',
-                    showCursor:
-                        isRecordingOrProcessing && koreanDraft.isNotEmpty,
-                    isRecording: isRecordingOrProcessing,
-                    roundedTop: true,
-                    speakers: speakerHistory,
-                    showDiarizationToggle: true,
-                    diarizationEnabled: diarizationEnabled,
-                    onDiarizationChanged: _onDiarizationChanged,
-                    diarizationInteractive:
-                        !isRecordingOrProcessing && !_isStartingRecording,
-                  ),
+                  child: Consumer(builder: (context, ref, _) {
+                    final koreanHistory = ref.watch(koreanHistoryProvider);
+                    final koreanDraft = ref.watch(koreanDraftProvider);
+                    return TranscriptPanel(
+                      history: koreanHistory,
+                      draft: koreanDraft,
+                      label: 'Transcription',
+                      showCursor:
+                          isRecordingOrProcessing && koreanDraft.isNotEmpty,
+                      isRecording: isRecordingOrProcessing,
+                      roundedTop: true,
+                      speakers: ref.watch(speakerHistoryProvider),
+                      showDiarizationToggle: true,
+                      diarizationEnabled: diarizationEnabled,
+                      onDiarizationChanged: _onDiarizationChanged,
+                      diarizationInteractive:
+                          !isRecordingOrProcessing && !_isStartingRecording,
+                    );
+                  }),
                 ),
                 Container(
                   height: 5,
                   color: AppConstants.dividerColor,
                 ),
                 Expanded(
-                  child: TranscriptPanel(
-                    history: vietnameseHistory,
-                    draft: vietnameseDraft,
-                    label: 'Translation',
-                    showEllipsis:
-                        isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
-                    showSpeakerToggle: showTtsToggle,
-                    speakerEnabled: ttsEnabled,
-                    onSpeakerToggle: _toggleTts,
-                    // Translation paragraphs mirror transcription paragraphs
-                    // 1:1, so the same per-paragraph speaker list applies.
-                    speakers: speakerHistory,
-                    // Mirror the transcription panel's paragraph-break state:
-                    // if the transcription has a trailing empty entry (timer
-                    // fired after 4s silence), force the translation draft to
-                    // render on a new line too, even if the vietnamese history
-                    // hasn't caught up yet.
-                    forceDraftStandalone: koreanHistory.isNotEmpty &&
-                        koreanHistory.last.trim().isEmpty,
-                  ),
+                  child: Consumer(builder: (context, ref, _) {
+                    final koreanHistory = ref.watch(koreanHistoryProvider);
+                    final vietnameseHistory =
+                        ref.watch(vietnameseHistoryProvider);
+                    final vietnameseDraft = ref.watch(vietnameseDraftProvider);
+                    return TranscriptPanel(
+                      history: vietnameseHistory,
+                      draft: vietnameseDraft,
+                      label: 'Translation',
+                      showEllipsis:
+                          isRecordingOrProcessing && vietnameseDraft.isNotEmpty,
+                      showSpeakerToggle: showTtsToggle,
+                      speakerEnabled: ttsEnabled,
+                      onSpeakerToggle: _toggleTts,
+                      // Translation paragraphs mirror transcription paragraphs
+                      // 1:1, so the same per-paragraph speaker list applies.
+                      speakers: ref.watch(speakerHistoryProvider),
+                      // Mirror the transcription panel's paragraph-break state:
+                      // if the transcription has a trailing empty entry (timer
+                      // fired after 4s silence), force the translation draft to
+                      // render on a new line too, even if the vietnamese
+                      // history hasn't caught up yet.
+                      forceDraftStandalone: koreanHistory.isNotEmpty &&
+                          koreanHistory.last.trim().isEmpty,
+                    );
+                  }),
                 ),
               ] else
                 Expanded(
-                  child: LineByLinePanel(
-                    transcriptionHistory: koreanHistory,
-                    transcriptionDraft: koreanDraft,
-                    translationHistory: vietnameseHistory,
-                    translationDraft: vietnameseDraft,
-                    isRecording: isRecordingOrProcessing,
-                    showSpeakerToggle: showTtsToggle,
-                    speakerEnabled: ttsEnabled,
-                    onSpeakerToggle: _toggleTts,
-                    onSpeakLine: (text) => _ttsService.speakOnce(text),
-                    ttsLineState: showTtsToggle ? _ttsService.lineState : null,
-                    speakers: speakerHistory,
-                    showDiarizationToggle: true,
-                    diarizationEnabled: diarizationEnabled,
-                    onDiarizationChanged: _onDiarizationChanged,
-                    diarizationInteractive:
-                        !isRecordingOrProcessing && !_isStartingRecording,
-                  ),
+                  child: Consumer(builder: (context, ref, _) {
+                    return LineByLinePanel(
+                      transcriptionHistory: ref.watch(koreanHistoryProvider),
+                      transcriptionDraft: ref.watch(koreanDraftProvider),
+                      translationHistory: ref.watch(vietnameseHistoryProvider),
+                      translationDraft: ref.watch(vietnameseDraftProvider),
+                      isRecording: isRecordingOrProcessing,
+                      showSpeakerToggle: showTtsToggle,
+                      speakerEnabled: ttsEnabled,
+                      onSpeakerToggle: _toggleTts,
+                      onSpeakLine: (text) => _ttsService.speakOnce(text),
+                      ttsLineState:
+                          showTtsToggle ? _ttsService.lineState : null,
+                      speakers: ref.watch(speakerHistoryProvider),
+                      showDiarizationToggle: true,
+                      diarizationEnabled: diarizationEnabled,
+                      onDiarizationChanged: _onDiarizationChanged,
+                      diarizationInteractive:
+                          !isRecordingOrProcessing && !_isStartingRecording,
+                    );
+                  }),
                 ),
 
               // Bottom Controls Area (only for non-conversation modes)

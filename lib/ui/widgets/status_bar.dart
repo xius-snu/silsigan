@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../providers/recording_provider.dart';
 
@@ -10,44 +11,45 @@ class StatusBar extends StatefulWidget {
   State<StatusBar> createState() => _StatusBarState();
 }
 
-class _StatusBarState extends State<StatusBar>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
+class _StatusBarState extends State<StatusBar> {
+  // A discrete timer blink instead of a vsync AnimationController: a repeating
+  // controller forces a frame every refresh interval (120Hz on recent phones)
+  // for the entire recording session just to pulse a 10px dot. The timer costs
+  // 2 tiny rebuilds per second instead.
+  Timer? _blinkTimer;
+  bool _dotVisible = true;
 
-  @override
-  void initState() {
-    super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1000),
-    );
-    _pulseAnimation = Tween<double>(begin: 0.4, end: 1.0).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-    if (_shouldAnimate) {
-      _pulseController.repeat(reverse: true);
-    }
-  }
-
-  bool get _shouldAnimate =>
+  bool get _shouldBlink =>
       widget.state == RecordingState.recording ||
       widget.state == RecordingState.processing;
 
   @override
+  void initState() {
+    super.initState();
+    _syncBlinkTimer();
+  }
+
+  @override
   void didUpdateWidget(StatusBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_shouldAnimate && !_pulseController.isAnimating) {
-      _pulseController.repeat(reverse: true);
-    } else if (!_shouldAnimate && _pulseController.isAnimating) {
-      _pulseController.stop();
-      _pulseController.reset();
+    _syncBlinkTimer();
+  }
+
+  void _syncBlinkTimer() {
+    if (_shouldBlink && _blinkTimer == null) {
+      _blinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        if (mounted) setState(() => _dotVisible = !_dotVisible);
+      });
+    } else if (!_shouldBlink && _blinkTimer != null) {
+      _blinkTimer?.cancel();
+      _blinkTimer = null;
+      _dotVisible = true;
     }
   }
 
   @override
   void dispose() {
-    _pulseController.dispose();
+    _blinkTimer?.cancel();
     super.dispose();
   }
 
@@ -67,21 +69,18 @@ class _StatusBarState extends State<StatusBar>
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AnimatedBuilder(
-            animation: _pulseAnimation,
-            builder: (context, child) {
-              return Opacity(
-                opacity: _pulseAnimation.value,
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: color,
-                  ),
+          RepaintBoundary(
+            child: Opacity(
+              opacity: _dotVisible ? 1.0 : 0.4,
+              child: Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color,
                 ),
-              );
-            },
+              ),
+            ),
           ),
           const SizedBox(width: 6),
           Text(

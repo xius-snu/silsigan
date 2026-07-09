@@ -92,9 +92,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     super.initState();
     _scrollController.addListener(_onScroll);
     if (widget.showCursor) {
-      _cursorTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-        if (mounted) setState(() => _cursorVisible = !_cursorVisible);
-      });
+      _startCursorTimer();
     }
     if (widget.showEllipsis) {
       _startEllipsisTimer();
@@ -108,6 +106,13 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     });
   }
 
+  void _startCursorTimer() {
+    _cursorTimer?.cancel();
+    _cursorTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _cursorVisible = !_cursorVisible);
+    });
+  }
+
   @override
   void didUpdateWidget(TranscriptPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -117,7 +122,22 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       _ellipsisTimer?.cancel();
       _ellipsisTimer = null;
     }
-    if (!_userScrolledUp && !_hasActiveSelection) {
+    // The cursor blink tracks transitions too — it used to be started only in
+    // initState, so a panel mounted before recording never blinked and one
+    // mounted mid-draft kept a 2Hz setState alive after the draft ended.
+    if (widget.showCursor && !oldWidget.showCursor) {
+      _startCursorTimer();
+    } else if (!widget.showCursor && oldWidget.showCursor) {
+      _cursorTimer?.cancel();
+      _cursorTimer = null;
+      _cursorVisible = true;
+    }
+    // Auto-scroll only when content actually changed — parent rebuilds for
+    // unrelated state shouldn't restart the scroll animation.
+    final contentChanged = !identical(widget.history, oldWidget.history) ||
+        widget.draft != oldWidget.draft ||
+        widget.showEllipsis != oldWidget.showEllipsis;
+    if (contentChanged && !_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -288,37 +308,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                 : SelectionArea(
                     child: SelectionListener(
                       selectionNotifier: _selectionNotifier,
-                      child: ListView(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: AppConstants.panelPaddingH,
-                          vertical: 8,
-                        ),
-                        children: [
-                          ..._buildHistoryLines(),
-                          // Draft standalone: no history yet, or new paragraph started (trailing empty line)
-                          if (!_draftInline &&
-                              (widget.draft.isNotEmpty || widget.showEllipsis))
-                            // Draft text mutates as tokens stream in — keep it
-                            // out of the selection so an active selection can't
-                            // re-anchor onto text that just changed.
-                            SelectionContainer.disabled(
-                              child: Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: Text(
-                                  _cleanLineStart(_buildDraftText()),
-                                  textDirection: directionOf(_buildDraftText()),
-                                  style: const TextStyle(
-                                    fontSize: AppConstants.contentFontSize,
-                                    color: AppConstants.textPrimary,
-                                    fontWeight: FontWeight.w400,
-                                    height: 1.5,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
+                      child: _buildLazyList(),
                     ),
                   ),
           ),
@@ -338,88 +328,145 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     return false;
   }
 
-  /// History paragraphs, each optionally preceded by a "SPEAKER N" label when
-  /// the speaker changes from the previous visible paragraph.
-  List<Widget> _buildHistoryLines() {
-    final lines = <Widget>[];
+  /// Lazily-built history list. Row DESCRIPTORS for the whole history are
+  /// cheap (ints/bools); the actual widgets are only constructed for rows on
+  /// screen, so a long session doesn't pay an O(all-lines) widget rebuild on
+  /// every streaming token or ellipsis tick.
+  Widget _buildLazyList() {
     final labelsOn = _showSpeakerLabels;
-    int? prevSpeaker;
 
+    int lastNonEmpty = -1;
+    for (int i = widget.history.length - 1; i >= 0; i--) {
+      if (widget.history[i].trim().isNotEmpty) {
+        lastNonEmpty = i;
+        break;
+      }
+    }
+
+    final specs = <_TranscriptRowSpec>[];
+    int? prevSpeaker;
     for (int i = 0; i < widget.history.length; i++) {
       if (widget.history[i].trim().isEmpty) continue;
-
       final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
       final showLabel = labelsOn && speaker != null && speaker != prevSpeaker;
       if (speaker != null) prevSpeaker = speaker;
-
-      final Widget text = _isLastNonEmptyLine(i) &&
-              _draftInline &&
-              (widget.draft.isNotEmpty || widget.showEllipsis)
-          // The in-progress paragraph fuses committed text with the draft
-          // (cursor '|' / ellipsis dots / streaming tokens) in one selectable
-          // paragraph that mutates several times a second — a selection
-          // touching it would flicker, re-anchor onto new words, and copy
-          // draft artifacts. Keep the whole line out of the selection until
-          // its paragraph completes.
-          ? SelectionContainer.disabled(
-              child: Text.rich(
-                textDirection: directionOf(widget.history[i]),
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: widget.history[i],
-                      style: TextStyle(
-                        fontSize: AppConstants.contentFontSize,
-                        color: AppConstants.textPrimary
-                            .withOpacity(AppConstants.historyOpacity),
-                        height: 1.5,
-                      ),
-                    ),
-                    TextSpan(
-                      text: ' ${_buildDraftText()}',
-                      style: const TextStyle(
-                        fontSize: AppConstants.contentFontSize,
-                        color: AppConstants.textPrimary,
-                        fontWeight: FontWeight.w400,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          : Text(
-              widget.history[i],
-              textDirection: directionOf(widget.history[i]),
-              style: TextStyle(
-                fontSize: AppConstants.contentFontSize,
-                color: AppConstants.textPrimary
-                    .withOpacity(AppConstants.historyOpacity),
-                height: 1.5,
-              ),
-            );
-
-      lines.add(Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: showLabel
-            // stretch, not start: start gives the line loose width, which
-            // shrink-wraps short RTL (Arabic/Persian) lines onto the LEFT
-            // edge; stretch keeps the full-width layout unlabeled lines get
-            // from the ListView, so their right-alignment is preserved.
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 2),
-                    child: SpeakerLabel(speaker),
-                  ),
-                  text,
-                ],
-              )
-            : text,
+      specs.add(_TranscriptRowSpec(
+        historyIndex: i,
+        speaker: speaker,
+        showLabel: showLabel,
+        fuseDraft: i == lastNonEmpty &&
+            _draftInline &&
+            (widget.draft.isNotEmpty || widget.showEllipsis),
       ));
     }
-    return lines;
+
+    // Draft standalone: no history yet, or new paragraph started (trailing
+    // empty line).
+    final standaloneDraft =
+        !_draftInline && (widget.draft.isNotEmpty || widget.showEllipsis);
+
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppConstants.panelPaddingH,
+        vertical: 8,
+      ),
+      itemCount: specs.length + (standaloneDraft ? 1 : 0),
+      itemBuilder: (context, index) {
+        if (index >= specs.length) return _buildStandaloneDraft();
+        return _buildHistoryRow(specs[index]);
+      },
+    );
+  }
+
+  /// One history paragraph, optionally preceded by a "SPEAKER N" label when
+  /// the speaker changes from the previous visible paragraph.
+  Widget _buildHistoryRow(_TranscriptRowSpec spec) {
+    final i = spec.historyIndex;
+    final Widget text = spec.fuseDraft
+        // The in-progress paragraph fuses committed text with the draft
+        // (cursor '|' / ellipsis dots / streaming tokens) in one selectable
+        // paragraph that mutates several times a second — a selection
+        // touching it would flicker, re-anchor onto new words, and copy
+        // draft artifacts. Keep the whole line out of the selection until
+        // its paragraph completes.
+        ? SelectionContainer.disabled(
+            child: Text.rich(
+              textDirection: directionOf(widget.history[i]),
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: widget.history[i],
+                    style: TextStyle(
+                      fontSize: AppConstants.contentFontSize,
+                      color: AppConstants.textPrimary
+                          .withOpacity(AppConstants.historyOpacity),
+                      height: 1.5,
+                    ),
+                  ),
+                  TextSpan(
+                    text: ' ${_buildDraftText()}',
+                    style: const TextStyle(
+                      fontSize: AppConstants.contentFontSize,
+                      color: AppConstants.textPrimary,
+                      fontWeight: FontWeight.w400,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : Text(
+            widget.history[i],
+            textDirection: directionOf(widget.history[i]),
+            style: TextStyle(
+              fontSize: AppConstants.contentFontSize,
+              color: AppConstants.textPrimary
+                  .withOpacity(AppConstants.historyOpacity),
+              height: 1.5,
+            ),
+          );
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: spec.showLabel
+          // stretch, not start: start gives the line loose width, which
+          // shrink-wraps short RTL (Arabic/Persian) lines onto the LEFT
+          // edge; stretch keeps the full-width layout unlabeled lines get
+          // from the ListView, so their right-alignment is preserved.
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: SpeakerLabel(spec.speaker!),
+                ),
+                text,
+              ],
+            )
+          : text,
+    );
+  }
+
+  // Draft text mutates as tokens stream in — keep it out of the selection so
+  // an active selection can't re-anchor onto text that just changed.
+  Widget _buildStandaloneDraft() {
+    return SelectionContainer.disabled(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          _cleanLineStart(_buildDraftText()),
+          textDirection: directionOf(_buildDraftText()),
+          style: const TextStyle(
+            fontSize: AppConstants.contentFontSize,
+            color: AppConstants.textPrimary,
+            fontWeight: FontWeight.w400,
+            height: 1.5,
+          ),
+        ),
+      ),
+    );
   }
 
   /// Draft attaches inline only if the last history entry is non-empty
@@ -430,13 +477,6 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       !widget.forceDraftStandalone &&
       widget.history.isNotEmpty &&
       widget.history.last.trim().isNotEmpty;
-
-  bool _isLastNonEmptyLine(int index) {
-    for (int j = index + 1; j < widget.history.length; j++) {
-      if (widget.history[j].trim().isNotEmpty) return false;
-    }
-    return true;
-  }
 
   String _buildDraftText() {
     final dots = '.' * _ellipsisCount;
@@ -452,4 +492,20 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
     }
     return text;
   }
+}
+
+/// Cheap per-row descriptor computed for the full history each build; the
+/// corresponding widget is only built for rows inside the viewport.
+class _TranscriptRowSpec {
+  final int historyIndex;
+  final int? speaker;
+  final bool showLabel;
+  final bool fuseDraft;
+
+  const _TranscriptRowSpec({
+    required this.historyIndex,
+    required this.speaker,
+    required this.showLabel,
+    required this.fuseDraft,
+  });
 }

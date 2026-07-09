@@ -385,8 +385,8 @@ class _FriendDialogState extends State<FriendDialog> {
                             ],
                             if (_outgoing.isNotEmpty) ...[
                               _sectionHeader('PENDING', _outgoing.length),
-                              ..._outgoing.map(
-                                  (r) => _requestTile(r, incoming: false)),
+                              ..._outgoing
+                                  .map((r) => _requestTile(r, incoming: false)),
                               const SizedBox(height: 12),
                             ],
                             _sectionHeader('FRIENDS', _friends.length),
@@ -491,8 +491,7 @@ class _FriendDialogState extends State<FriendDialog> {
             GestureDetector(
               onTap: () => _cancelRequest(id),
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.grey.shade200,
                   borderRadius: BorderRadius.circular(6),
@@ -522,7 +521,8 @@ class _FriendDialogState extends State<FriendDialog> {
                 onPressed: () => Navigator.pop(ctx, lang),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text(lang.displayName, style: const TextStyle(fontSize: 16)),
+                  child: Text(lang.displayName,
+                      style: const TextStyle(fontSize: 16)),
                 ),
               ),
             )
@@ -550,8 +550,7 @@ class _FriendDialogState extends State<FriendDialog> {
       });
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text(result?['error'] ?? 'Failed to send invite')),
+        SnackBar(content: Text(result?['error'] ?? 'Failed to send invite')),
       );
     }
   }

@@ -52,8 +52,10 @@ class UpdateService {
   /// Returns true if [remote] is newer than [local].
   /// Compares semver segments numerically: 1.0.3 > 1.0.2, 1.1.0 > 1.0.9
   static bool _isNewer(String remote, String local) {
-    final remoteParts = remote.split('.').map((s) => int.tryParse(s) ?? 0).toList();
-    final localParts = local.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final remoteParts =
+        remote.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final localParts =
+        local.split('.').map((s) => int.tryParse(s) ?? 0).toList();
 
     final len = remoteParts.length > localParts.length
         ? remoteParts.length

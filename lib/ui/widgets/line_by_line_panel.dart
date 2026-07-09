@@ -88,7 +88,14 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       _ellipsisTimer?.cancel();
       _ellipsisTimer = null;
     }
-    if (!_userScrolledUp && !_hasActiveSelection) {
+    // Auto-scroll only when content actually changed — parent rebuilds for
+    // unrelated state shouldn't restart the scroll animation.
+    final contentChanged = !identical(
+            widget.transcriptionHistory, oldWidget.transcriptionHistory) ||
+        !identical(widget.translationHistory, oldWidget.translationHistory) ||
+        widget.transcriptionDraft != oldWidget.transcriptionDraft ||
+        widget.translationDraft != oldWidget.translationDraft;
+    if (contentChanged && !_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -210,10 +217,13 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     return false;
   }
 
-  /// Builds paired widgets using raw indices. Shows translation draft
-  /// in-place within the first empty slot rather than at the bottom.
-  ({List<Widget> widgets, bool translationDraftPlaced}) _buildPairedWidgets() {
-    final widgets = <Widget>[];
+  /// Builds cheap row DESCRIPTORS for the full paired history — the actual
+  /// widgets are only constructed for rows on screen (ListView.builder), so a
+  /// long session doesn't pay an O(all-lines) widget rebuild on every
+  /// streaming token or ellipsis tick. Shows the translation draft in-place
+  /// within the first empty slot rather than at the bottom.
+  List<_LineRowSpec> _buildRowSpecs() {
+    final specs = <_LineRowSpec>[];
     final rawCount = max(
         widget.transcriptionHistory.length, widget.translationHistory.length);
     bool addedAny = false;
@@ -231,38 +241,25 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
 
       if (!hasTranscript && !hasTranslation && !isEmptySlot) continue;
 
-      if (addedAny) widgets.add(const SizedBox(height: 12));
+      if (addedAny) specs.add(const _LineRowSpec(_LineRowKind.gap));
 
       if (hasTranscript) {
         final speaker = i < widget.speakers.length ? widget.speakers[i] : null;
         if (labelsOn && speaker != null && speaker != prevSpeaker) {
-          widgets.add(Padding(
-            padding: const EdgeInsets.only(left: 2, bottom: 3),
-            child: SpeakerLabel(speaker),
-          ));
+          specs.add(_LineRowSpec(_LineRowKind.speakerLabel, speaker));
         }
         if (speaker != null) prevSpeaker = speaker;
-        widgets.add(_buildTranscriptionBlock(
-          widget.transcriptionHistory[i],
-        ));
+        specs.add(_LineRowSpec(_LineRowKind.transcription, i));
       }
 
       if (hasTranslation) {
-        widgets.add(_buildTranslationBlock(widget.translationHistory[i]));
+        specs.add(_LineRowSpec(_LineRowKind.translation, i));
       } else if (isEmptySlot && !translationDraftPlaced) {
         // Show translation draft in-place within the first empty slot.
         // This is where the translation will land when it completes.
-        if (widget.translationDraft.isNotEmpty) {
-          widgets.add(_buildTranslationBlock(
-            '${widget.translationDraft}${'.' * _ellipsisCount}',
-            isDraft: true,
-          ));
-          translationDraftPlaced = true;
-        } else if (widget.isRecording && hasTranscript) {
-          widgets.add(_buildTranslationBlock(
-            '.' * _ellipsisCount,
-            isDraft: true,
-          ));
+        if (widget.translationDraft.isNotEmpty ||
+            (widget.isRecording && hasTranscript)) {
+          specs.add(const _LineRowSpec(_LineRowKind.translationDraft));
           translationDraftPlaced = true;
         }
       }
@@ -270,12 +267,50 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       addedAny = true;
     }
 
-    return (widgets: widgets, translationDraftPlaced: translationDraftPlaced);
+    // Live transcription draft (always at bottom — current speech).
+    if (widget.transcriptionDraft.isNotEmpty) {
+      if (specs.isNotEmpty) specs.add(const _LineRowSpec(_LineRowKind.gap));
+      specs.add(const _LineRowSpec(_LineRowKind.transcriptionDraft));
+    }
+    // Translation draft at bottom only if not already shown in-place.
+    if (!translationDraftPlaced && widget.translationDraft.isNotEmpty) {
+      specs.add(const _LineRowSpec(_LineRowKind.translationDraft));
+    }
+
+    return specs;
+  }
+
+  Widget _buildRow(_LineRowSpec spec) {
+    switch (spec.kind) {
+      case _LineRowKind.gap:
+        return const SizedBox(height: 12);
+      case _LineRowKind.speakerLabel:
+        return Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 3),
+          child: SpeakerLabel(spec.index),
+        );
+      case _LineRowKind.transcription:
+        return _buildTranscriptionBlock(
+            widget.transcriptionHistory[spec.index]);
+      case _LineRowKind.translation:
+        return _buildTranslationBlock(widget.translationHistory[spec.index]);
+      case _LineRowKind.transcriptionDraft:
+        return _buildTranscriptionBlock(widget.transcriptionDraft,
+            isDraft: true);
+      case _LineRowKind.translationDraft:
+        final dots = '.' * _ellipsisCount;
+        return _buildTranslationBlock(
+          widget.translationDraft.isNotEmpty
+              ? '${widget.translationDraft}$dots'
+              : dots,
+          isDraft: true,
+        );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final (:widgets, :translationDraftPlaced) = _buildPairedWidgets();
+    final specs = _buildRowSpecs();
 
     return Container(
       decoration: BoxDecoration(
@@ -356,30 +391,15 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                 : SelectionArea(
                     child: SelectionListener(
                       selectionNotifier: _selectionNotifier,
-                      child: ListView(
+                      child: ListView.builder(
                         controller: _scrollController,
                         padding: const EdgeInsets.symmetric(
                           horizontal: AppConstants.panelPaddingH,
                           vertical: 8,
                         ),
-                        children: [
-                          ...widgets,
-                          // Live transcription draft (always at bottom — current speech)
-                          if (widget.transcriptionDraft.isNotEmpty) ...[
-                            if (widgets.isNotEmpty) const SizedBox(height: 12),
-                            _buildTranscriptionBlock(
-                              widget.transcriptionDraft,
-                              isDraft: true,
-                            ),
-                          ],
-                          // Translation draft at bottom only if not already shown in-place
-                          if (!translationDraftPlaced &&
-                              widget.translationDraft.isNotEmpty)
-                            _buildTranslationBlock(
-                              '${widget.translationDraft}${'.' * _ellipsisCount}',
-                              isDraft: true,
-                            ),
-                        ],
+                        itemCount: specs.length,
+                        itemBuilder: (context, index) =>
+                            _buildRow(specs[index]),
                       ),
                     ),
                   ),
@@ -494,6 +514,26 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
     // See _buildTranscriptionBlock: drafts stay outside the selection.
     return isDraft ? SelectionContainer.disabled(child: block) : block;
   }
+}
+
+enum _LineRowKind {
+  gap,
+  speakerLabel,
+  transcription,
+  translation,
+  transcriptionDraft,
+  translationDraft,
+}
+
+/// Cheap per-row descriptor computed for the full history each build; the
+/// corresponding widget is only built for rows inside the viewport.
+/// [index] is the history index for transcription/translation rows and the
+/// speaker id for speakerLabel rows.
+class _LineRowSpec {
+  final _LineRowKind kind;
+  final int index;
+
+  const _LineRowSpec(this.kind, [this.index = 0]);
 }
 
 class _PulsingIcon extends StatefulWidget {

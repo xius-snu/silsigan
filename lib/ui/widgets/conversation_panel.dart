@@ -100,7 +100,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
   @override
   void initState() {
     super.initState();
-    _startEllipsisTimer();
+    _syncEllipsisTimer();
     _bottomScrollController.addListener(_onBottomScroll);
     _topScrollController.addListener(_onTopScroll);
   }
@@ -108,6 +108,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
   @override
   void didUpdateWidget(ConversationPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _syncEllipsisTimer();
     // Auto-scroll when new messages or drafts change
     final contentChanged =
         widget.messages.length != oldWidget.messages.length ||
@@ -140,10 +141,21 @@ class _ConversationPanelState extends State<ConversationPanel> {
     }
   }
 
-  void _startEllipsisTimer() {
-    _ellipsisTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
-      if (mounted) setState(() => _ellipsisCount = (_ellipsisCount % 3) + 1);
-    });
+  // The animated dots only render inside the draft bubble, which exists only
+  // while a session is live with a detected speaker. Running the timer outside
+  // that window would rebuild every bubble in both halves at 2.5Hz forever —
+  // even with the panel fully idle.
+  bool get _needsEllipsis => _isRecording && widget.activeSpeaker != null;
+
+  void _syncEllipsisTimer() {
+    if (_needsEllipsis && _ellipsisTimer == null) {
+      _ellipsisTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+        if (mounted) setState(() => _ellipsisCount = (_ellipsisCount % 3) + 1);
+      });
+    } else if (!_needsEllipsis && _ellipsisTimer != null) {
+      _ellipsisTimer?.cancel();
+      _ellipsisTimer = null;
+    }
   }
 
   @override
@@ -441,30 +453,39 @@ class _ConversationPanelState extends State<ConversationPanel> {
       );
     }
 
-    // Build items in normal order, then reverse for the reversed ListView
-    final items = <Widget>[
-      for (final msg in widget.messages) _buildMessageBubble(msg, perspective),
-      if (_isRecording && widget.activeSpeaker != null)
-        // Draft text mutates as tokens stream in — keep it out of the
-        // selection so an active selection can't re-anchor onto text that
-        // just changed.
-        SelectionContainer.disabled(child: _buildDraftBubble(perspective)),
-    ];
-    final reversed = items.reversed.toList();
+    // Lazily built + reversed ListView: item 0 is the newest entry (the draft
+    // bubble when live), so only visible bubbles are constructed instead of
+    // every message of the session on each rebuild.
+    final messages = widget.messages;
+    final hasDraft = _isRecording && widget.activeSpeaker != null;
+    final itemCount = messages.length + (hasDraft ? 1 : 0);
 
     final isTop = perspective == ConversationSpeaker.top;
     return SelectionArea(
       child: SelectionListener(
         selectionNotifier:
             isTop ? _topSelectionNotifier : _bottomSelectionNotifier,
-        child: ListView(
+        child: ListView.builder(
           controller: scrollController,
           reverse: true,
           padding: const EdgeInsets.symmetric(
             horizontal: AppConstants.panelPaddingH,
             vertical: 12,
           ),
-          children: reversed,
+          itemCount: itemCount,
+          itemBuilder: (context, index) {
+            // reverse:true → index 0 sits at the bottom; map back to
+            // chronological order.
+            final logical = itemCount - 1 - index;
+            if (hasDraft && logical == messages.length) {
+              // Draft text mutates as tokens stream in — keep it out of the
+              // selection so an active selection can't re-anchor onto text
+              // that just changed.
+              return SelectionContainer.disabled(
+                  child: _buildDraftBubble(perspective));
+            }
+            return _buildMessageBubble(messages[logical], perspective);
+          },
         ),
       ),
     );

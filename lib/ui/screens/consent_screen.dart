@@ -118,24 +118,21 @@ class _ConsentScreenState extends State<ConsentScreen> {
           _DisclosureItem(
             icon: Icons.mic_none_rounded,
             title: 'What we send',
-            body:
-                'When you record, your voice audio and the text transcribed '
+            body: 'When you record, your voice audio and the text transcribed '
                 'from it are streamed off your device to be processed in real '
                 'time.',
           ),
           _DisclosureItem(
             icon: Icons.cloud_outlined,
             title: 'Who receives it',
-            body:
-                'Audio is sent through our secure server to a third-party AI '
+            body: 'Audio is sent through our secure server to a third-party AI '
                 'service, which processes it in real time and does not store '
                 'it afterward.',
           ),
           _DisclosureItem(
             icon: Icons.verified_user_outlined,
             title: 'Your choice',
-            body:
-                'Nothing is sent until you tap the microphone. Audio '
+            body: 'Nothing is sent until you tap the microphone. Audio '
                 'recordings you save stay on your device. By continuing you '
                 'agree to this processing.',
             isLast: true,
