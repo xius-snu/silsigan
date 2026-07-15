@@ -165,6 +165,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - When target == source (e.g. Korean→Korean), transcription is copied into the translation panel.
 - **Rotation timer:** WS is rotated every 10 minutes to prevent translation model degradation in long sessions; `contextText` (last 10 history lines) is replayed to keep continuity.
 - **Reconnect:** up to 50 attempts; audio buffered (capped at 30s) during reconnection.
+- **Optimistic start:** `_startRecording` does NOT await `connect()` — the mic starts and the button flips to recording immediately (~200ms); the proxy handshake completes in the background while speech buffers (30s cap) and flushes only into a proven-live socket. `connect()` must be *invoked* before `_audioService.start()` (it synchronously clears the audio buffer before its first await). Start-time connection failures fall into the same reconnect/backoff path as a mid-session drop.
 - **Late translation flush:** translations arriving after the source endpoint are debounced 800ms so they don't merge with the next utterance.
 - **Server-authoritative usage limit:** when the proxy closes WS with **code 4005**, `onUsageLimitReached` fires → recording stops + paywall dialog. The client does NOT run its own timer; see [usage timer behavior](memory/feedback_apk_build.md).
 

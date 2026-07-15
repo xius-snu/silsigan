@@ -184,7 +184,11 @@ class SonioxRealtimeService {
     _resetTokenState();
     _clearAudioBuffer();
     await _doConnect();
-    _startRotationTimer();
+    // Callers may run connect() unawaited (optimistic recording start) and
+    // disconnect() while the handshake is still in flight — that teardown
+    // already stopped the rotation timer, so don't restart it on a session
+    // that has been intentionally closed.
+    if (!_intentionallyClosed) _startRotationTimer();
   }
 
   Future<void> _doConnect() async {

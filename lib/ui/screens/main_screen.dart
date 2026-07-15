@@ -111,10 +111,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // Guard against multiple stop taps
   bool _isStopping = false;
 
-  // Locks the diarization toggle from the moment the Soniox session config
-  // is captured in _startRecording until recordingState flips to recording.
-  // Without this, a toggle tap landing in that async window (mic/audio-session
-  // startup) flips the icon but is silently ignored for the whole session.
+  // Single-flights _startRecording (the button doesn't flip to Stop until the
+  // mic is live, so a rapid second tap would otherwise run a duplicate start
+  // chain whose failure path tears down the first chain's session) and locks
+  // the diarization toggle until recordingState flips to recording — a toggle
+  // tap landing in the startup window flips the icon but is silently ignored
+  // for the whole session.
   bool _isStartingRecording = false;
 
   // ── Quick Mode (press-and-hold) state ──────────────────────────────
@@ -1020,6 +1022,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   Future<void> _startRecording() async {
+    if (_isStartingRecording) return;
+
     // Check usage limit before starting
     if (_usageLimitReached) {
       _forceStopForUsageLimit();
@@ -1323,6 +1327,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     try {
+      // Locks the diarization toggle and blocks re-entry from here on; every
+      // exit from the try (success or catch) clears it.
+      setState(() => _isStartingRecording = true);
       // Start foreground service first (Android) to prevent OS killing the app
       await BackgroundService.startRecordingService();
       await UserService.instance.ensureAuthenticated();
@@ -1338,11 +1345,18 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // translated without their subject. Other modes keep neutral defaults.
       final isLineByLine =
           ref.read(displayModeProvider) == DisplayMode.lineByLine;
-      // The diarization value is captured synchronously below — lock the
-      // toggle before the connect/audio-start awaits so a tap in that window
-      // can't diverge from what the session was configured with.
-      setState(() => _isStartingRecording = true);
-      await _sonioxService.connect(
+      // Optimistic start: connect() is deliberately NOT awaited — awaiting it
+      // held the button on "idle" for a full proxy handshake (DNS + TCP + TLS
+      // + WS upgrade ≈ 4 RTTs, ~1s+ far from the proxy). The call still runs
+      // synchronously through its audio-buffer clear and kicks off the
+      // handshake before its first await; only then is the mic started below,
+      // so speech captured while the handshake is in flight lands AFTER the
+      // clear in the service's 30s buffer and is flushed only into a
+      // proven-live socket. A failed handshake falls into the same
+      // reconnect/backoff machinery as a mid-session drop, and a stop tap in
+      // the window is honored by the _intentionallyClosed check before the
+      // channel is adopted.
+      unawaited(_sonioxService.connect(
         targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
         forceTranslation: !isTranscriptionOnly,
         languageHint: sourceLang?.code ?? '',
@@ -1354,7 +1368,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         endpointLatencyAdjustmentLevel: isLineByLine
             ? AppConstants.lineByLineEndpointLatencyAdjustmentLevel
             : null,
-      );
+      ));
       await _audioService.start();
       // The recording state now holds the toggle gate; the flag must clear
       // here or the toggle would stay dimmed after the session ends.
@@ -1372,6 +1386,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
       });
     } catch (e) {
       _isStartingRecording = false;
+      // The unawaited connect may already be live (or mid-handshake) — tear
+      // it down so a failed mic start can't leak a connected, rotating
+      // session with no audio source.
+      try {
+        await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+      } catch (_) {}
       await BackgroundService.stopRecordingService();
       if (mounted) {
         setState(() {});
