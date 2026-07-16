@@ -19,9 +19,15 @@ class AppConstants {
   static const endpointDelayMs = 2000;
   // Soniox v5 endpoint tuning (v5-only; ignored by older models). Kept at
   // neutral defaults so they live in one place for post-launch tuning.
+  // Per soniox.com/docs/stt/rt/endpoint-detection:
   //   endpointSensitivity:            -1.0..1.0  (higher = endpoints fire sooner)
-  //   endpointLatencyAdjustmentLevel:  0..3      (higher = wait for more accurate
-  //                                               final tokens at the endpoint)
+  //   endpointLatencyAdjustmentLevel:  0..3      (higher = endpoints returned
+  //                                               SOONER; combining a level > 0
+  //                                               with negative sensitivity is
+  //                                               explicitly not recommended —
+  //                                               they work against each other)
+  //   max_endpoint_delay_ms:           500..3000 (values outside this range are
+  //                                               undocumented behavior)
   static const endpointSensitivity = 0.0;
   static const endpointLatencyAdjustmentLevel = 0;
   static const newLinePauseMs = 2000;
@@ -35,9 +41,16 @@ class AppConstants {
   // more latency before each line appears. Split mode masks the same
   // fragmentation by concatenating fragments into paragraphs, so it keeps the
   // snappier neutral defaults above.
-  static const lineByLineEndpointDelayMs = 5000;
-  static const lineByLineEndpointSensitivity = -0.4;
-  static const lineByLineEndpointLatencyAdjustmentLevel = 2;
+  //
+  // Retuned 2026-07-16: the original values (5000 / -0.4 / 2) violated the
+  // documented 500–3000 delay range and paired negative sensitivity with a
+  // latency adjustment level that pulls endpoints SOONER — the two knobs were
+  // fighting each other. Now: modest negative sensitivity alone defers
+  // premature mid-clause endpoints, the delay ceiling sits at the documented
+  // maximum, and the adjustment level stays neutral as the docs recommend.
+  static const lineByLineEndpointDelayMs = 3000;
+  static const lineByLineEndpointSensitivity = -0.2;
+  static const lineByLineEndpointLatencyAdjustmentLevel = 0;
 
   // UI — Figma design tokens
   static const Color bgColor = Color(0xFFEAEAEA);
