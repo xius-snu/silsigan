@@ -5,12 +5,14 @@ import '../../utils/constants.dart';
 class BottomSideButton extends StatefulWidget {
   final IconData icon;
   final Color backgroundColor;
+  final Color iconColor;
   final VoidCallback? onTap;
 
   const BottomSideButton({
     super.key,
     required this.icon,
     required this.backgroundColor,
+    this.iconColor = Colors.white,
     this.onTap,
   });
 
@@ -96,7 +98,7 @@ class _BottomSideButtonState extends State<BottomSideButton>
             child: Icon(
               widget.icon,
               size: AppConstants.sideIconSize,
-              color: Colors.white,
+              color: widget.iconColor,
             ),
           ),
         ),

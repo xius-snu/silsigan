@@ -11,7 +11,7 @@ class SpeakerLabel extends StatelessWidget {
   const SpeakerLabel(this.speaker, {super.key});
 
   static Color colorFor(int speaker) {
-    const colors = AppConstants.speakerColors;
+    final colors = AppConstants.speakerColors;
     return colors[(speaker - 1).abs() % colors.length];
   }
 

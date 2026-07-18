@@ -35,15 +35,13 @@ import '../widgets/source_language_selector.dart';
 import '../widgets/tts_control_button.dart';
 import '../../providers/conversation_provider.dart';
 import '../../providers/quick_provider.dart';
-import '../widgets/friend_dialog.dart';
-import '../widgets/session_invite_banner.dart';
+import '../../providers/theme_provider.dart';
 import '../../services/user_service.dart';
 import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
 import '../../services/update_service.dart';
 import '../../services/purchase_service.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
-import 'live_session_screen.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
 /// a displayed line never visually starts with a space or dangling punctuation.
@@ -99,12 +97,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Timer? _ttsDraftTimer;
   bool _ttsFiredForSegment = false;
 
-  // Session invite state
-  Map<String, dynamic>? _outgoingInvite;
-  Map<String, dynamic>? _incomingInvite;
-  Timer? _incomingPollTimer;
-  Timer? _outgoingPollTimer;
-
   // Word timestamps per transcription line (for saved sessions)
   final List<List<WordTimestamp>> _wordTimestampsPerLine = [];
 
@@ -127,8 +119,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
   bool _quickResetPending = false;
   // True between mic press and release.
   bool _quickHolding = false;
-  // True while the async start handler is still connecting.
+  // True while the async start handler is still running its fast setup
+  // (permission/auth/mic) — the proxy handshake itself runs in the
+  // background (optimistic start).
   bool _quickStarting = false;
+  // Resolves when the optimistic (unawaited) connect finishes its handshake
+  // attempt. The release path awaits it before finalizeAndWait — a fast
+  // press-release would otherwise finalize a not-yet-open socket and drop
+  // the speech buffered during the handshake.
+  Future<void>? _quickConnectFuture;
   // Language swap state, shared by Quick Mode's swap button and the tappable
   // arrow in line-by-line / split modes. When swapped, a second press restores
   // these snapshots; otherwise it computes a fresh swap. Source/target live in
@@ -144,8 +143,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // Desired session state: set true on start-tap, false on stop-tap. Lets a
   // stop-tap that lands mid-connect cancel the session once it finishes.
   bool _convWantActive = false;
-  // True while the async start handler is still connecting.
+  // True while the async start handler is still running its fast setup
+  // (permission/auth/mic) — the proxy handshake itself runs in the
+  // background (optimistic start).
   bool _convStarting = false;
+  // Resolves when the optimistic (unawaited) connect finishes its handshake
+  // attempt. The stop path awaits it so speech buffered mid-handshake gets
+  // flushed into the live socket and finalized instead of dropped.
+  Future<void>? _convConnectFuture;
   // A translation that completed before its originating utterance's message
   // existed (can happen on the final flush at disconnect, where translation is
   // emitted before transcription). Keyed by speaker; drained when the matching
@@ -154,6 +159,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Suppress repeated error snackbars during reconnection
   DateTime? _lastErrorShown;
+
+  // Transient "copied" state for the customer-ID row in the purchase sheet.
+  bool _idCopiedInSheet = false;
 
   // Autosave: periodic timer + session start timestamp
   Timer? _autosaveTimer;
@@ -184,7 +192,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _startIncomingPoll();
     _ttsService.onError = (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -215,8 +222,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sentenceBreakTimer?.cancel();
     _ttsDraftTimer?.cancel();
     _autosaveTimer?.cancel();
-    _incomingPollTimer?.cancel();
-    _outgoingPollTimer?.cancel();
     _audioService.dispose();
     _sonioxService.disconnect();
     _ttsService.dispose();
@@ -270,151 +275,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     }
-  }
-
-  void _startIncomingPoll() {
-    _incomingPollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-      if (_outgoingInvite != null || _incomingInvite != null) return;
-      // No HTTP churn while capture is live — an invite can't reasonably be
-      // acted on mid-recording, and polling every 5s keeps the radio awake
-      // for the whole session (720 requests over an hour-long recording).
-      // postRecording still polls: the user can park there indefinitely with
-      // an unsaved session, and invites remain actionable in that state.
-      final recState = ref.read(recordingStateProvider);
-      if (recState == RecordingState.recording ||
-          recState == RecordingState.processing) {
-        return;
-      }
-      final invite = await UserService.instance.getIncomingInvite();
-      if (mounted && invite != null && _incomingInvite == null) {
-        setState(() => _incomingInvite = invite);
-      }
-    });
-  }
-
-  void _startOutgoingPoll(int inviteId) {
-    _outgoingPollTimer?.cancel();
-    _outgoingPollTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      final status = await UserService.instance.getInviteStatus(inviteId);
-      if (!mounted || status == null) return;
-
-      final inviteStatus = status['status'] as String?;
-      if (inviteStatus == 'accepted') {
-        _outgoingPollTimer?.cancel();
-        final sessionId = status['session_id'] as String;
-        final partnerLanguage = status['to_language'] as String;
-        final myLanguage = _outgoingInvite!['myLanguage'] as String;
-        final friendCode = _outgoingInvite!['friendCode'] as String;
-        setState(() => _outgoingInvite = null);
-        _navigateToSession(sessionId, myLanguage, partnerLanguage, friendCode);
-      } else if (inviteStatus == 'rejected' ||
-          inviteStatus == 'expired' ||
-          inviteStatus == 'cancelled') {
-        _outgoingPollTimer?.cancel();
-        setState(() => _outgoingInvite = null);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Invite $inviteStatus')),
-          );
-        }
-      }
-    });
-  }
-
-  Future<void> _handleOutgoingInviteResult(Map<String, dynamic> data) async {
-    if (data['status'] == 'accepted') {
-      // Auto-accepted (they already sent us an invite)
-      _navigateToSession(
-        data['sessionId'] as String,
-        data['myLanguage'] as String,
-        data['partnerLanguage'] as String,
-        data['friendCode'] as String,
-      );
-    } else {
-      // Pending - start polling
-      setState(() => _outgoingInvite = data);
-      _startOutgoingPoll(data['inviteId'] as int);
-    }
-  }
-
-  Future<void> _cancelOutgoingInvite() async {
-    if (_outgoingInvite == null) return;
-    _outgoingPollTimer?.cancel();
-    await UserService.instance
-        .cancelSessionInvite(_outgoingInvite!['inviteId'] as int);
-    setState(() => _outgoingInvite = null);
-  }
-
-  Future<void> _acceptIncomingInvite() async {
-    if (_incomingInvite == null) return;
-
-    final language = await showDialog<TargetLanguage>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Select your language'),
-        children: TargetLanguage.values
-            .map(
-              (lang) => SimpleDialogOption(
-                onPressed: () => Navigator.pop(ctx, lang),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text(lang.displayName,
-                      style: const TextStyle(fontSize: 16)),
-                ),
-              ),
-            )
-            .toList(),
-      ),
-    );
-    if (language == null) return;
-
-    final inviteId = _incomingInvite!['id'] as int;
-    final partnerLanguage = _incomingInvite!['from_language'] as String;
-    final partnerCode = _incomingInvite!['from_friend_code'] as String;
-
-    final result =
-        await UserService.instance.acceptSessionInvite(inviteId, language.code);
-    if (!mounted) return;
-
-    if (result != null && result['success'] == true) {
-      setState(() => _incomingInvite = null);
-      _navigateToSession(
-        result['sessionId'] as String,
-        language.code,
-        partnerLanguage,
-        partnerCode,
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result?['error'] ?? 'Failed to accept invite')),
-      );
-    }
-  }
-
-  Future<void> _rejectIncomingInvite() async {
-    if (_incomingInvite == null) return;
-    await UserService.instance
-        .rejectSessionInvite(_incomingInvite!['id'] as int);
-    setState(() => _incomingInvite = null);
-  }
-
-  void _navigateToSession(String sessionId, String myLanguage,
-      String partnerLanguage, String partnerFriendCode) {
-    _incomingPollTimer?.cancel();
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => LiveSessionScreen(
-          sessionId: sessionId,
-          partnerLanguage: partnerLanguage,
-          myLanguage: myLanguage,
-          partnerFriendCode: partnerFriendCode,
-        ),
-      ),
-    ).then((_) {
-      // Restart polling when returning from session
-      _startIncomingPoll();
-    });
   }
 
   // ── Usage Limit ─────────────��──────────────────────────────────
@@ -527,9 +387,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
       backgroundColor: Colors.transparent,
       builder: (ctx) {
         return Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          decoration: BoxDecoration(
+            color: AppConstants.sheetColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           ),
           padding: EdgeInsets.only(
             bottom: MediaQuery.of(ctx).viewInsets.bottom,
@@ -546,27 +406,77 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.grey[300],
+                      color: AppConstants.textFaint,
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text(
+                Text(
                   'Add More Time',
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
+                    color: AppConstants.textPrimary,
                   ),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   'Select a package to add more time',
-                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                  style: TextStyle(fontSize: 14, color: AppConstants.textMuted),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 8),
+
+                // Customer ID (the account's stable code) with tap-to-copy —
+                // lets a user quote it in support/purchase enquiries. Feedback
+                // is inline (icon flips to a check) because a SnackBar renders
+                // in the Scaffold BEHIND this modal sheet and wouldn't be seen.
+                Center(
+                  child: StatefulBuilder(
+                    builder: (idCtx, setIdState) {
+                      var copied = _idCopiedInSheet;
+                      return GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          final id = UserService.instance.friendCode;
+                          if (id == null) return;
+                          Clipboard.setData(ClipboardData(text: id));
+                          HapticFeedback.selectionClick();
+                          setIdState(() => _idCopiedInSheet = true);
+                          Timer(const Duration(milliseconds: 1500), () {
+                            _idCopiedInSheet = false;
+                            if (idCtx.mounted) setIdState(() {});
+                          });
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'ID: ${UserService.instance.friendCode ?? '—'}',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                letterSpacing: 0.6,
+                                color: AppConstants.textMuted,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Icon(
+                              copied ? Icons.check : Icons.copy,
+                              size: 13,
+                              color: copied
+                                  ? const Color(0xFF4CAF50)
+                                  : AppConstants.textMuted,
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
 
                 // Package cards — RevenueCat on iOS, mock on Android
                 if (Platform.isAndroid)
@@ -577,7 +487,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Text(
                       'Unable to load packages. Please try again later.',
-                      style: TextStyle(fontSize: 14, color: Colors.grey[500]),
+                      style: TextStyle(
+                          fontSize: 14, color: AppConstants.textMuted),
                       textAlign: TextAlign.center,
                     ),
                   )
@@ -609,7 +520,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       'Restore Purchases',
                       style: TextStyle(
                         fontSize: 13,
-                        color: Colors.grey[500],
+                        color: AppConstants.textMuted,
                         decoration: TextDecoration.underline,
                       ),
                     ),
@@ -632,7 +543,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         'Privacy Policy',
                         style: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey[400],
+                          color: AppConstants.textFaint,
                           decoration: TextDecoration.underline,
                         ),
                       ),
@@ -641,7 +552,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: Text(
                         '|',
-                        style: TextStyle(fontSize: 12, color: Colors.grey[300]),
+                        style: TextStyle(
+                            fontSize: 12, color: AppConstants.textFaint),
                       ),
                     ),
                     GestureDetector(
@@ -654,7 +566,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         'Terms of Use',
                         style: TextStyle(
                           fontSize: 12,
-                          color: Colors.grey[400],
+                          color: AppConstants.textFaint,
                           decoration: TextDecoration.underline,
                         ),
                       ),
@@ -689,14 +601,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
       barrierColor: Colors.black.withOpacity(0.35),
       builder: (dCtx) {
         overlayCtx = dCtx;
-        return const Center(
+        return Center(
           child: Card(
-            color: Colors.white,
-            shape: RoundedRectangleBorder(
+            color: AppConstants.sheetColor,
+            shape: const RoundedRectangleBorder(
               borderRadius: BorderRadius.all(Radius.circular(14)),
             ),
             child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -705,13 +617,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     height: 32,
                     child: CircularProgressIndicator(
                       strokeWidth: 3,
-                      color: Color(0xFF111111),
+                      color: AppConstants.textPrimary,
                     ),
                   ),
-                  SizedBox(height: 16),
+                  const SizedBox(height: 16),
                   Text(
                     'Processing…',
-                    style: TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                    style: TextStyle(
+                        fontSize: 14, color: AppConstants.textSecondary),
                   ),
                 ],
               ),
@@ -804,10 +717,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
-            color: hasBadge ? const Color(0xFFF8F8FF) : Colors.white,
+            color: hasBadge
+                ? AppConstants.cardHighlightColor
+                : AppConstants.cardColor,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: hasBadge ? const Color(0xFF4A4A4A) : Colors.grey.shade300,
+              color: hasBadge
+                  ? AppConstants.cardHighlightBorderColor
+                  : AppConstants.cardBorderColor,
               width: hasBadge ? 1.5 : 1,
             ),
           ),
@@ -820,8 +737,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     Row(
                       children: [
                         Text(label,
-                            style: const TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.w600)),
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: AppConstants.textPrimary)),
                         if (hasBadge) ...[
                           const SizedBox(width: 8),
                           Container(
@@ -842,8 +761,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     ),
                     const SizedBox(height: 2),
                     Text(perHour,
-                        style:
-                            TextStyle(fontSize: 12, color: Colors.grey[500])),
+                        style: TextStyle(
+                            fontSize: 12, color: AppConstants.textMuted)),
                   ],
                 ),
               ),
@@ -851,8 +770,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(price,
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w700)),
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: AppConstants.textPrimary)),
                   if (hasDiscount)
                     Text(discount,
                         style: const TextStyle(
@@ -890,10 +811,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
-            color: hasBadge ? const Color(0xFFF8F8FF) : Colors.white,
+            color: hasBadge
+                ? AppConstants.cardHighlightColor
+                : AppConstants.cardColor,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: hasBadge ? const Color(0xFF4A4A4A) : Colors.grey.shade300,
+              color: hasBadge
+                  ? AppConstants.cardHighlightBorderColor
+                  : AppConstants.cardBorderColor,
               width: hasBadge ? 1.5 : 1,
             ),
           ),
@@ -907,9 +832,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       children: [
                         Text(
                           label,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
+                            color: AppConstants.textPrimary,
                           ),
                         ),
                         if (hasBadge) ...[
@@ -938,7 +864,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       perHour,
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.grey[500],
+                        color: AppConstants.textMuted,
                       ),
                     ),
                   ],
@@ -949,9 +875,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 children: [
                   Text(
                     price,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
+                      color: AppConstants.textPrimary,
                     ),
                   ),
                   if (hasDiscount)
@@ -966,55 +893,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 ],
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLockedSignInButton(
-    BuildContext ctx, {
-    required IconData icon,
-    required String label,
-    required Color color,
-    required Color textColor,
-    Color? borderColor,
-  }) {
-    return Opacity(
-      opacity: 0.5,
-      child: Container(
-        height: 48,
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(12),
-          border: borderColor != null ? Border.all(color: borderColor) : null,
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                const SnackBar(content: Text('Sign-in coming soon')),
-              );
-            },
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: textColor, size: 24),
-                const SizedBox(width: 10),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: textColor,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Icon(Icons.lock_outline, color: textColor, size: 14),
-              ],
-            ),
           ),
         ),
       ),
@@ -1761,14 +1639,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
-  void _showFriendDialog() async {
-    final result = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (_) => const FriendDialog(),
-    );
-    if (result != null && result['type'] == 'session_invite') {
-      _handleOutgoingInviteResult(result);
-    }
+  void _toggleDarkMode() {
+    HapticFeedback.selectionClick();
+    final next = !ref.read(darkModeProvider);
+    ref.read(darkModeProvider.notifier).state = next;
+    saveDarkMode(next);
   }
 
   Future<void> _toggleTts() async {
@@ -1992,24 +1867,51 @@ class _MainScreenState extends ConsumerState<MainScreen>
             _speakerForLanguage(_sonioxService.currentSourceLanguage) ??
             ref.read(activeConversationSpeakerProvider) ??
             ConversationSpeaker.bottom;
-        bool filled = false;
-        ref.read(conversationMessagesProvider.notifier).update((state) {
-          final updated = List<ConversationMessage>.from(state);
-          // Oldest-first: translations complete in the same order as their
-          // originals, so fill this speaker's oldest still-untranslated message.
-          // (Newest-first would swap consecutive same-speaker turns when their
-          // translations lag past the next endpoint.)
-          for (int i = 0; i < updated.length; i++) {
-            if (updated[i].speaker == srcSpeaker &&
-                updated[i].translatedText.isEmpty) {
-              updated[i] = updated[i].copyWith(translatedText: clean);
-              filled = true;
-              break;
+        // The side whose utterance is being transcribed RIGHT NOW. At a
+        // normal endpoint this equals srcSpeaker; when it differs, the
+        // endpoint that triggered this emission belongs to the OTHER side
+        // and this text is srcSpeaker's trailing translation (emitted
+        // non-late only because the other side's source was pending) — it
+        // belongs to srcSpeaker's last message, and stashing it instead
+        // would leak it into srcSpeaker's NEXT bubble (the drain is keyed
+        // by the transcribed side).
+        final liveSpeaker =
+            _speakerForLanguage(_sonioxService.currentSourceLanguage);
+        final belongsToLastMessage = _sonioxService.lastTranslationWasLate ||
+            (liveSpeaker != null && liveSpeaker != srcSpeaker);
+        if (belongsToLastMessage) {
+          // Trailing sentences of an utterance whose message is already on
+          // screen. Merge into this speaker's NEWEST message. Never fill an
+          // OLDER untranslated message: its translation window has passed
+          // (the service flushes a lagging translation before the next
+          // utterance's tokens are processed), and claiming it would shift
+          // every later translation one bubble back for the rest of the
+          // session — the ordering bug that used to need a stop/restart.
+          bool merged = false;
+          ref.read(conversationMessagesProvider.notifier).update((state) {
+            final updated = List<ConversationMessage>.from(state);
+            for (int i = updated.length - 1; i >= 0; i--) {
+              if (updated[i].speaker == srcSpeaker) {
+                updated[i] = updated[i].copyWith(
+                  translatedText: updated[i].translatedText.trim().isEmpty
+                      ? clean
+                      : '${updated[i].translatedText} $clean',
+                );
+                merged = true;
+                break;
+              }
             }
-          }
-          return updated;
-        });
-        if (!filled) _convPendingTranslation[srcSpeaker] = clean;
+            return updated;
+          });
+          // No message from this speaker yet — hold it for the first one.
+          if (!merged) _stashConvTranslation(srcSpeaker, clean);
+        } else {
+          // Endpoint completion of srcSpeaker's own utterance — emitted just
+          // BEFORE its transcription completes, so it belongs to the message
+          // about to be created, not to any bubble already on screen. Stash
+          // it; the transcription handler drains it into the new message.
+          _stashConvTranslation(srcSpeaker, clean);
+        }
         // Voice it in the listener's (opposite side's) language.
         _speakConversationTranslation(srcSpeaker, clean);
       }
@@ -2035,6 +1937,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
         SnackBar(content: Text(error)),
       );
     };
+  }
+
+  /// Append [text] to the pending-translation stash for [speaker]. A single
+  /// utterance can complete in several bursts (Soniox translates sentence by
+  /// sentence), so later bursts join earlier ones instead of overwriting them.
+  void _stashConvTranslation(ConversationSpeaker speaker, String text) {
+    final existing = _convPendingTranslation[speaker];
+    _convPendingTranslation[speaker] =
+        (existing == null || existing.isEmpty) ? text : '$existing $text';
   }
 
   /// Set the currently-speaking side. On an actual change, clears stale drafts
@@ -2177,7 +2088,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
       _sonioxService.isPrivateUser = _isPrivateUser;
-      await _sonioxService.connect(
+      // Optimistic start (same pattern as _startRecording): the handshake is
+      // NOT awaited, so the mic goes live immediately and speech captured
+      // while the proxy connects buffers in the service (30s cap) and
+      // flushes into a proven-live socket. connect() must be invoked before
+      // _audioService.start() — it synchronously clears the audio buffer
+      // before its first await. A failed handshake falls into the same
+      // reconnect/backoff machinery as a mid-session drop.
+      _convConnectFuture = _sonioxService.connect(
         twoWayLanguageCodes: [myLang.code, theirLang.code],
       );
       await _audioService.start();
@@ -2188,6 +2106,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
         'mode': 'conversation',
       });
     } catch (e) {
+      // The unawaited connect may already be live (or mid-handshake) — tear
+      // it down so a failed mic start can't leak a connected session with no
+      // audio source.
+      try {
+        await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+      _convConnectFuture = null;
       await BackgroundService.stopRecordingService();
       _convStarting = false;
       _convWantActive = false;
@@ -2205,8 +2130,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _convStarting = false;
     ref.read(conversationConnectingProvider.notifier).state = false;
 
-    // A cancel-tap during connect, or a usage-limit 4005 that closed the socket
-    // mid-connect, means the session should not stay live — tear it down now.
+    // A cancel-tap during the setup window, or a usage-limit 4005 that closed
+    // the socket mid-connect, means the session should not stay live — tear
+    // it down now.
     if (!_convWantActive || _sonioxService.isClosed) {
       await _stopConversationSession();
     }
@@ -2227,12 +2153,37 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.stop().timeout(const Duration(seconds: 5));
     } catch (_) {}
 
+    // Let an in-flight optimistic handshake land first, so speech buffered
+    // during it flushes into the live socket and gets finalized below instead
+    // of dying with a never-opened channel.
+    final convWasStillConnecting = !_sonioxService.isConnected;
+    final convConnect = _convConnectFuture;
+    _convConnectFuture = null;
+    if (convConnect != null) {
+      try {
+        await convConnect.timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
+
     // Finalize, let trailing translation tokens land (each voiced as it lands
-    // via onTranslationCompleted), then disconnect.
-    try {
-      _sonioxService.finalize();
-    } catch (_) {}
-    await Future.delayed(const Duration(milliseconds: 700));
+    // via onTranslationCompleted), then disconnect. Normally a fixed 700ms
+    // grace suffices — but when the stop tap beat the handshake, the whole
+    // turn was only just flushed into a cold session (first tokens take
+    // ~1-2s incl. model warm-up), so wait token-aware instead of cutting the
+    // turn off at a fixed deadline.
+    if (convWasStillConnecting) {
+      try {
+        await _sonioxService.finalizeAndWait(
+          quiet: const Duration(seconds: 2),
+          timeout: const Duration(seconds: 8),
+        );
+      } catch (_) {}
+    } else {
+      try {
+        _sonioxService.finalize();
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 700));
+    }
     try {
       await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
     } catch (_) {}
@@ -2392,7 +2343,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _sonioxService.userId = UserService.instance.userId;
       _sonioxService.authToken = UserService.instance.authToken;
       _sonioxService.isPrivateUser = _isPrivateUser;
-      await _sonioxService.connect(
+      // Optimistic start (same pattern as _startRecording): the handshake is
+      // NOT awaited, so capture begins the moment the press lands and speech
+      // spoken while the proxy connects buffers in the service (30s cap) and
+      // flushes into a proven-live socket — this is what makes Quick Mode
+      // actually quick. connect() must be invoked before
+      // _audioService.start() (it synchronously clears the audio buffer
+      // before its first await).
+      _quickConnectFuture = _sonioxService.connect(
         targetLanguageCode: targetLanguage.code,
         forceTranslation: true,
         languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
@@ -2403,6 +2361,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
           RecordingState.recording;
       UserService.instance.reportActivity('recording_start', {'mode': 'quick'});
     } catch (e) {
+      // The unawaited connect may already be live (or mid-handshake) — tear
+      // it down so a failed mic start can't leak a connected session with no
+      // audio source.
+      try {
+        await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+      _quickConnectFuture = null;
       await BackgroundService.stopRecordingService();
       _quickStarting = false;
       _quickHolding = false;
@@ -2417,7 +2382,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _quickStarting = false;
 
-    // The user may have released before the connection finished — stop now.
+    // The user may have released before the setup finished — stop now.
     if (!_quickHolding) {
       await _stopQuickRecording();
     }
@@ -2440,12 +2405,32 @@ class _MainScreenState extends ConsumerState<MainScreen>
       await _audioService.stop().timeout(const Duration(seconds: 5));
     } catch (_) {}
 
+    // A fast press-release can beat the optimistic handshake. Wait for it so
+    // the speech buffered during the connect flushes into the live socket —
+    // finalizeAndWait is a silent no-op on an unconnected service, and
+    // disconnecting here would drop the whole utterance.
+    final quickWasStillConnecting = !_sonioxService.isConnected;
+    final quickConnect = _quickConnectFuture;
+    _quickConnectFuture = null;
+    if (quickConnect != null) {
+      try {
+        await quickConnect.timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
+
     // Finalize and WAIT for the trailing translation to actually finish
     // streaming (even though the user already released), then disconnect —
     // which flushes the settled translation into the providers. A fixed delay
-    // here would cut off translations that lag the source.
+    // here would cut off translations that lag the source. When the release
+    // beat the handshake, the utterance was only just flushed into a cold
+    // session — extend the quiet window past model warm-up (~1-2s) so the
+    // settle can't expire before the first token even arrives.
     try {
-      await _sonioxService.finalizeAndWait();
+      await _sonioxService.finalizeAndWait(
+        quiet: quickWasStillConnecting
+            ? const Duration(seconds: 2)
+            : const Duration(milliseconds: 500),
+      );
     } catch (_) {}
     try {
       await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
@@ -2652,6 +2637,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final ttsEnabled = ref.watch(ttsEnabledProvider);
     final detectedLanguage = ref.watch(detectedLanguageProvider);
     final diarizationEnabled = ref.watch(diarizationEnabledProvider);
+    // Watched so the whole screen rebuilds when the theme toggles — the
+    // AppConstants color getters resolve against the flipped palette on the
+    // rebuild (SilsiganApp sets AppConstants.isDark before this runs).
+    final isDarkMode = ref.watch(darkModeProvider);
 
     // Sync TTS service state with provider. In Conversation mode the TTS
     // language is chosen per-turn (the listener's side) at release time, so
@@ -2686,20 +2675,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Session invite banners
-            if (_incomingInvite != null)
-              IncomingInviteBanner(
-                friendCode:
-                    _incomingInvite!['from_friend_code'] as String? ?? '?',
-                onAccept: _acceptIncomingInvite,
-                onReject: _rejectIncomingInvite,
-              ),
-            if (_outgoingInvite != null)
-              OutgoingInviteBanner(
-                friendCode: _outgoingInvite!['friendCode'] as String? ?? '?',
-                onCancel: _cancelOutgoingInvite,
-              ),
-
             // Header: Title + Status
             Padding(
               padding: const EdgeInsets.only(
@@ -2710,7 +2685,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
               child: Row(
                 children: [
-                  const Text(
+                  Text(
                     'Silsigan',
                     style: TextStyle(
                       fontSize: AppConstants.titleFontSize,
@@ -2734,9 +2709,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     const SizedBox(width: 16),
                   ],
                   GestureDetector(
-                    onTap: _showFriendDialog,
-                    child: const Icon(
-                      Icons.person_add_outlined,
+                    onTap: _toggleDarkMode,
+                    child: Icon(
+                      isDarkMode
+                          ? Icons.light_mode_outlined
+                          : Icons.dark_mode_outlined,
                       size: 24,
                       color: AppConstants.textSecondary,
                     ),
@@ -2883,9 +2860,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                     children: [
                                       Text(
                                         'Used: $pct%  [${fmtHrMin(usedMin)}/${fmtHrMin(_limitMinutes)}]',
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontSize: 13,
                                           fontWeight: FontWeight.w500,
+                                          color: AppConstants.textPrimary,
                                         ),
                                         // Long totals (e.g. 100h 30m/200h 30m)
                                         // won't fit the 200px popup on one line —
@@ -2905,7 +2883,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                                   .clamp(0.0, 1.0)
                                               : 0,
                                           minHeight: 6,
-                                          backgroundColor: Colors.grey[300],
+                                          backgroundColor: AppConstants.isDark
+                                              ? Colors.grey[700]
+                                              : Colors.grey[300],
                                           valueColor:
                                               AlwaysStoppedAnimation<Color>(
                                             pct >= 90
@@ -2921,7 +2901,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                         'Tap to add more time',
                                         style: TextStyle(
                                           fontSize: 11,
-                                          color: Colors.grey[500],
+                                          color: AppConstants.textMuted,
                                         ),
                                       ),
                                     ],
@@ -2930,7 +2910,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         ),
                       ];
                     },
-                    child: const Icon(
+                    child: Icon(
                       Icons.settings_outlined,
                       size: 24,
                       color: AppConstants.textSecondary,
@@ -3164,7 +3144,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                       : Icons.arrow_forward,
                                   size: 27,
                                   color: _langSwapped
-                                      ? Colors.white
+                                      ? AppConstants.micIconColor
                                       : AppConstants.textPrimary,
                                 ),
                               ),
@@ -3208,7 +3188,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               alignment: Alignment.center,
                               child: Text(
                                 targetLanguage.displayName,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: AppConstants.langFontSize,
                                   color: AppConstants.textPrimary,
                                 ),
@@ -3276,6 +3256,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                   backgroundColor: isPostRecording
                                       ? AppConstants.saveButtonActiveColor
                                       : AppConstants.saveButtonColor,
+                                  iconColor: isPostRecording
+                                      ? AppConstants.saveButtonActiveIconColor
+                                      : Colors.white,
                                   onTap: isPostRecording ? _saveSession : null,
                                 ),
                         ),

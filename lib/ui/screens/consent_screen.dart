@@ -47,7 +47,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       'Silsigan',
                       style: TextStyle(
                         fontSize: AppConstants.titleFontSize,
@@ -56,7 +56,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text(
+                    Text(
                       'Before you start',
                       style: TextStyle(
                         fontSize: 16,
@@ -82,7 +82,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
                   onPressed: widget.onAccepted,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppConstants.micButtonColor,
-                    foregroundColor: Colors.white,
+                    foregroundColor: AppConstants.micIconColor,
                     elevation: 0,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -110,9 +110,11 @@ class _ConsentScreenState extends State<ConsentScreen> {
       decoration: BoxDecoration(
         color: AppConstants.panelColor,
         borderRadius: BorderRadius.circular(AppConstants.panelBorderRadius),
-        border: Border.all(color: const Color(0xFFE2E2E2)),
+        border: Border.all(color: AppConstants.cardBorderColor),
       ),
       child: const Column(
+        // Const is fine here: the consent screen shows once, pre-toggle, so
+        // its items never need a live theme rebuild.
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _DisclosureItem(
@@ -158,14 +160,14 @@ class _ConsentScreenState extends State<ConsentScreen> {
                     ? Icons.expand_less_rounded
                     : Icons.expand_more_rounded,
                 size: 18,
-                color: Colors.grey[600],
+                color: AppConstants.textMuted,
               ),
               const SizedBox(width: 4),
               Text(
                 'Which service processes my audio?',
                 style: TextStyle(
                   fontSize: 13,
-                  color: Colors.grey[600],
+                  color: AppConstants.textMuted,
                 ),
               ),
             ],
@@ -189,7 +191,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
                   style: TextStyle(
                     fontSize: 12.5,
                     height: 1.4,
-                    color: Colors.grey[600],
+                    color: AppConstants.textMuted,
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -198,7 +200,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
                     Uri.parse(_providerPrivacyUrl),
                     mode: LaunchMode.externalApplication,
                   ),
-                  child: const Text(
+                  child: Text(
                     "View the provider's privacy policy",
                     style: TextStyle(
                       fontSize: 12.5,
@@ -226,9 +228,9 @@ class _ConsentScreenState extends State<ConsentScreen> {
         children: [
           Text(
             'Read our ',
-            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            style: TextStyle(fontSize: 13, color: AppConstants.textMuted),
           ),
-          const Text(
+          Text(
             'Privacy Policy',
             style: TextStyle(
               fontSize: 13,
@@ -239,7 +241,7 @@ class _ConsentScreenState extends State<ConsentScreen> {
           ),
           Text(
             ' to learn more.',
-            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+            style: TextStyle(fontSize: 13, color: AppConstants.textMuted),
           ),
         ],
       ),
@@ -275,7 +277,7 @@ class _DisclosureItem extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,
                     color: AppConstants.textPrimary,
@@ -284,7 +286,7 @@ class _DisclosureItem extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   body,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 13.5,
                     height: 1.4,
                     color: AppConstants.textSecondary,

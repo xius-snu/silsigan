@@ -94,13 +94,13 @@ class _TtsControlButtonState extends ConsumerState<TtsControlButton> {
                       children: [
                         Row(
                           children: [
-                            const Icon(
+                            Icon(
                               Icons.speed,
                               size: 14,
                               color: AppConstants.textSecondary,
                             ),
                             const SizedBox(width: 6),
-                            const Text(
+                            Text(
                               'Speed',
                               style: TextStyle(
                                 fontSize: 12,
@@ -111,7 +111,7 @@ class _TtsControlButtonState extends ConsumerState<TtsControlButton> {
                             const Spacer(),
                             Text(
                               '${(rate * 100).round()}%',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 12,
                                 color: AppConstants.textPrimary,
                                 fontWeight: FontWeight.w600,
@@ -144,8 +144,8 @@ class _TtsControlButtonState extends ConsumerState<TtsControlButton> {
                             },
                           ),
                         ),
-                        const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 4),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [

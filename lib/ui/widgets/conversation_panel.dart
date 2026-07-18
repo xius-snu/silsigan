@@ -10,7 +10,9 @@ import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
 import 'listening_indicator.dart';
 
-/// Color scheme for the two halves
+/// Color scheme for the two halves. The top (their side) keeps its teal
+/// identity in both themes; the bottom (my side) follows the app palette and
+/// inverts its bubbles in dark mode.
 class _ConvColors {
   // Top half (their side) — teal theme
   static const topBg = Color(0xFF2BBBAD);
@@ -21,13 +23,17 @@ class _ConvColors {
   static const topMySpeechText = Colors.white;
   static const topTheirSpeechText = Color(0xFF111111);
 
-  // Bottom half (my side) — white theme
-  static const bottomBg = Color(0xFFFCFCFC);
-  static const bottomLangBox = Color(0xFFFCFCFC);
-  static const bottomMySpeechBubble = Color(0xFF111111);
-  static const bottomTheirSpeechBubble = Color(0xFFF0F0F0);
-  static const bottomMySpeechText = Colors.white;
-  static const bottomTheirSpeechText = Color(0xFF111111);
+  // Bottom half (my side) — panel-toned
+  static Color get bottomBg => AppConstants.panelColor;
+  static Color get bottomLangBox => AppConstants.panelColor;
+  static Color get bottomMySpeechBubble =>
+      AppConstants.isDark ? const Color(0xFFE5E5EA) : const Color(0xFF111111);
+  static Color get bottomTheirSpeechBubble =>
+      AppConstants.isDark ? const Color(0xFF38383C) : const Color(0xFFF0F0F0);
+  static Color get bottomMySpeechText =>
+      AppConstants.isDark ? const Color(0xFF111111) : Colors.white;
+  static Color get bottomTheirSpeechText =>
+      AppConstants.isDark ? const Color(0xFFF2F2F3) : const Color(0xFF111111);
 }
 
 class ConversationPanel extends StatefulWidget {
@@ -306,9 +312,13 @@ class _ConversationPanelState extends State<ConversationPanel> {
                 height: 36,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: _isRecording
-                      ? Colors.grey.shade300
-                      : const Color(0xFFE0E0E0),
+                  color: AppConstants.isDark
+                      ? (_isRecording
+                          ? const Color(0xFF2C2C2F)
+                          : const Color(0xFF3A3A3E))
+                      : (_isRecording
+                          ? Colors.grey.shade300
+                          : const Color(0xFFE0E0E0)),
                 ),
                 child: Icon(
                   Icons.swap_horiz,
@@ -333,7 +343,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
               padding: const EdgeInsets.only(left: 10),
               child: GestureDetector(
                 onTap: widget.onClear,
-                child: const Icon(
+                child: Icon(
                   Icons.delete_outline,
                   size: 22,
                   color: AppConstants.textSecondary,
@@ -623,7 +633,10 @@ class _ConversationPanelState extends State<ConversationPanel> {
   Widget _buildMicButton({required bool tealTheme}) {
     const size = 64.0;
     final hintColor =
-        tealTheme ? Colors.white.withOpacity(0.85) : Colors.grey.shade600;
+        tealTheme ? Colors.white.withOpacity(0.85) : AppConstants.textMuted;
+    // The bottom mic pairs its glyph with the theme-inverted micButtonColor
+    // surface; the teal side keeps its white-circle/teal-glyph identity.
+    final bottomMicIconColor = AppConstants.micIconColor;
 
     Widget mic;
     String hint;
@@ -671,7 +684,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
               child: CircularProgressIndicator(
                 strokeWidth: 3,
                 valueColor: AlwaysStoppedAnimation(
-                    tealTheme ? _ConvColors.topBg : Colors.white),
+                    tealTheme ? _ConvColors.topBg : bottomMicIconColor),
               ),
             ),
           ),
@@ -710,7 +723,7 @@ class _ConversationPanelState extends State<ConversationPanel> {
             size: 28,
             color: listening
                 ? Colors.white
-                : (tealTheme ? _ConvColors.topBg : Colors.white),
+                : (tealTheme ? _ConvColors.topBg : bottomMicIconColor),
           ),
         ),
       );

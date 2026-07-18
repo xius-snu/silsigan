@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick) and twelve target languages.
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick), twelve target languages, and a light/dark theme toggle.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -36,7 +36,7 @@ Real-time speech translation app built with Flutter. User speaks in any language
 
 Two separate Node services back the app:
 
-- **Render API** (`silsigan.onrender.com`) — `server/index.js` (Fastify + Postgres). Friend system, auth, usage tracking, RevenueCat webhook, friend-to-friend session relay (`/ws/session`). **Auto-deploys on push to master.**
+- **Render API** (`silsigan.onrender.com`) — `server/index.js` (Fastify + Postgres). Auth, usage tracking, RevenueCat webhook. (The server still exposes legacy friend/session-relay endpoints, but the client no longer uses them.) **Auto-deploys on push to master.**
 - **Hetzner WS proxy** (`proxy.silsigan.xyz`) — `server/proxy-standalone.js`. Forwards client audio to `wss://stt-rt.soniox.com`, attaches the Soniox key, meters audio bytes, and force-closes WS with code **4005** when the user crosses their usage limit. **NOT auto-deployed** — manual deploy required (see [Hetzner proxy deploy](memory/reference_hetzner_proxy_deploy.md)).
 
 Two Soniox WS endpoints on the proxy:
@@ -73,6 +73,7 @@ lib/
 │   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription/quick
 │   ├── target_language_provider.dart      # 8 languages + sourceLanguageProvider (null = Any)
 │   ├── detected_language_provider.dart    # Soniox-detected source language
+│   ├── theme_provider.dart                # darkModeProvider (toggle-driven, persisted)
 │   ├── transcript_provider.dart           # koreanDraft + koreanHistory (legacy naming)
 │   ├── translation_provider.dart          # vietnameseDraft + vietnameseHistory (legacy naming)
 │   ├── conversation_provider.dart         # Conversation mode: myLanguage/theirLanguage/messages
@@ -84,16 +85,15 @@ lib/
 │   ├── audio_service.dart                 # flutter_sound capture + WAV file saving
 │   ├── tts_service.dart                   # flutter_tts queue, per-language locale map
 │   ├── database_service.dart              # SQLite singleton — sessions + autosave_draft
-│   ├── user_service.dart                  # Auth, friend code, hardware ID, usage, invites
+│   ├── user_service.dart                  # Auth, customer ID (friend code), hardware ID, usage
 │   ├── sync_service.dart                  # Upload saved sessions to Render
-│   ├── session_relay_service.dart         # WS to /ws/session for live friend sessions
 │   ├── purchase_service.dart              # RevenueCat init/purchase/pending retry
 │   ├── update_service.dart                # Force-update check
 │   └── background_service.dart            # Android foreground service (flutter_foreground_task)
 ├── ui/
 │   ├── screens/
 │   │   ├── main_screen.dart               # Primary screen — all display modes
-│   │   └── live_session_screen.dart       # Friend-to-friend live translation room
+│   │   └── consent_screen.dart            # One-time data-sharing consent gate
 │   └── widgets/
 │       ├── transcript_panel.dart          # Split-mode scrollable panel with copy button
 │       ├── line_by_line_panel.dart        # Aligned per-utterance pairs with audio scrubbing
@@ -105,8 +105,6 @@ lib/
 │       ├── history_sheet.dart             # Bottom sheet: list + inline detail + audio player
 │       ├── session_card.dart              # History list item
 │       ├── status_bar.dart                # Pulsing recording dot + remaining time
-│       ├── friend_dialog.dart             # Friend-code input + outgoing invite
-│       ├── session_invite_banner.dart     # Incoming invite UI on main screen
 │       └── tts_control_button.dart        # TTS toggle + rate slider
 └── utils/
     ├── audio_utils.dart
@@ -144,10 +142,10 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 ## Architecture Notes
 
 ### Navigation
-- `MainScreen` is the primary route; live-friend sessions push `LiveSessionScreen`.
+- `MainScreen` is the only route (behind the one-time consent gate).
 - History: modal bottom sheet (`HistorySheet`) — list + inline detail + audio player.
 - Save flow: save → open history sheet with the saved session pre-selected.
-- Purchase, friend dialog, and TTS settings are all modal sheets/dialogs.
+- Purchase and TTS settings are modal sheets/dialogs.
 
 ### 3-State Bottom Button Flow
 1. **Idle:** History, Mic, Check (unhighlighted)
@@ -165,7 +163,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - When target == source (e.g. Korean→Korean), transcription is copied into the translation panel.
 - **Rotation timer:** WS is rotated every 10 minutes to prevent translation model degradation in long sessions; `contextText` (last 10 history lines) is replayed to keep continuity.
 - **Reconnect:** up to 50 attempts; audio buffered (capped at 30s) during reconnection.
-- **Optimistic start:** `_startRecording` does NOT await `connect()` — the mic starts and the button flips to recording immediately (~200ms); the proxy handshake completes in the background while speech buffers (30s cap) and flushes only into a proven-live socket. `connect()` must be *invoked* before `_audioService.start()` (it synchronously clears the audio buffer before its first await). Start-time connection failures fall into the same reconnect/backoff path as a mid-session drop.
+- **Optimistic start (ALL modes):** `_startRecording`, `_startQuickRecording`, and `_startConversationSession` do NOT await `connect()` — the mic starts and the UI flips to recording immediately (~200ms); the proxy handshake completes in the background while speech buffers (30s cap) and flushes only into a proven-live socket. `connect()` must be *invoked* before `_audioService.start()` (it synchronously clears the audio buffer before its first await). Start-time connection failures fall into the same reconnect/backoff path as a mid-session drop. Quick/Conversation stops first await the stored connect future (8s cap) so a fast press-release/stop-tap can't finalize a not-yet-open socket and drop the buffered speech.
 - **Late translation flush:** translations arriving after the source endpoint are debounced 800ms so they don't merge with the next utterance.
 - **Server-authoritative usage limit:** when the proxy closes WS with **code 4005**, `onUsageLimitReached` fires → recording stops + paywall dialog. The client does NOT run its own timer; see [usage timer behavior](memory/feedback_apk_build.md).
 
@@ -180,11 +178,15 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - Stored in `autosave_draft` table (single row, `id = 1`).
 - Restored on app launch if `RecordingState == idle` and a draft exists.
 
-### Friend & Live Session System
-- `UserService` registers the device on first launch (hardware ID for stable identity), generates a 6-char friend code, fetches an auth token.
-- Friend invites: `FriendDialog` → POST to Render → poll for accept/reject → push `LiveSessionScreen`.
-- `SessionRelayService` opens a WS to `/ws/session` so both participants see each other's drafts + completed translations in real time.
+### Identity & Customer ID
+- `UserService` registers the device on first launch (hardware ID for stable identity), generates an 8-char code, fetches an auth token.
+- The code is still called `friendCode` internally (pref key + server field), but the friend/live-session feature was removed (2026-07); the code now surfaces only as the **customer ID** in the Add More Time purchase sheet, with tap-to-copy, for support/purchase enquiries.
 - Activity reporting: `UserService.reportActivity('event_name', metadata)` for analytics (app_open, recording_start/stop, session_save, …).
+
+### Theme (light/dark)
+- `darkModeProvider` (`theme_provider.dart`) — toggle button in the main-screen header (sun/moon icon), persisted in SharedPreferences (`dark_mode`), **default light, independent of the OS setting**.
+- Colors resolve through `AppConstants` static **getters** switched by `AppConstants.isDark` (set in `main()` and in `SilsiganApp.build` before the tree builds). `MainScreen` watches the provider so the whole subtree rebuilds on toggle; `SilsiganApp` swaps MaterialApp `ThemeData` (dialogs/popup menus) and the status-bar icon brightness.
+- When adding UI: never mark a widget `const` if it references an `AppConstants` color (it would be canonicalized and skip theme rebuilds). The conversation top half keeps its teal identity in both themes; mic/save-active surfaces invert (pair `micButtonColor` with `micIconColor`, `saveButtonActiveColor` with `saveButtonActiveIconColor`).
 
 ### Background Recording
 - Android: `flutter_foreground_task` foreground service (`foregroundServiceType="microphone"` + wake lock, low-importance notification) keeps capture + WS alive while backgrounded.
@@ -221,13 +223,13 @@ Migrations are additive — see `_initDatabase` in `database_service.dart`.
 - **SQLite is local-only**; uploads happen via `SyncService` (fire-and-forget) and are best-effort.
 - **Riverpod `StateProvider`** for simple state, `FutureProvider` for async DB queries. WebSocket callbacks drive provider updates.
 - **PCM16 at 24kHz** — Soniox-compatible (`pcm_s16le`).
-- **No separate routes** — single screen + modal bottom sheets. Friend live sessions are the one exception.
+- **No separate routes** — single screen + modal bottom sheets.
 
 ---
 
 ## UI Design
 
-- Light theme only: bg `#EAEAEA`, panels `#FCFCFC`, text `#111111`/`#333333`.
+- Light theme (default): bg `#EAEAEA`, panels `#FCFCFC`, text `#111111`/`#333333`. Dark palette mirrors it (`#161618`/`#232326`/`#F2F2F3`) via the AppConstants getters — see "Theme (light/dark)" above.
 - No AppBar on main screen — title "Silsigan" in gray header area.
 - Panels use uppercase labels: TRANSCRIPTION / TRANSLATION.
 - Copy-to-clipboard buttons (visible when text exists), `SelectionArea` for selection.

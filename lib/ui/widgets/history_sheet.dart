@@ -465,7 +465,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           padding: const EdgeInsets.only(left: 20, right: 12, bottom: 8),
           child: Row(
             children: [
-              const Text(
+              Text(
                 'History',
                 style: TextStyle(
                   fontSize: 20,
@@ -567,7 +567,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                     ? TextField(
                         controller: _titleController,
                         focusNode: _titleFocusNode,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
                           color: AppConstants.textPrimary,
@@ -583,7 +583,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                         onTap: _startEditingTitle,
                         child: Text(
                           session.title ?? _formatDate(session.createdAt),
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
                             color: AppConstants.textPrimary,
@@ -729,14 +729,16 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                       child: Container(
                         width: 56,
                         height: 56,
-                        decoration: const BoxDecoration(
+                        decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           color: AppConstants.textPrimary,
                         ),
                         child: Icon(
                           _isPlaying ? Icons.pause : Icons.play_arrow,
                           size: 30,
-                          color: Colors.white,
+                          // Pairs with the textPrimary circle, which inverts
+                          // in dark mode.
+                          color: AppConstants.micIconColor,
                         ),
                       ),
                     ),
@@ -784,7 +786,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
             children: [
               Text(
                 label,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: AppConstants.labelFontSize,
                   fontWeight: FontWeight.w400,
                   color: AppConstants.textSecondary,
@@ -795,7 +797,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
               if (hasText)
                 GestureDetector(
                   onTap: () => _copyText(fullText, label),
-                  child: const Icon(
+                  child: Icon(
                     Icons.copy,
                     size: 18,
                     color: AppConstants.textSecondary,
@@ -826,7 +828,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
               child: Text(
                 line,
                 textDirection: directionOf(line),
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: AppConstants.contentFontSize,
                   color: AppConstants.textPrimary,
                   height: 1.5,
@@ -859,17 +861,19 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     int cursor = 0;
     int wordIdx = 0;
 
-    const baseStyle = TextStyle(
+    final baseStyle = TextStyle(
       fontSize: AppConstants.contentFontSize,
       color: AppConstants.textPrimary,
       height: 1.5,
     );
 
-    const highlightStyle = TextStyle(
+    final highlightStyle = TextStyle(
       fontSize: AppConstants.contentFontSize,
       color: AppConstants.textPrimary,
       height: 1.5,
-      backgroundColor: Color(0x30000000),
+      backgroundColor: AppConstants.isDark
+          ? const Color(0x30FFFFFF)
+          : const Color(0x30000000),
     );
 
     for (final wt in words) {

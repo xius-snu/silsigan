@@ -58,7 +58,7 @@ class SessionCard extends StatelessWidget {
                 session.title ?? _formatDate(session.createdAt),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                   color: AppConstants.textPrimary,
@@ -78,7 +78,7 @@ class SessionCard extends StatelessWidget {
                 session.koreanPreview,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 14,
                   color: AppConstants.textPrimary,
                 ),

@@ -132,7 +132,9 @@ class _RecordButtonState extends State<RecordButton>
           child: Icon(
             showStop ? Icons.stop_rounded : Icons.mic,
             size: AppConstants.micIconSize,
-            color: Colors.white,
+            // Red stop keeps a white glyph; the idle mic pairs with the
+            // theme-inverted micButtonColor surface.
+            color: showStop ? Colors.white : AppConstants.micIconColor,
           ),
         ),
       ),

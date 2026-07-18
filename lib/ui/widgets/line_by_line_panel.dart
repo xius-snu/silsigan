@@ -339,7 +339,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
             ),
             child: Row(
               children: [
-                const Text(
+                Text(
                   'LINE BY LINE',
                   style: TextStyle(
                     fontSize: AppConstants.labelFontSize,
@@ -373,7 +373,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
                 if (_hasText)
                   GestureDetector(
                     onTap: _copyAll,
-                    child: const Icon(
+                    child: Icon(
                       Icons.copy,
                       size: 18,
                       color: AppConstants.textSecondary,
@@ -386,8 +386,10 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
             child: (!_hasText && widget.isRecording)
                 // Warm-up window: session is live but the first tokens haven't
                 // arrived yet — show a pulse so the empty panel isn't mistaken
-                // for a freeze.
-                ? const Center(child: ListeningIndicator())
+                // for a freeze. Not const — a const instance is canonicalized
+                // and would keep stale colors across a mid-warmup theme toggle.
+                // ignore: prefer_const_constructors
+                ? Center(child: ListeningIndicator())
                 : SelectionArea(
                     child: SelectionListener(
                       selectionNotifier: _selectionNotifier,
@@ -422,7 +424,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF0F0F0),
+        color: AppConstants.lineTranscriptionBlockColor,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(text, style: baseStyle, textDirection: directionOf(text)),
@@ -435,7 +437,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
   Widget _buildLineIcon(TtsLineStatus status) {
     switch (status) {
       case TtsLineStatus.loading:
-        return const SizedBox(
+        return SizedBox(
           width: 18,
           height: 18,
           child: CircularProgressIndicator(
@@ -444,13 +446,13 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
           ),
         );
       case TtsLineStatus.playing:
-        return const _PulsingIcon(
+        return _PulsingIcon(
           icon: Icons.stop_rounded,
           size: 20,
           color: AppConstants.textPrimary,
         );
       case TtsLineStatus.idle:
-        return const Icon(
+        return Icon(
           Icons.volume_up_outlined,
           size: 18,
           color: AppConstants.textSecondary,
@@ -465,7 +467,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: const Color(0xFFE8F0FE),
+          color: AppConstants.lineTranslationBlockColor,
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(

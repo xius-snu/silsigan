@@ -261,7 +261,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
               children: [
                 Text(
                   widget.label.toUpperCase(),
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: AppConstants.labelFontSize,
                     fontWeight: FontWeight.w400,
                     color: AppConstants.textSecondary,
@@ -293,7 +293,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                 if (_hasText)
                   GestureDetector(
                     onTap: _copyAll,
-                    child: const Icon(
+                    child: Icon(
                       Icons.copy,
                       size: 18,
                       color: AppConstants.textSecondary,
@@ -303,8 +303,12 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
             ),
           ),
           Expanded(
+            // Not const: a const ListeningIndicator would be canonicalized and
+            // skip rebuilds, keeping stale colors if the theme toggles while
+            // the warm-up pulse is visible.
             child: (!_hasText && widget.isRecording)
-                ? const Center(child: ListeningIndicator())
+                // ignore: prefer_const_constructors
+                ? Center(child: ListeningIndicator())
                 : SelectionArea(
                     child: SelectionListener(
                       selectionNotifier: _selectionNotifier,
@@ -406,7 +410,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
                   ),
                   TextSpan(
                     text: ' ${_buildDraftText()}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: AppConstants.contentFontSize,
                       color: AppConstants.textPrimary,
                       fontWeight: FontWeight.w400,
@@ -458,7 +462,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
         child: Text(
           _cleanLineStart(_buildDraftText()),
           textDirection: directionOf(_buildDraftText()),
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: AppConstants.contentFontSize,
             color: AppConstants.textPrimary,
             fontWeight: FontWeight.w400,

@@ -52,16 +52,75 @@ class AppConstants {
   static const lineByLineEndpointSensitivity = -0.2;
   static const lineByLineEndpointLatencyAdjustmentLevel = 0;
 
-  // UI — Figma design tokens
-  static const Color bgColor = Color(0xFFEAEAEA);
-  static const Color panelColor = Color(0xFFFCFCFC);
-  static const Color dividerColor = Color(0xFFF5F5F5);
-  static const Color textPrimary = Color(0xFF111111);
-  static const Color textSecondary = Color(0xFF333333);
-  static const Color micButtonColor = Color(0xFF111111);
-  static const Color historyButtonColor = Color(0xFF333333);
-  static const Color saveButtonColor = Color(0xFFBEBEBE);
-  static const Color saveButtonActiveColor = Color(0xFF333333);
+  // ── Theme ──
+  // Whether the dark palette is active. Set by SilsiganApp from
+  // darkModeProvider before the tree builds (toggle-driven only — never the
+  // OS setting); every color getter below resolves against it. Widgets don't
+  // listen to this flag — the screens watch the provider and rebuild, and
+  // their subtrees re-read the getters.
+  static bool isDark = false;
+
+  // UI — Figma design tokens (light) with a derived dark palette. These are
+  // getters, not consts, so the whole app follows the toggle without
+  // threading a theme object through every widget.
+  static Color get bgColor =>
+      isDark ? const Color(0xFF161618) : const Color(0xFFEAEAEA);
+  static Color get panelColor =>
+      isDark ? const Color(0xFF232326) : const Color(0xFFFCFCFC);
+  static Color get dividerColor =>
+      isDark ? const Color(0xFF2C2C2F) : const Color(0xFFF5F5F5);
+  static Color get textPrimary =>
+      isDark ? const Color(0xFFF2F2F3) : const Color(0xFF111111);
+  static Color get textSecondary =>
+      isDark ? const Color(0xFFC6C6CB) : const Color(0xFF333333);
+
+  /// Hint-tier text (grey[500]/grey[600] in the light design).
+  static Color get textMuted =>
+      isDark ? const Color(0xFF8E8E93) : const Color(0xFF9E9E9E);
+
+  /// Faint text — legal links, separators (grey[300]/grey[400] in light).
+  static Color get textFaint =>
+      isDark ? const Color(0xFF6E6E73) : const Color(0xFFBDBDBD);
+
+  // The mic surfaces invert in dark mode (light circle, dark glyph) so the
+  // primary action never disappears into the background.
+  static Color get micButtonColor =>
+      isDark ? const Color(0xFFF2F2F3) : const Color(0xFF111111);
+
+  /// Icon/spinner drawn ON mic-colored surfaces (mic button, active swap
+  /// circle) — pairs with [micButtonColor]'s inversion.
+  static Color get micIconColor =>
+      isDark ? const Color(0xFF111111) : Colors.white;
+  static Color get historyButtonColor =>
+      isDark ? const Color(0xFF48484C) : const Color(0xFF333333);
+  static Color get saveButtonColor =>
+      isDark ? const Color(0xFF3A3A3E) : const Color(0xFFBEBEBE);
+  static Color get saveButtonActiveColor =>
+      isDark ? const Color(0xFFE2E2E6) : const Color(0xFF333333);
+
+  /// Check glyph on the highlighted save button — pairs with the
+  /// [saveButtonActiveColor] inversion above.
+  static Color get saveButtonActiveIconColor =>
+      isDark ? const Color(0xFF111111) : Colors.white;
+
+  /// Modal bottom sheets (purchase sheet) and blocking overlay cards.
+  static Color get sheetColor =>
+      isDark ? const Color(0xFF1F1F22) : Colors.white;
+
+  // Purchase-sheet package cards.
+  static Color get cardColor => isDark ? const Color(0xFF29292D) : Colors.white;
+  static Color get cardBorderColor =>
+      isDark ? const Color(0xFF3A3A3E) : const Color(0xFFE0E0E0);
+  static Color get cardHighlightColor =>
+      isDark ? const Color(0xFF2E2E38) : const Color(0xFFF8F8FF);
+  static Color get cardHighlightBorderColor =>
+      isDark ? const Color(0xFF8E8E98) : const Color(0xFF4A4A4A);
+
+  // Line-by-line paired blocks.
+  static Color get lineTranscriptionBlockColor =>
+      isDark ? const Color(0xFF2C2C30) : const Color(0xFFF0F0F0);
+  static Color get lineTranslationBlockColor =>
+      isDark ? const Color(0xFF253140) : const Color(0xFFE8F0FE);
 
   static const double titleFontSize = 24.0;
   static const double labelFontSize = 14.0;
@@ -90,10 +149,13 @@ class AppConstants {
   static const Color selectionHandleColor = Color(0xFF1A73E8);
 
   // Speaker diarization label colors — one per detected speaker, cycled.
-  // Muted-but-distinct hues that stay readable on the light panels
-  // (#FCFCFC / #F0F0F0). Soniox supports up to 15 speakers per session;
-  // beyond the palette the colors repeat.
-  static const List<Color> speakerColors = [
+  // Muted-but-distinct hues per theme (the light set stays readable on
+  // #FCFCFC/#F0F0F0 panels; the dark set on #232326/#2C2C30). Soniox supports
+  // up to 15 speakers per session; beyond the palette the colors repeat.
+  static List<Color> get speakerColors =>
+      isDark ? _speakerColorsDark : _speakerColorsLight;
+
+  static const List<Color> _speakerColorsLight = [
     Color(0xFF1A73E8), // blue
     Color(0xFFC5221F), // red
     Color(0xFF188038), // green
@@ -102,5 +164,16 @@ class AppConstants {
     Color(0xFF12805C), // teal
     Color(0xFFB80672), // magenta
     Color(0xFF5F6368), // gray
+  ];
+
+  static const List<Color> _speakerColorsDark = [
+    Color(0xFF8AB4F8), // blue
+    Color(0xFFF28B82), // red
+    Color(0xFF81C995), // green
+    Color(0xFFC58AF9), // purple
+    Color(0xFFFDA663), // orange
+    Color(0xFF6FCFB2), // teal
+    Color(0xFFFF8BCB), // magenta
+    Color(0xFF9AA0A6), // gray
   ];
 }

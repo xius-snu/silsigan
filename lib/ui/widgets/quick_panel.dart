@@ -258,7 +258,7 @@ class _QuickPanelState extends State<QuickPanel>
                 ),
                 child: Text(
                   label.toUpperCase(),
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: AppConstants.labelFontSize,
                     fontWeight: FontWeight.w400,
                     color: AppConstants.textSecondary,
@@ -285,7 +285,7 @@ class _QuickPanelState extends State<QuickPanel>
                           display,
                           textDirection:
                               isRtl ? TextDirection.rtl : TextDirection.ltr,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: AppConstants.quickFontSize,
                             color: AppConstants.textPrimary,
                             fontWeight: FontWeight.w500,
@@ -316,8 +316,8 @@ class _QuickPanelState extends State<QuickPanel>
                         HapticFeedback.selectionClick();
                         widget.onReplay();
                       },
-                      child: const Padding(
-                        padding: EdgeInsets.all(4),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
                         child: Icon(
                           Icons.replay,
                           size: 20,
@@ -375,8 +375,9 @@ class _QuickPanelState extends State<QuickPanel>
               child: Icon(
                 widget.swapActive ? Icons.swap_horiz : Icons.arrow_forward,
                 size: 27,
-                color:
-                    widget.swapActive ? Colors.white : AppConstants.textPrimary,
+                color: widget.swapActive
+                    ? AppConstants.micIconColor
+                    : AppConstants.textPrimary,
               ),
             ),
           ),
@@ -409,7 +410,7 @@ class _QuickPanelState extends State<QuickPanel>
             alignment: Alignment.center,
             child: Text(
               widget.targetLanguage.displayName,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: AppConstants.langFontSize,
                 color: AppConstants.textPrimary,
               ),
@@ -555,10 +556,12 @@ class _QuickPanelState extends State<QuickPanel>
               ),
             ],
           ),
-          child: const Icon(
+          child: Icon(
             Icons.mic,
             size: AppConstants.micIconSize,
-            color: Colors.white,
+            // White while recording (red surface); otherwise pairs with the
+            // theme-inverted micButtonColor surface.
+            color: _isRecording ? Colors.white : AppConstants.micIconColor,
           ),
         ),
       ),
@@ -578,7 +581,7 @@ class _QuickPanelState extends State<QuickPanel>
       hint,
       style: TextStyle(
         fontSize: 13,
-        color: Colors.grey[500],
+        color: AppConstants.textMuted,
         fontWeight: FontWeight.w500,
       ),
     );
