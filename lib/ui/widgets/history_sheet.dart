@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +17,18 @@ import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
 import 'session_card.dart';
+
+/// Isolate entry for parsing a saved session's per-word timestamps — the JSON
+/// carries one entry per word, so a long session decoded inline janked the
+/// open animation.
+List<List<WordTimestamp>> _parseTimestampsJson(String json) {
+  final raw = jsonDecode(json) as List;
+  return raw
+      .map((line) => (line as List)
+          .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
+          .toList())
+      .toList();
+}
 
 class HistorySheet extends ConsumerStatefulWidget {
   final double maxFraction;
@@ -40,19 +53,24 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
   // Word timestamps for tap-to-seek (per-line, for transcription)
   List<List<WordTimestamp>>? _parsedTimestamps;
-  final List<TapGestureRecognizer> _tapRecognizers = [];
   bool _isPlaying = false;
-  Duration _position = Duration.zero;
-  Duration _duration = Duration.zero;
 
-  // Tap highlight effect
-  String? _highlightedWordId; // "lineIdx_wordIdx"
-  Timer? _highlightTimer;
+  // Playback position/duration as notifiers, NOT setState fields: the
+  // progress stream ticks at 10Hz during playback, and a sheet-level
+  // setState at that rate rebuilt the entire detail view — every transcript
+  // line — per tick. Only the slider row listens to these.
+  final ValueNotifier<Duration> _position = ValueNotifier(Duration.zero);
+  final ValueNotifier<Duration> _duration = ValueNotifier(Duration.zero);
 
   // Inline title editing
   bool _isEditingTitle = false;
   final TextEditingController _titleController = TextEditingController();
   final FocusNode _titleFocusNode = FocusNode();
+
+  // Monotonic guard for _selectSession: its timestamp parse is async, so a
+  // second tap during the parse starts a second flight — only the latest
+  // tap's result may land (completion order isn't tap order).
+  int _selectEpoch = 0;
 
   @override
   void initState() {
@@ -83,13 +101,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     await _player.openPlayer();
     _player.setSubscriptionDuration(const Duration(milliseconds: 100));
     _player.onProgress?.listen((event) {
-      if (mounted) {
-        setState(() {
-          _position = event.position;
-          if (event.duration > Duration.zero) {
-            _duration = event.duration;
-          }
-        });
+      if (!mounted) return;
+      _position.value = event.position;
+      if (event.duration > Duration.zero) {
+        _duration.value = event.duration;
       }
     });
     _playerInitialized = true;
@@ -97,49 +112,39 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
   @override
   void dispose() {
-    _highlightTimer?.cancel();
-    _clearTapRecognizers();
     _titleFocusNode.removeListener(_onTitleFocusChanged);
     _titleFocusNode.dispose();
     _titleController.dispose();
+    _position.dispose();
+    _duration.dispose();
     if (_playerInitialized) {
       _player.closePlayer();
     }
     super.dispose();
   }
 
-  void _clearTapRecognizers() {
-    for (final r in _tapRecognizers) {
-      r.dispose();
-    }
-    _tapRecognizers.clear();
-  }
-
   void _selectSession(TranscriptSession session) async {
+    final epoch = ++_selectEpoch;
     // Stop any playing audio when switching
     if (_isPlaying) {
       await _player.stopPlayer();
     }
-    _clearTapRecognizers();
-    // Parse word timestamps if available
+    // Parse word timestamps off the UI isolate if available
     List<List<WordTimestamp>>? timestamps;
     if (session.timestampsJson != null) {
       try {
-        final raw = jsonDecode(session.timestampsJson!) as List;
-        timestamps = raw
-            .map((line) => (line as List)
-                .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
-                .toList())
-            .toList();
+        timestamps =
+            await compute(_parseTimestampsJson, session.timestampsJson!);
       } catch (_) {}
     }
+    if (!mounted || epoch != _selectEpoch) return;
     setState(() {
       _selectedSession = session;
       _parsedTimestamps = timestamps;
       _isPlaying = false;
-      _position = Duration.zero;
-      _duration = Duration.zero;
     });
+    _position.value = Duration.zero;
+    _duration.value = Duration.zero;
     // Calculate duration from file
     if (session.audioPath != null) {
       final file = File(session.audioPath!);
@@ -149,10 +154,9 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         final bytesPerSecond =
             AppConstants.sampleRate * AppConstants.numChannels * 2;
         final durationSecs = dataSize / bytesPerSecond;
-        if (mounted) {
-          setState(() {
-            _duration = Duration(milliseconds: (durationSecs * 1000).round());
-          });
+        if (mounted && epoch == _selectEpoch) {
+          _duration.value =
+              Duration(milliseconds: (durationSecs * 1000).round());
         }
       }
     }
@@ -162,15 +166,15 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (_isPlaying) {
       await _player.stopPlayer();
     }
-    _clearTapRecognizers();
+    if (!mounted) return;
     setState(() {
       _selectedSession = null;
       _parsedTimestamps = null;
       _isPlaying = false;
       _isEditingTitle = false;
-      _position = Duration.zero;
-      _duration = Duration.zero;
     });
+    _position.value = Duration.zero;
+    _duration.value = Duration.zero;
   }
 
   void _startEditingTitle() {
@@ -227,17 +231,16 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         await _player.resumePlayer();
         setState(() => _isPlaying = true);
       } else {
-        final seekTarget = _position > Duration.zero ? _position : null;
+        final seekTarget =
+            _position.value > Duration.zero ? _position.value : null;
         setState(() => _isPlaying = true);
         await _player.startPlayer(
           fromURI: audioPath,
           codec: Codec.pcm16WAV,
           whenFinished: () {
             if (mounted) {
-              setState(() {
-                _isPlaying = false;
-                _position = Duration.zero;
-              });
+              setState(() => _isPlaying = false);
+              _position.value = Duration.zero;
             }
           },
         );
@@ -253,10 +256,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   Future<void> _seekRelative(int seconds) async {
     if (!_playerInitialized) return;
     if (!_isPlaying && !_player.isPaused) return;
-    final newPos = _position + Duration(seconds: seconds);
+    final newPos = _position.value + Duration(seconds: seconds);
     final clamped = newPos < Duration.zero
         ? Duration.zero
-        : (newPos > _duration ? _duration : newPos);
+        : (newPos > _duration.value ? _duration.value : newPos);
     await _player.seekToPlayer(clamped);
   }
 
@@ -282,10 +285,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     } else if (_player.isPaused) {
       // Paused — seek but stay paused, update UI
       await _player.seekToPlayer(target);
-      setState(() => _position = target);
+      _position.value = target;
     } else {
       // Stopped — just update position visually; will seek on next play
-      setState(() => _position = target);
+      _position.value = target;
     }
   }
 
@@ -547,6 +550,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     final koreanLines = session.koreanFull.split('\n');
     final vietnameseLines = session.vietnameseFull.split('\n');
     final hasAudio = session.audioPath != null;
+    final hasTranslation = session.vietnameseFull.trim().isNotEmpty;
 
     return Column(
       key: const ValueKey('history-detail'),
@@ -606,32 +610,32 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
             ],
           ),
         ),
-        // Content
+        // Content — lazy slivers: only rows near the viewport are built,
+        // laid out, and painted. The old SingleChildScrollView materialized
+        // every line of the session up front and repainted them all on each
+        // scroll frame, which visibly janked on multi-thousand-word
+        // transcripts.
         Expanded(
           child: SelectionArea(
-            child: SingleChildScrollView(
+            child: CustomScrollView(
               controller: scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildTextBox(
-                    label: 'TRANSCRIPTION',
-                    lines: koreanLines,
-                    fullText: session.koreanFull,
-                    timestamps: hasAudio ? _parsedTimestamps : null,
+              slivers: [
+                ..._buildTextBoxSlivers(
+                  label: 'TRANSCRIPTION',
+                  lines: koreanLines,
+                  fullText: session.koreanFull,
+                  timestamps: hasAudio ? _parsedTimestamps : null,
+                ),
+                if (hasTranslation) ...[
+                  const SliverToBoxAdapter(child: SizedBox(height: 5)),
+                  ..._buildTextBoxSlivers(
+                    label: 'TRANSLATION',
+                    lines: vietnameseLines,
+                    fullText: session.vietnameseFull,
                   ),
-                  if (session.vietnameseFull.trim().isNotEmpty) ...[
-                    const SizedBox(height: 5),
-                    _buildTextBox(
-                      label: 'TRANSLATION',
-                      lines: vietnameseLines,
-                      fullText: session.vietnameseFull,
-                    ),
-                  ],
-                  const SizedBox(height: 16),
                 ],
-              ),
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+              ],
             ),
           ),
         ),
@@ -658,56 +662,73 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   Widget _buildAudioPlayer() {
-    final progress = _duration.inMilliseconds > 0
-        ? _position.inMilliseconds / _duration.inMilliseconds
-        : 0.0;
-
     return Container(
       color: AppConstants.panelColor,
       padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 24),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              activeTrackColor: AppConstants.textPrimary,
-              inactiveTrackColor: AppConstants.textPrimary.withOpacity(0.2),
-              thumbColor: AppConstants.textPrimary,
-            ),
-            child: Slider(
-              value: progress.clamp(0.0, 1.0),
-              onChanged: (value) {
-                final newPos = Duration(
-                  milliseconds: (value * _duration.inMilliseconds).round(),
-                );
-                _seekTo(newPos);
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  _formatDuration(_position),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppConstants.textSecondary.withOpacity(0.7),
+          // Only this slider row listens to the 10Hz progress stream — the
+          // rest of the sheet (and the transcript list above) never rebuilds
+          // for a playback tick.
+          ListenableBuilder(
+            listenable: Listenable.merge([_position, _duration]),
+            builder: (context, _) {
+              final progress = _duration.value.inMilliseconds > 0
+                  ? _position.value.inMilliseconds /
+                      _duration.value.inMilliseconds
+                  : 0.0;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SliderTheme(
+                    data: SliderThemeData(
+                      trackHeight: 3,
+                      thumbShape:
+                          const RoundSliderThumbShape(enabledThumbRadius: 6),
+                      overlayShape:
+                          const RoundSliderOverlayShape(overlayRadius: 14),
+                      activeTrackColor: AppConstants.textPrimary,
+                      inactiveTrackColor:
+                          AppConstants.textPrimary.withOpacity(0.2),
+                      thumbColor: AppConstants.textPrimary,
+                    ),
+                    child: Slider(
+                      value: progress.clamp(0.0, 1.0),
+                      onChanged: (value) {
+                        final newPos = Duration(
+                          milliseconds:
+                              (value * _duration.value.inMilliseconds).round(),
+                        );
+                        _seekTo(newPos);
+                      },
+                    ),
                   ),
-                ),
-                Text(
-                  _formatDuration(_duration),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppConstants.textSecondary.withOpacity(0.7),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          _formatDuration(_position.value),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppConstants.textSecondary.withOpacity(0.7),
+                          ),
+                        ),
+                        Text(
+                          _formatDuration(_duration.value),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppConstants.textSecondary.withOpacity(0.7),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              );
+            },
           ),
           const SizedBox(height: 8),
           Row(
@@ -765,102 +786,220 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     );
   }
 
-  Widget _buildTextBox({
+  /// One text box (label + lines) as lazy slivers. Visually identical to the
+  /// old solid Container box: DecoratedSliver paints the panel background and
+  /// rounded corners as one continuous decoration behind the lazily-built
+  /// rows, SliverPadding reproduces the box's inner padding, and each line
+  /// keeps its old bottom-8 spacing.
+  List<Widget> _buildTextBoxSlivers({
     required String label,
     required List<String> lines,
     required String fullText,
     List<List<WordTimestamp>>? timestamps,
   }) {
     final hasText = fullText.trim().isNotEmpty;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(AppConstants.panelPaddingH),
-      decoration: BoxDecoration(
-        color: AppConstants.panelColor,
-        borderRadius: BorderRadius.circular(AppConstants.panelBorderRadius),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: AppConstants.labelFontSize,
-                  fontWeight: FontWeight.w400,
-                  color: AppConstants.textSecondary,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const Spacer(),
-              if (hasText)
-                GestureDetector(
-                  onTap: () => _copyText(fullText, label),
-                  child: Icon(
-                    Icons.copy,
-                    size: 18,
-                    color: AppConstants.textSecondary,
-                  ),
-                ),
-            ],
+    return [
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        sliver: DecoratedSliver(
+          decoration: BoxDecoration(
+            color: AppConstants.panelColor,
+            borderRadius: BorderRadius.circular(AppConstants.panelBorderRadius),
           ),
-          const SizedBox(height: 12),
-          ...lines.asMap().entries.map((entry) {
-            final lineIdx = entry.key;
-            final line = entry.value;
+          sliver: SliverPadding(
+            padding: const EdgeInsets.all(AppConstants.panelPaddingH),
+            sliver: SliverList.builder(
+              // Row 0 is the label row, row 1 the gap below it, then lines.
+              itemCount: lines.length + 2,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return Row(
+                    children: [
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: AppConstants.labelFontSize,
+                          fontWeight: FontWeight.w400,
+                          color: AppConstants.textSecondary,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (hasText)
+                        GestureDetector(
+                          onTap: () => _copyText(fullText, label),
+                          child: Icon(
+                            Icons.copy,
+                            size: 18,
+                            color: AppConstants.textSecondary,
+                          ),
+                        ),
+                    ],
+                  );
+                }
+                if (index == 1) return const SizedBox(height: 12);
 
-            // If we have timestamps for this line, build tappable word spans
-            if (timestamps != null &&
-                lineIdx < timestamps.length &&
-                timestamps[lineIdx].isNotEmpty) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text.rich(
-                  _buildTappableSpans(lineIdx, line, timestamps[lineIdx]),
-                  textDirection: directionOf(line),
-                ),
-              );
-            }
+                final lineIdx = index - 2;
+                final line = lines[lineIdx];
+                final words = (timestamps != null &&
+                        lineIdx < timestamps.length &&
+                        timestamps[lineIdx].isNotEmpty)
+                    ? timestamps[lineIdx]
+                    : null;
 
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                line,
-                textDirection: directionOf(line),
-                style: TextStyle(
-                  fontSize: AppConstants.contentFontSize,
-                  color: AppConstants.textPrimary,
-                  height: 1.5,
-                ),
-              ),
-            );
-          }),
-        ],
+                // Align start, not stretch: sliver rows span the full width,
+                // but the old Column start-aligned each line at its intrinsic
+                // width — this keeps short RTL lines on the left edge exactly
+                // as before.
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: words != null
+                        ? _TappableTimestampLine(
+                            line: line,
+                            words: words,
+                            onSeek: _seekToMs,
+                          )
+                        : Text(
+                            line,
+                            textDirection: directionOf(line),
+                            style: TextStyle(
+                              fontSize: AppConstants.contentFontSize,
+                              color: AppConstants.textPrimary,
+                              height: 1.5,
+                            ),
+                          ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
       ),
-    );
+    ];
+  }
+}
+
+/// One saved-session line with per-word tap-to-seek spans.
+///
+/// Owns its gesture recognizers and its transient tap-highlight. The old
+/// sheet-level version rebuilt every recognizer for every word of the session
+/// on any sheet rebuild (accumulating the stale ones in a list that was only
+/// cleared on session switch — thousands per second during playback ticks),
+/// and a single word-tap highlight rebuilt the entire transcript. Localizing
+/// both keeps a multi-thousand-word session smooth.
+class _TappableTimestampLine extends StatefulWidget {
+  final String line;
+  final List<WordTimestamp> words;
+
+  /// Called with the tapped word's start offset in milliseconds.
+  final ValueChanged<int> onSeek;
+
+  const _TappableTimestampLine({
+    required this.line,
+    required this.words,
+    required this.onSeek,
+  });
+
+  @override
+  State<_TappableTimestampLine> createState() => _TappableTimestampLineState();
+}
+
+/// A matched word: the plain text preceding it, the tappable token itself,
+/// and the recognizer created once for the line's lifetime.
+class _WordSegment {
+  final String plainBefore;
+  final String token;
+  final int wordIdx;
+  final TapGestureRecognizer recognizer;
+
+  _WordSegment(this.plainBefore, this.token, this.wordIdx, this.recognizer);
+}
+
+class _TappableTimestampLineState extends State<_TappableTimestampLine> {
+  final List<_WordSegment> _segments = [];
+  String _trailing = '';
+  int? _highlightedWordIdx;
+  Timer? _highlightTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _computeSegments();
   }
 
-  void _onWordTap(int lineIdx, int wordIdx, int startMs) {
+  @override
+  void didUpdateWidget(_TappableTimestampLine oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A recycled list element can be handed a different line (e.g. switching
+    // sessions) — recompute the segment cache for the new content.
+    if (widget.line != oldWidget.line ||
+        !identical(widget.words, oldWidget.words)) {
+      _disposeSegments();
+      _computeSegments();
+      _highlightTimer?.cancel();
+      _highlightedWordIdx = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _highlightTimer?.cancel();
+    _disposeSegments();
+    super.dispose();
+  }
+
+  void _disposeSegments() {
+    for (final s in _segments) {
+      s.recognizer.dispose();
+    }
+    _segments.clear();
+  }
+
+  /// Words are matched sequentially: walk through the line text finding each
+  /// timestamp token, making matched portions tappable and gaps plain text.
+  void _computeSegments() {
+    final line = widget.line;
+    int cursor = 0;
+    int wordIdx = 0;
+    for (final wt in widget.words) {
+      final token = wt.text;
+      if (token.isEmpty) continue;
+
+      // Find this token in the remaining line text
+      final idx = line.indexOf(token, cursor);
+      if (idx < 0) continue;
+
+      final currentWordIdx = wordIdx;
+      final recognizer = TapGestureRecognizer()
+        ..onTap = () => _onWordTap(currentWordIdx, wt.startMs);
+      _segments.add(_WordSegment(
+        idx > cursor ? line.substring(cursor, idx) : '',
+        token,
+        currentWordIdx,
+        recognizer,
+      ));
+
+      cursor = idx + token.length;
+      wordIdx++;
+    }
+    _trailing = cursor < line.length ? line.substring(cursor) : '';
+  }
+
+  void _onWordTap(int wordIdx, int startMs) {
     HapticFeedback.selectionClick();
-    _seekToMs(startMs);
-    // Flash highlight
-    setState(() => _highlightedWordId = '${lineIdx}_$wordIdx');
+    widget.onSeek(startMs);
+    // Flash highlight — local to this line only.
+    setState(() => _highlightedWordIdx = wordIdx);
     _highlightTimer?.cancel();
     _highlightTimer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => _highlightedWordId = null);
+      if (mounted) setState(() => _highlightedWordIdx = null);
     });
   }
 
-  /// Build a TextSpan where each word with a timestamp is tappable.
-  /// Words are matched sequentially: walk through the line text finding each
-  /// timestamp token, making matched portions tappable and gaps plain text.
-  TextSpan _buildTappableSpans(
-      int lineIdx, String line, List<WordTimestamp> words) {
-    final spans = <InlineSpan>[];
-    int cursor = 0;
-    int wordIdx = 0;
-
+  @override
+  Widget build(BuildContext context) {
     final baseStyle = TextStyle(
       fontSize: AppConstants.contentFontSize,
       color: AppConstants.textPrimary,
@@ -876,47 +1015,24 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           : const Color(0x30000000),
     );
 
-    for (final wt in words) {
-      final token = wt.text;
-      if (token.isEmpty) continue;
-
-      // Find this token in the remaining line text
-      final idx = line.indexOf(token, cursor);
-      if (idx < 0) continue;
-
-      // Add any text before this token as plain text
-      if (idx > cursor) {
-        spans.add(TextSpan(
-          text: line.substring(cursor, idx),
-          style: baseStyle,
-        ));
+    final spans = <InlineSpan>[];
+    for (final s in _segments) {
+      if (s.plainBefore.isNotEmpty) {
+        spans.add(TextSpan(text: s.plainBefore, style: baseStyle));
       }
-
-      // Add the tappable word with highlight support
-      final currentWordIdx = wordIdx;
-      final isHighlighted = _highlightedWordId == '${lineIdx}_$currentWordIdx';
-      final recognizer = TapGestureRecognizer()
-        ..onTap = () => _onWordTap(lineIdx, currentWordIdx, wt.startMs);
-      _tapRecognizers.add(recognizer);
-
       spans.add(TextSpan(
-        text: token,
-        style: isHighlighted ? highlightStyle : baseStyle,
-        recognizer: recognizer,
-      ));
-
-      cursor = idx + token.length;
-      wordIdx++;
-    }
-
-    // Add any remaining text after the last matched token
-    if (cursor < line.length) {
-      spans.add(TextSpan(
-        text: line.substring(cursor),
-        style: baseStyle,
+        text: s.token,
+        style: s.wordIdx == _highlightedWordIdx ? highlightStyle : baseStyle,
+        recognizer: s.recognizer,
       ));
     }
+    if (_trailing.isNotEmpty) {
+      spans.add(TextSpan(text: _trailing, style: baseStyle));
+    }
 
-    return TextSpan(children: spans);
+    return Text.rich(
+      TextSpan(children: spans),
+      textDirection: directionOf(widget.line),
+    );
   }
 }
