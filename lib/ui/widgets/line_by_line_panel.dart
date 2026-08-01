@@ -97,14 +97,33 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
         widget.translationDraft != oldWidget.translationDraft;
     if (contentChanged && !_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.easeOut,
-          );
-        }
+        _followTail(duration: const Duration(milliseconds: 100));
       });
+    }
+  }
+
+  /// Keep the view pinned to the live tail without a per-token animation
+  /// storm. Most streaming updates don't change the scroll extent at all
+  /// (the draft grows within its current wrapped line), so skip those
+  /// outright instead of restarting a scroll activity ~10x/s for the whole
+  /// session — that constant animation churn was a measurable heat source
+  /// over an hour of recording. When the gap is huge (first frame after a
+  /// long screen-off stint, or a restored session), animating would force
+  /// layout of every row it flies past — a multi-second stall that grows
+  /// with the backlog — so jump straight to the end instead.
+  void _followTail({required Duration duration}) {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final gap = position.maxScrollExtent - position.pixels;
+    if (gap < 1.0) return;
+    if (gap > position.viewportDimension * 2) {
+      _scrollController.jumpTo(position.maxScrollExtent);
+    } else {
+      _scrollController.animateTo(
+        position.maxScrollExtent,
+        duration: duration,
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -158,13 +177,7 @@ class _LineByLinePanelState extends State<LineByLinePanel> {
       return;
     }
     _userScrolledUp = false;
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
+    _followTail(duration: const Duration(milliseconds: 300));
   }
 
   String get _allText {

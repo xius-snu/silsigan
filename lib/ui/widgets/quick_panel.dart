@@ -137,9 +137,18 @@ class _QuickPanelState extends State<QuickPanel>
 
   void _scrollToBottom(ScrollController controller) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (controller.hasClients) {
+      if (!controller.hasClients) return;
+      // Same shape as the streaming panels' _followTail: skip no-op updates
+      // instead of restarting a scroll activity per token, and jump across
+      // huge gaps instead of laying out every row the animation would pass.
+      final position = controller.position;
+      final gap = position.maxScrollExtent - position.pixels;
+      if (gap < 1.0) return;
+      if (gap > position.viewportDimension * 2) {
+        controller.jumpTo(position.maxScrollExtent);
+      } else {
         controller.animateTo(
-          controller.position.maxScrollExtent,
+          position.maxScrollExtent,
           duration: const Duration(milliseconds: 120),
           curve: Curves.easeOut,
         );

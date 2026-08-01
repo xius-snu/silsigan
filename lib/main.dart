@@ -16,6 +16,10 @@ import 'utils/constants.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   BackgroundService.init();
+  // A sticky mic foreground service can outlive (even resurrect after) the
+  // app being swiped away mid-recording; reap it so a relaunch doesn't sit
+  // next to a zombie holding wake locks and a stale notification.
+  BackgroundService.reapZombieService();
   // Resolve the saved theme before the first frame so a dark-mode user never
   // sees a light flash; the override seeds the provider with the saved value.
   final darkMode = await loadSavedDarkMode();

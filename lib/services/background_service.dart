@@ -22,6 +22,9 @@ class _MinimalTaskHandler extends TaskHandler {
 
 class BackgroundService {
   static bool _initialized = false;
+  // In-flight launch-time reap — a mic tap right after launch must not race
+  // its stopService against the new session's startService.
+  static Future<void>? _reapFuture;
 
   static void init() {
     if (_initialized) return;
@@ -53,9 +56,30 @@ class BackgroundService {
     _initialized = true;
   }
 
+  /// Reap a foreground service left over from a dead session. The plugin's
+  /// service is sticky: it survives the app being swiped from recents (and
+  /// its task-removal path re-arms it via AlarmManager), so a relaunch can
+  /// land in a process where a zombie service still holds the wake/wifi
+  /// locks and shows a stale "Recording in progress..." notification. A
+  /// fresh launch never has an active recording, so any running service
+  /// found here is a zombie — stop it.
+  static void reapZombieService() {
+    if (!Platform.isAndroid) return;
+    if (!_initialized) init();
+    _reapFuture = stopRecordingService();
+  }
+
   static Future<void> startRecordingService() async {
     if (!Platform.isAndroid) return;
     if (!_initialized) init();
+
+    // Let a launch-time zombie reap finish first so its stopService can't
+    // land after (and kill) the service we're about to start.
+    final pendingReap = _reapFuture;
+    if (pendingReap != null) {
+      _reapFuture = null;
+      await pendingReap;
+    }
 
     if (await FlutterForegroundTask.isRunningService) return;
 

@@ -139,14 +139,30 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
         widget.showEllipsis != oldWidget.showEllipsis;
     if (contentChanged && !_userScrolledUp && !_hasActiveSelection) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.easeOut,
-          );
-        }
+        _followTail(duration: const Duration(milliseconds: 100));
       });
+    }
+  }
+
+  /// Keep the view pinned to the live tail without a per-token animation
+  /// storm — see LineByLinePanel._followTail for the full rationale: no-op
+  /// updates (extent unchanged) are skipped instead of restarting a scroll
+  /// activity ~10x/s, and huge gaps (resume after a long screen-off stint,
+  /// restored sessions) jump instead of animating through — and laying
+  /// out — every intervening row.
+  void _followTail({required Duration duration}) {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final gap = position.maxScrollExtent - position.pixels;
+    if (gap < 1.0) return;
+    if (gap > position.viewportDimension * 2) {
+      _scrollController.jumpTo(position.maxScrollExtent);
+    } else {
+      _scrollController.animateTo(
+        position.maxScrollExtent,
+        duration: duration,
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -194,13 +210,7 @@ class _TranscriptPanelState extends State<TranscriptPanel> {
       return;
     }
     _userScrolledUp = false;
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
+    _followTail(duration: const Duration(milliseconds: 300));
   }
 
   String get _allText {

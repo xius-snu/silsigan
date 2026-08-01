@@ -125,25 +125,34 @@ class _ConversationPanelState extends State<ConversationPanel> {
     if (!_bottomUserScrolled &&
         !_hasActiveSelection(_bottomSelectionNotifier)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_bottomScrollController.hasClients) {
-          _bottomScrollController.animateTo(
-            0,
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.easeOut,
-          );
-        }
+        _followNewest(_bottomScrollController,
+            duration: const Duration(milliseconds: 100));
       });
     }
     if (!_topUserScrolled && !_hasActiveSelection(_topSelectionNotifier)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_topScrollController.hasClients) {
-          _topScrollController.animateTo(
-            0,
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.easeOut,
-          );
-        }
+        _followNewest(_topScrollController,
+            duration: const Duration(milliseconds: 100));
       });
+    }
+  }
+
+  /// Keep a reversed list (offset 0 = newest) pinned to the newest bubble
+  /// without a per-token animation storm: while already at the bottom the
+  /// offset is 0 and every streaming update would restart a zero-distance
+  /// scroll activity ~10x/s — skip those. Big gaps (returning after the
+  /// user scrolled far up) jump instead of laying out every bubble the
+  /// animation would fly past.
+  void _followNewest(ScrollController controller,
+      {required Duration duration}) {
+    if (!controller.hasClients) return;
+    final position = controller.position;
+    final gap = position.pixels;
+    if (gap < 1.0) return;
+    if (gap > position.viewportDimension * 2) {
+      controller.jumpTo(0);
+    } else {
+      controller.animateTo(0, duration: duration, curve: Curves.easeOut);
     }
   }
 
@@ -215,13 +224,8 @@ class _ConversationPanelState extends State<ConversationPanel> {
       return;
     }
     _bottomUserScrolled = false;
-    if (_bottomScrollController.hasClients) {
-      _bottomScrollController.animateTo(
-        0,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
+    _followNewest(_bottomScrollController,
+        duration: const Duration(milliseconds: 300));
   }
 
   void _resumeTopAutoScroll() {
@@ -234,13 +238,8 @@ class _ConversationPanelState extends State<ConversationPanel> {
       return;
     }
     _topUserScrolled = false;
-    if (_topScrollController.hasClients) {
-      _topScrollController.animateTo(
-        0,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
+    _followNewest(_topScrollController,
+        duration: const Duration(milliseconds: 300));
   }
 
   bool get _isRecording =>

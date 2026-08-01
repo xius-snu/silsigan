@@ -12,7 +12,7 @@ Real-time speech translation app built with Flutter. User speaks in any language
 
 - **Framework:** Flutter (Dart) — iOS 16+ / Android 14+ (API 24+)
 - **ASR + Translation:** Soniox (`stt-rt-v5`) via WebSocket — proxied through our own server
-- **Audio:** `flutter_sound` — PCM16 (pcm_s16le), 24kHz, mono
+- **Audio:** PCM16 (pcm_s16le), 24kHz, mono — captured via `record` on Android/desktop and `flutter_sound` on iOS only. **Do not move Android back to flutter_sound:** its streaming engine polls AudioRecord on the Android platform main thread via a self-reposting runnable whose queue population grows every read — after ~30-60min it saturates the main looper (device heat, hard UI freeze on resume, laggy relaunch that survives swipe-away because the mic FGS keeps the process alive). iOS stays on flutter_sound because its `openRecorder` also configures the playAndRecord audio session TTS depends on.
 - **TTS:** `flutter_tts` — native OS voices (iOS AVSpeechSynthesizer, Android system TTS)
 - **State:** Riverpod
 - **Storage:** sqflite (local SQLite, **DB version 5**)
@@ -153,10 +153,11 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 3. **PostRecording:** Trash (red), Mic, Check (highlighted)
 
 ### Audio Recording
-- PCM chunks accumulated in `_fullRecording` during recording.
+- PCM chunks stream to a temp file on disk (one write per 100ms chunk tick — never accumulate audio in memory).
 - On save: 44-byte WAV header + PCM → file in app documents → path in `sessions.audio_path`.
 - On delete: audio file is removed from disk.
 - **Word timestamps** captured per utterance and saved per-line as JSON in `sessions.timestamps_json` for line-by-line audio scrubbing.
+- **Capture-failure recovery:** the record engine dies permanently on its first bad AudioRecord read (e.g. audioserver restart) and reports it async on its state stream. `onCaptureError` triggers an in-place restart (2s spurious-error grace, ≤2 attempts/min); if that fails the session is stopped through the normal per-mode path so the UI never claims to record silence. `AudioService.start()`/`stop()` are single-flight + stop-generation-guarded: an abandoned start (resume restart racing a Stop tap) can never bring capture live after the stop, and stop() skips the native call when capture already died (a dead recorder never answers, which would burn the 3s timeout).
 
 ### Soniox Translation & Reconnect
 - Translation via Soniox `translation` config: `{"type": "one_way", "target_language": "<code>"}`.
@@ -177,6 +178,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - Periodic `Timer.periodic(15s)` while recording; also fires on background/pause and on stop.
 - Stored in `autosave_draft` table (single row, `id = 1`).
 - Restored on app launch if `RecordingState == idle` and a draft exists.
+- **All session-sized JSON work runs off the UI isolate via `compute()`** — autosave encode (`_encodeAutosaveDraft`), restore decode (`_decodeAutosaveDraft`), and save-path timestamp encode (`_encodeSessionTimestamps`). An hour-long draft is a multi-MB payload with tens of thousands of word timestamps; inline (de)serialization froze launch/save frames.
 
 ### Identity & Customer ID
 - `UserService` registers the device on first launch (hardware ID for stable identity), generates an 8-char code, fetches an auth token.
@@ -188,8 +190,12 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - Colors resolve through `AppConstants` static **getters** switched by `AppConstants.isDark` (set in `main()` and in `SilsiganApp.build` before the tree builds). `MainScreen` watches the provider so the whole subtree rebuilds on toggle; `SilsiganApp` swaps MaterialApp `ThemeData` (dialogs/popup menus) and the status-bar icon brightness.
 - When adding UI: never mark a widget `const` if it references an `AppConstants` color (it would be canonicalized and skip theme rebuilds). The conversation top half keeps its teal identity in both themes; mic/save-active surfaces invert (pair `micButtonColor` with `micIconColor`, `saveButtonActiveColor` with `saveButtonActiveIconColor`).
 
+### Auto-scroll (all streaming panels)
+- Panel auto-follow goes through `_followTail` (line-by-line / transcript) / `_followNewest` (conversation, reversed lists): **skip when the gap is <1px** (most token updates don't change the extent — restarting a scroll activity ~10×/s for an hour was a measurable heat source), **`jumpTo` when the gap exceeds 2 viewports** (animating after a screen-off stint forces layout of every row flown past — a multi-second stall), animate the small in-between deltas as before. Preserve this shape when touching scroll code.
+
 ### Background Recording
 - Android: `flutter_foreground_task` foreground service (`foregroundServiceType="microphone"` + wake lock, low-importance notification) keeps capture + WS alive while backgrounded.
+- The plugin's service is sticky (survives — and its task-removal path resurrects it after — swipe-from-recents, while the Activity's FlutterEngine dies, so recording is dead anyway). `main()` calls `BackgroundService.reapZombieService()` to stop any leftover service at launch; `startRecordingService` awaits an in-flight reap so a fast mic tap can't race it.
 - iOS: `UIBackgroundModes: audio` (Info.plist) + flutter_sound's active playAndRecord session keep capture + WS alive while backgrounded — no foreground service. Force-quit or an audio interruption (phone call, Siri) still stops capture.
 - App lifecycle: `paused` triggers autosave + sets `_wasPaused`; on `resumed` (if `_wasPaused`, filtering transient `inactive`), audio is restarted ONLY when capture actually died (`AudioService.isCapturingHealthy` — no recorder data in the last 2s). A session that survived the background stint is left untouched, so reopening causes no restart hitch or audio gap.
 

@@ -72,6 +72,48 @@ List<String> _encodeAutosaveDraft(List<Object> args) {
   ];
 }
 
+/// Isolate entry for autosave restore (see `_restoreAutosaveDraft`) — the
+/// inverse of [_encodeAutosaveDraft]. [args] is the three JSON strings from
+/// the draft row (`korean_history`, `vietnamese_history`, `word_timestamps`,
+/// the last nullable); returns `[koreanHistory, vietnameseHistory,
+/// wordTimestampsPerLine]`. An hour-long draft is a multi-MB payload with
+/// tens of thousands of word timestamps — decoded on the UI isolate it
+/// blocked the first frames of every relaunch until the draft was
+/// saved or discarded.
+List<Object> _decodeAutosaveDraft(List<String?> args) {
+  final koreanHistory = (jsonDecode(args[0]!) as List).cast<String>();
+  final vietnameseHistory = (jsonDecode(args[1]!) as List).cast<String>();
+  final timestamps = <List<WordTimestamp>>[];
+  final tsJson = args[2];
+  if (tsJson != null) {
+    for (final line in jsonDecode(tsJson) as List) {
+      timestamps.add(
+        (line as List)
+            .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
+            .toList(),
+      );
+    }
+  }
+  return [koreanHistory, vietnameseHistory, timestamps];
+}
+
+/// Isolate entry for session-save serialization (see `_saveSession`). [args]
+/// is `[rawKoreanHistory, wordTimestampsPerLine]`; returns the timestamps
+/// JSON with one entry per non-empty history line (index-aligned with the
+/// saved lines, mirroring how the raw history is filtered on save).
+String _encodeSessionTimestamps(List<Object> args) {
+  final rawKoreanHistory = args[0] as List<String>;
+  final timestamps = args[1] as List<List<WordTimestamp>>;
+  final tsPerLine = <List<Map<String, dynamic>>>[];
+  for (int i = 0; i < rawKoreanHistory.length; i++) {
+    if (rawKoreanHistory[i].trim().isEmpty) continue;
+    final words =
+        i < timestamps.length ? timestamps[i] : const <WordTimestamp>[];
+    tsPerLine.add(words.map((w) => w.toJson()).toList());
+  }
+  return jsonEncode(tsPerLine);
+}
+
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
 
@@ -199,6 +241,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
       }
     };
+    // Native capture failures after start (record path reports them async on
+    // its state stream — the engine tears itself down permanently on the
+    // first bad read, e.g. after an audioserver restart, while the UI still
+    // shows a live session). Heal in place when possible; stop + notify
+    // only when recovery fails.
+    _audioService.onCaptureError = (error) {
+      if (!mounted) return;
+      _handleCaptureFailure();
+    };
     // Server-authoritative limit: the proxy closes the WS with 4005 when the
     // user crosses their billed limit. Stop the recording and surface it.
     _sonioxService.onUsageLimitReached = () {
@@ -266,14 +317,99 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // restart when capture actually died (iOS suspension; OEM kills).
     if (_audioService.isCapturingHealthy) return;
     try {
-      // Restart audio capture (appends to existing temp PCM file)
-      await _audioService.start();
+      // Restart audio capture (appends to existing temp PCM file). The
+      // timeout is a safety net for a wedged audio HAL after an OEM mic
+      // kill — without it a stalled native stop/start would hang this
+      // resume chain forever.
+      await _audioService.start().timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      // .timeout() doesn't cancel the underlying start — a merely-slow
+      // restart often still succeeds moments later, so re-check before
+      // reporting a failure the user would see while audio is in fact live.
+      Future.delayed(const Duration(seconds: 3), () {
+        if (!mounted || _audioService.isCapturingHealthy) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to resume microphone')),
+        );
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to resume microphone: $e')),
         );
       }
+    }
+  }
+
+  // Capture-failure recovery: one restart in flight at a time, at most two
+  // attempts per minute so a hard-dead mic can't loop restarts forever.
+  bool _captureRestartInFlight = false;
+  DateTime? _captureRestartWindowStart;
+  int _captureRestartAttempts = 0;
+
+  /// A native capture error arrived on the recorder's state stream. The
+  /// record engine tears itself down permanently on the first bad read
+  /// (e.g. ERROR_DEAD_OBJECT after an audioserver restart), so without
+  /// intervention the session keeps looking live while recording silence
+  /// until the next background/resume cycle. Restart capture in place when
+  /// possible; otherwise end the session cleanly so the save/discard UI
+  /// appears instead of a dead "recording" screen.
+  Future<void> _handleCaptureFailure() async {
+    if (_captureRestartInFlight) return;
+    // Errors after the session ended (or during teardown) are stale.
+    if (!_audioService.isRecording) return;
+
+    final now = DateTime.now();
+    if (_captureRestartWindowStart == null ||
+        now.difference(_captureRestartWindowStart!) >
+            const Duration(seconds: 60)) {
+      _captureRestartWindowStart = now;
+      _captureRestartAttempts = 0;
+    }
+
+    if (_captureRestartAttempts < 2) {
+      _captureRestartAttempts++;
+      _captureRestartInFlight = true;
+      try {
+        // Give a spurious error 2s to disprove itself — if data is still
+        // flowing, the recorder survived and a restart would only cut it.
+        await Future.delayed(const Duration(seconds: 2));
+        if (!mounted || !_audioService.isRecording) return;
+        if (_audioService.isCapturingHealthy) return;
+        // Same restart the resume path uses: appends to the existing temp
+        // PCM, and the bounded stop inside start() clears the dead native
+        // recorder (which never answers a plain stop).
+        await _audioService.start().timeout(const Duration(seconds: 8));
+        return; // recovered — the session continues seamlessly
+      } catch (_) {
+        // fall through to stop + notify
+      } finally {
+        _captureRestartInFlight = false;
+      }
+    }
+
+    if (!mounted || !_audioService.isRecording) return;
+    // Recovery failed or attempts exhausted: end the session through the
+    // normal per-mode stop so the state machine reaches postRecording with
+    // everything captured so far, instead of claiming to record silence.
+    if (ref.read(recordingStateProvider) == RecordingState.recording) {
+      final displayMode = ref.read(displayModeProvider);
+      if (displayMode == DisplayMode.conversation) {
+        await _stopConversationSession();
+      } else if (displayMode == DisplayMode.quick) {
+        await _stopQuickRecording();
+      } else {
+        await _stopRecording();
+      }
+    }
+    if (!mounted) return;
+    final shownAt = DateTime.now();
+    if (_lastErrorShown == null ||
+        shownAt.difference(_lastErrorShown!).inSeconds >= 10) {
+      _lastErrorShown = shownAt;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Microphone error — recording stopped')),
+      );
     }
   }
 
@@ -1448,19 +1584,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final koreanFull = koreanHistory.join('\n');
     final vietnameseFull = vietnameseHistory.join('\n');
 
-    // Serialize word timestamps (per-line, aligned with raw history)
+    // Serialize word timestamps (per-line, aligned with raw history) off the
+    // UI isolate — an hour of speech is tens of thousands of timestamps, and
+    // encoding them inline froze the frame on the save tap.
     String? timestampsJson;
     if (_wordTimestampsPerLine.isNotEmpty) {
-      // Build per-line arrays matching rawKoreanHistory indices (filter empties)
-      final tsPerLine = <List<Map<String, dynamic>>>[];
-      for (int i = 0; i < rawKoreanHistory.length; i++) {
-        if (rawKoreanHistory[i].trim().isEmpty) continue;
-        final words = i < _wordTimestampsPerLine.length
-            ? _wordTimestampsPerLine[i]
-            : <WordTimestamp>[];
-        tsPerLine.add(words.map((w) => w.toJson()).toList());
-      }
-      timestampsJson = jsonEncode(tsPerLine);
+      timestampsJson = await compute(_encodeSessionTimestamps, <Object>[
+        rawKoreanHistory,
+        List<List<WordTimestamp>>.from(_wordTimestampsPerLine),
+      ]);
     }
 
     // Save audio file if available. Reuse a WAV already produced by a prior
@@ -1685,13 +1817,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     // Skip when nothing changed since the last successful save — covers
     // silent stretches between 15s ticks and back-to-back lifecycle saves.
-    // Lengths + last entries suffice: every mutation either appends to a
-    // history/timestamp list or rewrites its last entry.
-    final fingerprint = '${koreanHistory.length}:${vietnameseHistory.length}:'
-        '${_wordTimestampsPerLine.length}:'
-        '${_wordTimestampsPerLine.isEmpty ? 0 : _wordTimestampsPerLine.last.length} '
-        '${koreanHistory.isEmpty ? '' : koreanHistory.last} '
-        '${vietnameseHistory.isEmpty ? '' : vietnameseHistory.last}';
+    final fingerprint = _draftFingerprint(koreanHistory, vietnameseHistory);
     if (fingerprint == _lastAutosaveFingerprint) return;
 
     _sessionCreatedAt ??= DateTime.now().toIso8601String();
@@ -1722,6 +1848,25 @@ class _MainScreenState extends ConsumerState<MainScreen>
     }
   }
 
+  /// Cheap content fingerprint for autosave skipping. Lengths + last entries
+  /// catch appends and last-entry rewrites; the summed text sizes catch the
+  /// split-mode late-translation write into a middle slot (which changes
+  /// neither lengths nor tails but always grows a slot); the target language
+  /// is included because the draft persists it too.
+  String _draftFingerprint(
+      List<String> koreanHistory, List<String> vietnameseHistory) {
+    final koreanChars = koreanHistory.fold<int>(0, (n, s) => n + s.length);
+    final vietnameseChars =
+        vietnameseHistory.fold<int>(0, (n, s) => n + s.length);
+    return '${koreanHistory.length}:${vietnameseHistory.length}:'
+        '$koreanChars:$vietnameseChars:'
+        '${ref.read(targetLanguageProvider).code}:'
+        '${_wordTimestampsPerLine.length}:'
+        '${_wordTimestampsPerLine.isEmpty ? 0 : _wordTimestampsPerLine.last.length} '
+        '${koreanHistory.isEmpty ? '' : koreanHistory.last} '
+        '${vietnameseHistory.isEmpty ? '' : vietnameseHistory.last}';
+  }
+
   Future<void> _restoreSavedLanguages() async {
     final targetLang = await loadSavedTargetLanguage();
     ref.read(targetLanguageProvider.notifier).state = targetLang;
@@ -1739,10 +1884,20 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(diarizationEnabledProvider.notifier).state = diarization;
   }
 
+  /// True while any mode's session is live or in its optimistic-start window.
+  /// recordingState alone is not enough: it stays `idle` for the whole start
+  /// window (the button flips only once the mic is live), so a restore
+  /// completing mid-start could clobber the new session's state.
+  bool get _sessionActiveOrStarting =>
+      ref.read(recordingStateProvider) != RecordingState.idle ||
+      _isStartingRecording ||
+      _quickStarting ||
+      _convStarting;
+
   Future<void> _restoreAutosaveDraft() async {
     try {
       // Only restore if still idle (user hasn't started recording already)
-      if (ref.read(recordingStateProvider) != RecordingState.idle) return;
+      if (_sessionActiveOrStarting) return;
 
       final draft = await DatabaseService.instance.getAutosaveDraft();
       if (draft == null) {
@@ -1753,14 +1908,22 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
       // Re-check after async gap — widget may be disposed or user tapped mic
       if (!mounted) return;
-      if (ref.read(recordingStateProvider) != RecordingState.idle) return;
+      if (_sessionActiveOrStarting) return;
 
-      final koreanHistory =
-          (jsonDecode(draft['korean_history'] as String) as List)
-              .cast<String>();
-      final vietnameseHistory =
-          (jsonDecode(draft['vietnamese_history'] as String) as List)
-              .cast<String>();
+      // Decode off the UI isolate — an hour-long draft carries tens of
+      // thousands of word timestamps, and decoding it inline blocked the
+      // first frames of every relaunch (mirrors the compute() in _autosave).
+      final decoded = await compute(_decodeAutosaveDraft, <String?>[
+        draft['korean_history'] as String,
+        draft['vietnamese_history'] as String,
+        draft['word_timestamps'] as String?,
+      ]);
+      final koreanHistory = decoded[0] as List<String>;
+      final vietnameseHistory = decoded[1] as List<String>;
+
+      // Re-check after async gap — user may have started recording
+      if (!mounted) return;
+      if (_sessionActiveOrStarting) return;
 
       // Don't restore empty drafts
       if (koreanHistory.isEmpty && vietnameseHistory.isEmpty) {
@@ -1773,17 +1936,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
       ref.read(vietnameseHistoryProvider.notifier).state = vietnameseHistory;
 
       // Restore word timestamps
-      if (draft['word_timestamps'] != null) {
-        final tsData = jsonDecode(draft['word_timestamps'] as String) as List;
-        _wordTimestampsPerLine.clear();
-        for (final line in tsData) {
-          _wordTimestampsPerLine.add(
-            (line as List)
-                .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
-                .toList(),
-          );
-        }
-      }
+      _wordTimestampsPerLine
+        ..clear()
+        ..addAll(decoded[2] as List<List<WordTimestamp>>);
 
       // Restore target language
       final targetCode = draft['target_language'] as String;
@@ -1793,6 +1948,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (targetLang.isNotEmpty) {
         ref.read(targetLanguageProvider.notifier).state = targetLang.first;
       }
+
+      // Seed the autosave fingerprint so the first lifecycle-pause autosave
+      // after a relaunch doesn't re-encode and rewrite the entire (still
+      // unchanged) multi-MB draft it just loaded. Seeded after the draft's
+      // target language is applied — the fingerprint includes it.
+      _lastAutosaveFingerprint =
+          _draftFingerprint(koreanHistory, vietnameseHistory);
 
       _sessionCreatedAt = draft['created_at'] as String;
 
