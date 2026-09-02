@@ -29,6 +29,7 @@ import '../widgets/save_discard_row.dart';
 import '../widgets/history_sheet.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
+import '../widgets/split_view_tip_overlay.dart';
 import '../widgets/conversation_panel.dart';
 import '../widgets/quick_panel.dart';
 import '../widgets/source_language_selector.dart';
@@ -149,6 +150,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Guard against multiple stop taps
   bool _isStopping = false;
+
+  // First-time Split View coach-mark, shown after the first non-empty
+  // line-by-line stop on iOS/Android. Anchored to the settings gear.
+  final GlobalKey _settingsMenuKey = GlobalKey();
+  OverlayEntry? _splitViewTipOverlay;
+  DisplayMode? _recordingModeForTip;
 
   // Single-flights _startRecording (the button doesn't flip to Stop until the
   // mic is live, so a rapid second tap would otherwise run a duplicate start
@@ -292,6 +299,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sentenceBreakTimer?.cancel();
     _ttsDraftTimer?.cancel();
     _autosaveTimer?.cancel();
+    _dismissSplitViewTip(markSeen: false);
     _audioService.dispose();
     _sonioxService.disconnect();
     _ttsService.dispose();
@@ -1336,8 +1344,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _autosaveTimer =
           Timer.periodic(const Duration(seconds: 15), (_) => _autosave());
       _recordingStartedAt = DateTime.now();
+      final startedMode = ref.read(displayModeProvider);
+      _recordingModeForTip = startedMode;
+      if (startedMode == DisplayMode.split) {
+        unawaited(markHasRecordedSplit());
+      }
+      _dismissSplitViewTip(markSeen: false);
       UserService.instance.reportActivity('recording_start', {
-        'mode': ref.read(displayModeProvider).name,
+        'mode': startedMode.name,
       });
     } catch (e) {
       _isStartingRecording = false;
@@ -1439,7 +1453,57 @@ class _MainScreenState extends ConsumerState<MainScreen>
           RecordingState.postRecording;
       // Autosave immediately when recording stops
       _autosave();
+      _maybeShowSplitViewTip();
     }
+  }
+
+  void _dismissSplitViewTip({bool markSeen = true}) {
+    final wasShowing = _splitViewTipOverlay != null;
+    _splitViewTipOverlay?.remove();
+    _splitViewTipOverlay = null;
+    if (markSeen && wasShowing) {
+      unawaited(markSplitViewTipSeen());
+    }
+  }
+
+  /// After a line-by-line stop, show a one-shot coach-mark pointing at the
+  /// settings gear. Skipped on desktop, empty sessions, and anyone who has
+  /// already dismissed it, switched to Split View, or recorded in split.
+  void _maybeShowSplitViewTip() {
+    if (!(Platform.isIOS || Platform.isAndroid)) return;
+    if (_recordingModeForTip != DisplayMode.lineByLine) return;
+    if (ref.read(displayModeProvider) != DisplayMode.lineByLine) return;
+
+    Future<void>.delayed(const Duration(milliseconds: 400), () async {
+      if (!mounted || _splitViewTipOverlay != null) return;
+      if (ref.read(recordingStateProvider) != RecordingState.postRecording) {
+        return;
+      }
+      if (ref.read(displayModeProvider) != DisplayMode.lineByLine) return;
+      final hasLines =
+          ref.read(koreanHistoryProvider).any((l) => l.trim().isNotEmpty);
+      if (!hasLines) return;
+      if (await hasSeenSplitViewTip()) return;
+      if (!mounted) return;
+      _insertSplitViewTip();
+    });
+  }
+
+  void _insertSplitViewTip() {
+    if (_splitViewTipOverlay != null) return;
+    final box =
+        _settingsMenuKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize || !box.attached) return;
+    final origin = box.localToGlobal(Offset.zero);
+    final target = origin & box.size;
+
+    _splitViewTipOverlay = OverlayEntry(
+      builder: (ctx) => SplitViewTipOverlay(
+        targetRect: target,
+        onDismiss: () => _dismissSplitViewTip(),
+      ),
+    );
+    Overlay.of(context, rootOverlay: true).insert(_splitViewTipOverlay!);
   }
 
   Future<void> _saveSession() async {
@@ -2847,6 +2911,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   ],
                   const SizedBox(width: 16),
                   PopupMenuButton<DisplayMode>(
+                    key: _settingsMenuKey,
+                    onOpened: () => _dismissSplitViewTip(),
                     onSelected: (mode) {
                       ref.read(displayModeProvider.notifier).state = mode;
                       saveDisplayMode(mode);
