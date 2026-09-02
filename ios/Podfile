@@ -27,6 +27,11 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
+# ScreenAudio is a native ReplayKit upload extension. Do not add a CocoaPods
+# target for it and do not install Flutter plugin pods into it. It uses
+# ScreenAudio/ScreenAudio.xcconfig (Generated.xcconfig only), not
+# Flutter/Debug.xcconfig or Flutter/Release.xcconfig, so it cannot inherit
+# Pods-Runner linker flags after `pod install`.
 target 'Runner' do
   use_frameworks!
   use_modular_headers!

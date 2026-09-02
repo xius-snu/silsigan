@@ -88,6 +88,7 @@
 		C0DEA001A1B2C3D4E5F60006 /* SampleHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleHandler.swift; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60009 /* ScreenAudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ScreenAudio.entitlements; sourceTree = "<group>"; };
+		C0DEA001A1B2C3D4E5F6001A /* ScreenAudio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ScreenAudio.xcconfig; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F6000A /* ScreenAudio.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ScreenAudio.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0DEA001A1B2C3D4E5F6000C /* ReplayKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ReplayKit.framework; path = System/Library/Frameworks/ReplayKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -137,6 +138,7 @@
 				C0DEA001A1B2C3D4E5F60006 /* SampleHandler.swift */,
 				C0DEA001A1B2C3D4E5F60008 /* Info.plist */,
 				C0DEA001A1B2C3D4E5F60009 /* ScreenAudio.entitlements */,
+				C0DEA001A1B2C3D4E5F6001A /* ScreenAudio.xcconfig */,
 			);
 			path = ScreenAudio;
 			sourceTree = "<group>";
@@ -702,7 +704,7 @@
 
 		C0DEA001A1B2C3D4E5F60016 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			baseConfigurationReference = C0DEA001A1B2C3D4E5F6001A /* ScreenAudio.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ScreenAudio/ScreenAudio.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -711,7 +713,6 @@
 				INFOPLIST_FILE = ScreenAudio/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
@@ -720,6 +721,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_CXX_LIBRARY = "libc++";
+				OTHER_LDFLAGS = (
+					"-lc++",
+				);
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -729,7 +734,7 @@
 		};
 		C0DEA001A1B2C3D4E5F60017 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			baseConfigurationReference = C0DEA001A1B2C3D4E5F6001A /* ScreenAudio.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ScreenAudio/ScreenAudio.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -738,7 +743,6 @@
 				INFOPLIST_FILE = ScreenAudio/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
@@ -747,6 +751,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_CXX_LIBRARY = "libc++";
+				OTHER_LDFLAGS = (
+					"-lc++",
+				);
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -754,7 +762,7 @@
 		};
 		C0DEA001A1B2C3D4E5F60018 /* Profile */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			baseConfigurationReference = C0DEA001A1B2C3D4E5F6001A /* ScreenAudio.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ScreenAudio/ScreenAudio.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -763,7 +771,6 @@
 				INFOPLIST_FILE = ScreenAudio/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
@@ -772,6 +779,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_CXX_LIBRARY = "libc++";
+				OTHER_LDFLAGS = (
+					"-lc++",
+				);
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

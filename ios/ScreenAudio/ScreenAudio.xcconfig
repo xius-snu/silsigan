@@ -1,0 +1,13 @@
+// Native ReplayKit Broadcast Upload Extension.
+// Do NOT include Flutter/Debug.xcconfig or Flutter/Release.xcconfig:
+// `pod install` prepends Pods-Runner.*.xcconfig into those files, which
+// would link Flutter plugin pods (C++ from flutter_sound/record/etc.) into
+// this extension and fail with ___gxx_personality_v0.
+// Generated.xcconfig is enough for FLUTTER_BUILD_NAME / FLUTTER_BUILD_NUMBER.
+#include "../Flutter/Generated.xcconfig"
+
+APPLICATION_EXTENSION_API_ONLY = YES
+CLANG_CXX_LIBRARY = libc++
+// Do not inherit OTHER_LDFLAGS: that would pull Pods-Runner linker flags
+// if CocoaPods ever re-points this target at Flutter's xcconfigs.
+OTHER_LDFLAGS = -lc++
