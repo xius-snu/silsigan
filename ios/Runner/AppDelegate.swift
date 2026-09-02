@@ -28,6 +28,10 @@ import Security
           result(FlutterMethodNotImplemented)
         }
       }
+      RegisterDesktopAudioCapture(
+        messenger: controller.binaryMessenger,
+        controller: controller
+      )
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

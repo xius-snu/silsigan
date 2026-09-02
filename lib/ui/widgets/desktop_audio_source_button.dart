@@ -6,8 +6,8 @@ import '../../services/desktop_audio_devices.dart';
 import '../../utils/constants.dart';
 import '../../utils/desktop.dart';
 
-/// Header control for desktop capture: mic / speaker / both, plus device
-/// pickers. Hidden on iOS/Android by the caller.
+/// Header control for mic / speaker / both, plus device pickers. Shown on
+/// desktop, iPhone, iPad, and Android.
 class DesktopAudioSourceButton extends ConsumerStatefulWidget {
   const DesktopAudioSourceButton({
     super.key,
@@ -37,6 +37,19 @@ class _DesktopAudioSourceButtonState
   void dispose() {
     _hidePopup();
     super.dispose();
+  }
+
+  String get _speakerHint {
+    if (!isMobileSpeakerCapture) {
+      return 'Speaker listens to what’s playing on that device. Use headphones if voice playback is on.';
+    }
+    if (isIOSPlatform) {
+      return 'You’ll be asked to Start Broadcast (red status bar). Screen audio only — the picker mic is off so it isn’t captured twice.';
+    }
+    if (isAndroidPlatform) {
+      return 'Android will ask to capture screen audio. DRM and call audio stay silent.';
+    }
+    return 'Speaker listens to what’s playing. Use headphones if voice playback is on.';
   }
 
   IconData _iconFor(DesktopAudioSource source) {
@@ -170,7 +183,7 @@ class _DesktopAudioSourceButtonState
                         if (!desktopSpeakerCaptureSupported) ...[
                           const SizedBox(height: 8),
                           Text(
-                            'Speaker capture isn’t available on this Mac.',
+                            'Speaker capture isn’t available on this device.',
                             style: TextStyle(
                               fontSize: 11,
                               color: AppConstants.textMuted,
@@ -179,7 +192,7 @@ class _DesktopAudioSourceButtonState
                         ] else if (settings.captureSpeaker) ...[
                           const SizedBox(height: 8),
                           Text(
-                            'Speaker listens to what’s playing on that device. Use headphones if voice playback is on.',
+                            _speakerHint,
                             style: TextStyle(
                               fontSize: 11,
                               color: AppConstants.textMuted,

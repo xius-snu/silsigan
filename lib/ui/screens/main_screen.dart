@@ -340,7 +340,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // timeout is a safety net for a wedged audio HAL after an OEM mic
       // kill — without it a stalled native stop/start would hang this
       // resume chain forever.
-      await _startAudioCapture().timeout(const Duration(seconds: 8));
+      await _startAudioCapture().timeout(_audioStartTimeout);
     } on TimeoutException {
       // .timeout() doesn't cancel the underlying start — a merely-slow
       // restart often still succeeds moments later, so re-check before
@@ -398,7 +398,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // Same restart the resume path uses: appends to the existing temp
         // PCM, and the bounded stop inside start() clears the dead native
         // recorder (which never answers a plain stop).
-        await _startAudioCapture().timeout(const Duration(seconds: 8));
+        await _startAudioCapture().timeout(_audioStartTimeout);
         return; // recovered — the session continues seamlessly
       } catch (_) {
         // fall through to stop + notify
@@ -957,15 +957,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
-  /// Mic is required to start, except desktop speaker-only capture which
-  /// listens to the output device and never opens the microphone.
-  /// On Android 13+ we also ask for notifications so the recording foreground
-  /// service can show its persistent notice. Notification denial must not
-  /// block capture.
+  /// Mic is required to start, except speaker-only capture on iOS/desktop
+  /// which never opens the microphone. Android playback capture still needs
+  /// RECORD_AUDIO. On Android 13+ we also ask for notifications so the
+  /// recording foreground service can show its persistent notice.
+  /// Notification denial must not block capture.
   Future<PermissionStatus> _requestRecordingPermissions() async {
-    if (isDesktopPlatform &&
+    final speakerOnly = audioSourceSelectorSupported &&
         ref.read(desktopAudioSettingsProvider).source ==
-            DesktopAudioSource.speaker) {
+            DesktopAudioSource.speaker;
+    if (speakerOnly && !Platform.isAndroid) {
       return PermissionStatus.granted;
     }
     if (!(Platform.isAndroid || Platform.isIOS || Platform.isWindows)) {
@@ -1715,10 +1716,19 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  Duration get _audioStartTimeout {
+    final speaker = ref.read(desktopAudioSettingsProvider).captureSpeaker;
+    if (speaker && isMobileSpeakerCapture) {
+      return const Duration(seconds: 90);
+    }
+    return const Duration(seconds: 8);
+  }
+
   Future<void> _startAudioCapture() {
     return _audioService.start(
-      desktop:
-          isDesktopPlatform ? ref.read(desktopAudioSettingsProvider) : null,
+      desktop: audioSourceSelectorSupported
+          ? ref.read(desktopAudioSettingsProvider)
+          : null,
     );
   }
 
@@ -1833,7 +1843,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(ttsRateProvider.notifier).state = ttsRate;
     final diarization = await loadSavedDiarizationEnabled();
     ref.read(diarizationEnabledProvider.notifier).state = diarization;
-    if (isDesktopPlatform) {
+    if (audioSourceSelectorSupported) {
       final desktopAudio = await loadSavedDesktopAudioSettings();
       ref.read(desktopAudioSettingsProvider.notifier).state = desktopAudio;
     }
@@ -2829,7 +2839,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       color: AppConstants.textSecondary,
                     ),
                   ),
-                  if (isDesktopPlatform) ...[
+                  if (audioSourceSelectorSupported) ...[
                     const SizedBox(width: 16),
                     DesktopAudioSourceButton(
                       enabled: !isRecordingOrProcessing,

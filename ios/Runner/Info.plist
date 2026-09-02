@@ -41,6 +41,10 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs microphone access to transcribe Korean speech in real time.</string>
+	<key>NSBroadcastUsageDescription</key>
+	<string>Silsigan captures screen audio so it can transcribe what’s playing through the speaker.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Silsigan captures screen audio so it can transcribe what’s playing through the speaker.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

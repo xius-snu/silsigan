@@ -6,7 +6,6 @@ import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
 import '../providers/desktop_audio_source_provider.dart';
 import '../utils/constants.dart';
-import '../utils/desktop.dart';
 import '../utils/pcm_mixer.dart';
 import 'desktop_audio_devices.dart';
 
@@ -27,8 +26,8 @@ class AudioService {
   StreamSubscription? _streamSubscription;
   StreamSubscription? _stateErrorSub;
 
-  // Linux "both": a second record instance on the sink monitor. Windows
-  // speaker capture goes through WASAPI loopback instead.
+  // Linux "both": a second record instance on the sink monitor. Windows /
+  // macOS / Android / iOS speaker capture goes through native loopback.
   rec.AudioRecorder? _loopbackRecorder;
   StreamSubscription? _loopbackSubscription;
 
@@ -96,15 +95,13 @@ class AudioService {
   int _stopGen = 0;
 
   bool get _wantMic => _desktop == null || _desktop!.captureMic;
-  bool get _wantSpeaker =>
-      isDesktopPlatform && _desktop != null && _desktop!.captureSpeaker;
+  bool get _wantSpeaker => _desktop != null && _desktop!.captureSpeaker;
 
   Future<void> start({DesktopAudioSettings? desktop}) {
     // Snapshot before any await so a stop() racing this start cannot see a
-    // half-applied desktop config. Mobile callers omit [desktop] and keep
-    // the existing default-mic path.
-    _desktop =
-        isDesktopPlatform ? (desktop ?? const DesktopAudioSettings()) : null;
+    // half-applied config. Callers pass Mic/Speaker/Both settings on every
+    // platform that shows the selector; omitted means microphone-only.
+    _desktop = desktop ?? const DesktopAudioSettings();
     // Single-flight: a second start while one is in flight would skip the
     // isRecording guard in _doStart (the chunk timer isn't armed yet) and
     // leak the first timer/subscription when both complete.
@@ -145,9 +142,9 @@ class AudioService {
 
     try {
       if (_useRecord) {
-        await _startDesktopCapture(gen);
+        await _startNativeCapture(gen);
       } else {
-        await _startWithFlutterSound(gen);
+        await _startIosCapture(gen);
       }
     } catch (e) {
       // Mic or loopback may already be live — release them so a failed
@@ -164,7 +161,22 @@ class AudioService {
     );
   }
 
-  Future<void> _startDesktopCapture(int gen) async {
+  Future<void> _startIosCapture(int gen) async {
+    if (_wantMic) {
+      await _startWithFlutterSound(gen);
+      if (gen != _stopGen) return;
+    }
+    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
+      await DesktopAudioDevices.startLoopback(
+        deviceId: _desktop?.speakerDeviceId,
+      );
+      if (gen != _stopGen) {
+        await DesktopAudioDevices.stopLoopback();
+      }
+    }
+  }
+
+  Future<void> _startNativeCapture(int gen) async {
     if (_wantMic) {
       await _startWithRecord(gen, deviceId: _desktop?.micDeviceId);
       if (gen != _stopGen) return;
