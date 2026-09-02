@@ -10,6 +10,7 @@ import 'package:flutter_sound/flutter_sound.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../models/transcript_session.dart';
 import '../../models/word_timestamp.dart';
+import '../../providers/account_provider.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
 import '../../services/session_audio_player.dart';
@@ -17,6 +18,7 @@ import '../../services/sync_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import 'account_sheet.dart';
 import 'session_card.dart';
 
 /// Isolate entry for parsing a saved session's per-word timestamps — the JSON
@@ -35,10 +37,15 @@ class HistorySheet extends ConsumerStatefulWidget {
   final double maxFraction;
   final int? initialSessionId;
 
+  /// Main screen still owns usage figures; after the account sheet closes we
+  /// ask it to re-fetch, matching the old header control.
+  final VoidCallback? onAccountSheetClosed;
+
   const HistorySheet({
     super.key,
     required this.maxFraction,
     this.initialSessionId,
+    this.onAccountSheetClosed,
   });
 
   @override
@@ -89,6 +96,16 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (anyNew && mounted) {
       ref.invalidate(sessionHistoryProvider);
     }
+  }
+
+  /// Same post-close refresh the main-screen header used: history here, usage
+  /// via [onAccountSheetClosed]. AccountService's listener on MainScreen also
+  /// fires on a real sign-in/out.
+  Future<void> _openAccountSheet() async {
+    await showAccountSheet(context);
+    if (!mounted) return;
+    ref.invalidate(sessionHistoryProvider);
+    widget.onAccountSheetClosed?.call();
   }
 
   Future<void> _loadInitialSession(int id) async {
@@ -481,7 +498,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       children: [
         _buildDragHandle(),
         Padding(
-          padding: const EdgeInsets.only(left: 20, right: 12, bottom: 8),
+          padding: const EdgeInsets.only(left: 20, right: 4, bottom: 8),
           child: Row(
             children: [
               Text(
@@ -492,6 +509,8 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                   color: AppConstants.textPrimary,
                 ),
               ),
+              const Spacer(),
+              _buildAccountIcon(),
             ],
           ),
         ),
@@ -665,6 +684,18 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         // Audio player
         if (hasAudio) _buildAudioPlayer(),
       ],
+    );
+  }
+
+  Widget _buildAccountIcon() {
+    final linked = ref.watch(accountProvider).linked;
+    return IconButton(
+      icon: Icon(linked ? Icons.person : Icons.person_outline),
+      iconSize: 22,
+      color: linked ? AppConstants.textPrimary : AppConstants.textSecondary,
+      tooltip: 'Account',
+      visualDensity: VisualDensity.compact,
+      onPressed: _openAccountSheet,
     );
   }
 

@@ -6,6 +6,7 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../providers/account_provider.dart';
 import '../../services/account_service.dart';
 import '../../utils/constants.dart';
+import 'google_g_icon.dart';
 
 /// Opens the optional account-sync sheet.
 ///
@@ -272,23 +273,7 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 20,
-              height: 20,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFF4285F4),
-              ),
-              child: const Text(
-                'G',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
+            const GoogleGIcon(size: 20),
             const SizedBox(width: 10),
             Text(
               'Continue with Google',

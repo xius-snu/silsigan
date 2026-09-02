@@ -40,7 +40,6 @@ import '../../providers/desktop_audio_source_provider.dart';
 import '../../services/user_service.dart';
 import '../../services/account_service.dart';
 import '../../providers/account_provider.dart';
-import '../widgets/account_sheet.dart';
 import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
 import '../../services/update_service.dart';
@@ -280,15 +279,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
   void _onAccountChanged() {
     if (!mounted) return;
     ref.read(accountProvider.notifier).state = AccountService.instance.state;
-    _fetchUsage(force: true);
-    ref.invalidate(sessionHistoryProvider);
-  }
-
-  Future<void> _showAccountSheet() async {
-    await showAccountSheet(context);
-    if (!mounted) return;
-    // Covers dismissal too: the sheet may have changed the identity and then
-    // been swiped away, and both figures below now address a different row.
     _fetchUsage(force: true);
     ref.invalidate(sessionHistoryProvider);
   }
@@ -1661,7 +1651,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => HistorySheet(maxFraction: sheetFraction),
+      builder: (_) => HistorySheet(
+        maxFraction: sheetFraction,
+        onAccountSheetClosed: () => _fetchUsage(force: true),
+      ),
     );
   }
 
@@ -1681,6 +1674,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       builder: (_) => HistorySheet(
         maxFraction: sheetFraction,
         initialSessionId: sessionId,
+        onAccountSheetClosed: () => _fetchUsage(force: true),
       ),
     );
   }
@@ -3039,27 +3033,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       color: AppConstants.textSecondary,
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  // Account sync — optional, so it sits last and stays quiet
-                  // (outlined) until the user actually signs in. Scoped to its
-                  // own Consumer: the header rebuilds on every Soniox token in
-                  // the panels below, and this must not widen that.
-                  Consumer(builder: (context, ref, _) {
-                    final linked = ref.watch(accountProvider).linked;
-                    return GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _showAccountSheet,
-                      child: Icon(
-                        linked
-                            ? Icons.account_circle
-                            : Icons.account_circle_outlined,
-                        size: 24,
-                        color: linked
-                            ? AppConstants.textPrimary
-                            : AppConstants.textSecondary,
-                      ),
-                    );
-                  }),
                 ],
               ),
             ),
