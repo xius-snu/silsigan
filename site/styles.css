@@ -12,7 +12,7 @@
   --accent: #CA24A0;
   --brand-gradient: linear-gradient(180deg, #D348EB 0%, #C10154 100%);
   --line-ko: #f0f0f0;
-  --line-vi: #f8e4f0;
+  --line-vi: #e8f0fe;
   --radius: 12px;
 }
 
@@ -176,7 +176,6 @@ h1 {
 .chrome {
   overflow: hidden;
   min-height: 220px;
-  box-shadow: 0 18px 40px rgba(193, 1, 84, 0.08);
 }
 
 .chrome-bar {
@@ -184,7 +183,7 @@ h1 {
   align-items: center;
   gap: 6px;
   padding: 12px 16px;
-  border-bottom: 1px solid #f0e4ec;
+  border-bottom: 1px solid #f5f5f5;
 }
 
 .dot {
@@ -225,7 +224,7 @@ h1 {
 
 .line.vi {
   background: var(--line-vi);
-  color: var(--text-2);
+  color: var(--text);
 }
 
 .features {
