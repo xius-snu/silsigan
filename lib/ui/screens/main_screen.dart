@@ -261,6 +261,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // only when recovery fails.
     _audioService.onCaptureError = (error) {
       if (!mounted) return;
+      // Cancel/deny of the screen-audio picker is not a crash — the start
+      // catch already shows a calm snackbar. Restarting would re-prompt.
+      if (error == kScreenAudioDeniedMessage) return;
       _handleCaptureFailure();
     };
     // Server-authoritative limit: the proxy closes the WS with 4005 when the
@@ -361,8 +364,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       });
     } catch (e) {
       if (mounted) {
+        final resumeMsg = isScreenAudioDenied(e)
+            ? kScreenAudioDeniedMessage
+            : e is PlatformException
+                ? "Couldn't resume microphone"
+                : 'Failed to resume microphone: $e';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to resume microphone: $e')),
+          SnackBar(content: Text(resumeMsg)),
         );
       }
     }
@@ -1271,17 +1279,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onError = (error) {
-      if (!mounted) return;
-      // Throttle error snackbars — show at most once per 10 seconds
-      final now = DateTime.now();
-      if (_lastErrorShown != null &&
-          now.difference(_lastErrorShown!).inSeconds < 10) {
-        return;
-      }
-      _lastErrorShown = now;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
+      _showSonioxError(error);
     };
 
     // Set up audio callback
@@ -1319,20 +1317,33 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // reconnect/backoff machinery as a mid-session drop, and a stop tap in
       // the window is honored by the _intentionallyClosed check before the
       // channel is adopted.
-      unawaited(_sonioxService.connect(
-        targetLanguageCode: isTranscriptionOnly ? null : targetLanguage.code,
-        forceTranslation: !isTranscriptionOnly,
-        languageHint: sourceLang?.code ?? '',
-        enableSpeakerDiarization: ref.read(diarizationEnabledProvider),
-        maxEndpointDelayMs:
-            isLineByLine ? AppConstants.lineByLineEndpointDelayMs : null,
-        endpointSensitivity:
-            isLineByLine ? AppConstants.lineByLineEndpointSensitivity : null,
-        endpointLatencyAdjustmentLevel: isLineByLine
-            ? AppConstants.lineByLineEndpointLatencyAdjustmentLevel
-            : null,
-      ));
-      await _startAudioCapture();
+      //
+      // Exception: the Android MediaProjection / iOS ReplayKit picker can sit
+      // open far longer than Soniox's idle timeout. Connecting first surfaces
+      // "A transcription error occurred" while the system sheet is still up.
+      // Wait for capture consent, then connect.
+      Future<void> connectProxy() => _sonioxService.connect(
+            targetLanguageCode:
+                isTranscriptionOnly ? null : targetLanguage.code,
+            forceTranslation: !isTranscriptionOnly,
+            languageHint: sourceLang?.code ?? '',
+            enableSpeakerDiarization: ref.read(diarizationEnabledProvider),
+            maxEndpointDelayMs:
+                isLineByLine ? AppConstants.lineByLineEndpointDelayMs : null,
+            endpointSensitivity: isLineByLine
+                ? AppConstants.lineByLineEndpointSensitivity
+                : null,
+            endpointLatencyAdjustmentLevel: isLineByLine
+                ? AppConstants.lineByLineEndpointLatencyAdjustmentLevel
+                : null,
+          );
+      if (_needsScreenSharePicker) {
+        await _startAudioCapture();
+        unawaited(connectProxy());
+      } else {
+        unawaited(connectProxy());
+        await _startAudioCapture();
+      }
       // The recording state now holds the toggle gate; the flag must clear
       // here or the toggle would stay dimmed after the session ends.
       _isStartingRecording = false;
@@ -1357,15 +1368,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _isStartingRecording = false;
       // The unawaited connect may already be live (or mid-handshake) — tear
       // it down so a failed mic start can't leak a connected, rotating
-      // session with no audio source.
+      // session with no audio source. Also force idle so a long-wait then
+      // cancel of the screen-share picker cannot leave a hung recording UI.
       try {
         await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
       } catch (_) {}
       await BackgroundService.stopRecordingService();
       if (mounted) {
+        ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start: $e')),
+          SnackBar(content: Text(recordingStartErrorMessage(e))),
         );
       }
     }
@@ -1788,6 +1801,32 @@ class _MainScreenState extends ConsumerState<MainScreen>
     return const Duration(seconds: 8);
   }
 
+  /// Android MediaProjection / iOS ReplayKit consent sheet. True only when
+  /// speaker (screen-audio) capture is selected on those platforms.
+  bool get _needsScreenSharePicker {
+    if (!isMobileSpeakerCapture) return false;
+    return ref.read(desktopAudioSettingsProvider).captureSpeaker;
+  }
+
+  /// Capture start is still blocked on the system picker (or mic start).
+  /// Soniox idle timeouts in this window are not user-facing errors.
+  bool get _awaitingCaptureStart =>
+      _isStartingRecording || _convStarting || _quickStarting;
+
+  void _showSonioxError(String error) {
+    if (!mounted) return;
+    if (_awaitingCaptureStart) return;
+    final now = DateTime.now();
+    if (_lastErrorShown != null &&
+        now.difference(_lastErrorShown!).inSeconds < 10) {
+      return;
+    }
+    _lastErrorShown = now;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(error)),
+    );
+  }
+
   Future<void> _startAudioCapture() {
     return _audioService.start(
       desktop: audioSourceSelectorSupported
@@ -2117,16 +2156,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onError = (error) {
-      if (!mounted) return;
-      final now = DateTime.now();
-      if (_lastErrorShown != null &&
-          now.difference(_lastErrorShown!).inSeconds < 10) {
-        return;
-      }
-      _lastErrorShown = now;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
+      _showSonioxError(error);
     };
   }
 
@@ -2283,10 +2313,18 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // _audioService.start() — it synchronously clears the audio buffer
       // before its first await. A failed handshake falls into the same
       // reconnect/backoff machinery as a mid-session drop.
-      _convConnectFuture = _sonioxService.connect(
-        twoWayLanguageCodes: [myLang.code, theirLang.code],
-      );
-      await _startAudioCapture();
+      // Screen-share picker: wait for consent so Soniox doesn't idle-timeout
+      // while the system sheet is still up.
+      Future<void> connectProxy() => _sonioxService.connect(
+            twoWayLanguageCodes: [myLang.code, theirLang.code],
+          );
+      if (_needsScreenSharePicker) {
+        await _startAudioCapture();
+        _convConnectFuture = connectProxy();
+      } else {
+        _convConnectFuture = connectProxy();
+        await _startAudioCapture();
+      }
       _recordingStartedAt = DateTime.now();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
@@ -2309,7 +2347,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (mounted) {
         ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start: $e')),
+          SnackBar(content: Text(recordingStartErrorMessage(e))),
         );
       }
       return;
@@ -2474,16 +2512,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     };
 
     _sonioxService.onError = (error) {
-      if (!mounted) return;
-      final now = DateTime.now();
-      if (_lastErrorShown != null &&
-          now.difference(_lastErrorShown!).inSeconds < 10) {
-        return;
-      }
-      _lastErrorShown = now;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
+      _showSonioxError(error);
     };
   }
 
@@ -2535,12 +2564,20 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // actually quick. connect() must be invoked before
       // _audioService.start() (it synchronously clears the audio buffer
       // before its first await).
-      _quickConnectFuture = _sonioxService.connect(
-        targetLanguageCode: targetLanguage.code,
-        forceTranslation: true,
-        languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
-      );
-      await _startAudioCapture();
+      // Screen-share picker: wait for consent so Soniox doesn't idle-timeout
+      // while the system sheet is still up.
+      Future<void> connectProxy() => _sonioxService.connect(
+            targetLanguageCode: targetLanguage.code,
+            forceTranslation: true,
+            languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
+          );
+      if (_needsScreenSharePicker) {
+        await _startAudioCapture();
+        _quickConnectFuture = connectProxy();
+      } else {
+        _quickConnectFuture = connectProxy();
+        await _startAudioCapture();
+      }
       _recordingStartedAt = DateTime.now();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
@@ -2559,7 +2596,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (mounted) {
         ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start: $e')),
+          SnackBar(content: Text(recordingStartErrorMessage(e))),
         );
       }
       return;

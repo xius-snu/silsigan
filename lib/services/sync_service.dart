@@ -71,8 +71,9 @@ class SyncService {
     }
   }
 
-  /// Sync: download server sessions not in local DB, upload local sessions
-  /// not on server. Returns true if any new sessions were downloaded.
+  /// Sync: apply remote deletes, download new sessions, patch titles on
+  /// existing local rows, upload local-only sessions that are not tombstoned.
+  /// Returns true if local history changed (so the UI can refresh).
   Future<bool> syncFromServer() async {
     try {
       await UserService.instance.ensureAuthenticated();
@@ -107,31 +108,60 @@ class SyncService {
 
       final data = json.decode(response.body);
       final serverSessions = (data['sessions'] as List?) ?? [];
+      final deletedCreatedAts =
+          ((data['deleted'] as List?) ?? []).map((e) => e.toString()).toSet();
 
       // Get local sessions
       final localSessions = await DatabaseService.instance.getAllSessions();
-      final localTimestamps = localSessions.map((s) => s.createdAt).toSet();
+      final localByCreatedAt = <String, TranscriptSession>{
+        for (final s in localSessions) s.createdAt: s,
+      };
 
-      // Download sessions on server but not local
-      bool anyNew = false;
-      for (final serverSession in serverSessions) {
-        final createdAt = serverSession['created_at'] as String;
-        if (!localTimestamps.contains(createdAt)) {
-          await _downloadAndSaveSession(userId, serverSession['id'] as int);
-          anyNew = true;
+      bool changed = false;
+
+      // (a) Apply server tombstones to local DB so a delete on another
+      // device actually disappears here instead of being re-uploaded.
+      for (final createdAt in deletedCreatedAts) {
+        if (localByCreatedAt.containsKey(createdAt)) {
+          await DatabaseService.instance.deleteSessionByCreatedAt(createdAt);
+          localByCreatedAt.remove(createdAt);
+          changed = true;
         }
       }
 
-      // Upload local sessions not on server (fire-and-forget)
+      // (b) Download sessions on server but not local.
+      // (c) Patch title on existing local rows (list already returns title,
+      // so untitled copies pick it up without a full GET).
+      for (final serverSession in serverSessions) {
+        final createdAt = serverSession['created_at'] as String;
+        if (deletedCreatedAts.contains(createdAt)) continue;
+        final local = localByCreatedAt[createdAt];
+        if (local == null) {
+          await _downloadAndSaveSession(userId, serverSession['id'] as int);
+          changed = true;
+        } else {
+          final serverTitle = serverSession['title'] as String?;
+          if (serverTitle != null &&
+              serverTitle.isNotEmpty &&
+              serverTitle != local.title) {
+            await DatabaseService.instance
+                .updateSessionTitleByCreatedAt(createdAt, serverTitle);
+            changed = true;
+          }
+        }
+      }
+
+      // (d) Upload local sessions not on server, unless tombstoned.
       final serverTimestamps =
           serverSessions.map((s) => s['created_at'] as String).toSet();
-      for (final local in localSessions) {
-        if (!serverTimestamps.contains(local.createdAt)) {
+      for (final local in localByCreatedAt.values) {
+        if (!serverTimestamps.contains(local.createdAt) &&
+            !deletedCreatedAts.contains(local.createdAt)) {
           uploadSession(local);
         }
       }
 
-      return anyNew;
+      return changed;
     } catch (e) {
       debugPrint('Sync error: $e');
       return false;
@@ -155,14 +185,40 @@ class SyncService {
       final session = data['session'];
       if (session == null) return;
 
+      final createdAt = session['created_at'] as String;
+      final title = session['title'] as String?;
+      final koreanFull = session['transcription'] as String;
+      final vietnameseFull = session['translation'] as String;
+      final koreanPreview = session['transcription_preview'] as String;
+      final vietnamesePreview = session['translation_preview'] as String;
+      final timestampsJson = session['timestamps_json'] as String?;
+
+      // Production-safe: if the local row already exists (untitled copy,
+      // race with a just-saved session), patch title and text instead of
+      // inserting a duplicate. audio_path stays on the original row.
+      final existing =
+          await DatabaseService.instance.getSessionByCreatedAt(createdAt);
+      if (existing != null) {
+        await DatabaseService.instance.updateSessionFromServer(
+          createdAt: createdAt,
+          koreanFull: koreanFull,
+          vietnameseFull: vietnameseFull,
+          koreanPreview: koreanPreview,
+          vietnamesePreview: vietnamesePreview,
+          timestampsJson: timestampsJson,
+          title: title,
+        );
+        return;
+      }
+
       final newSession = TranscriptSession(
-        createdAt: session['created_at'] as String,
-        koreanFull: session['transcription'] as String,
-        vietnameseFull: session['translation'] as String,
-        koreanPreview: session['transcription_preview'] as String,
-        vietnamesePreview: session['translation_preview'] as String,
-        timestampsJson: session['timestamps_json'] as String?,
-        title: session['title'] as String?,
+        createdAt: createdAt,
+        koreanFull: koreanFull,
+        vietnameseFull: vietnameseFull,
+        koreanPreview: koreanPreview,
+        vietnamesePreview: vietnamesePreview,
+        timestampsJson: timestampsJson,
+        title: title,
         // audioPath stays null — audio never leaves the device that recorded
         // it, so a synced session simply shows no player elsewhere.
       );

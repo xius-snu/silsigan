@@ -130,6 +130,81 @@ class DatabaseService {
     return db.insert('sessions', session.toMap());
   }
 
+  Future<TranscriptSession?> getSessionByCreatedAt(String createdAt) async {
+    final db = await database;
+    final maps = await db.query(
+      'sessions',
+      where: 'created_at = ?',
+      whereArgs: [createdAt],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return TranscriptSession.fromMap(maps.first);
+  }
+
+  Future<void> updateSessionTitleByCreatedAt(
+      String createdAt, String title) async {
+    final db = await database;
+    await db.update(
+      'sessions',
+      {'title': title},
+      where: 'created_at = ?',
+      whereArgs: [createdAt],
+    );
+  }
+
+  /// Patch cloud-synced fields on an existing local row. audio_path stays
+  /// untouched — audio never leaves the device that recorded it.
+  Future<void> updateSessionFromServer({
+    required String createdAt,
+    required String koreanFull,
+    required String vietnameseFull,
+    required String koreanPreview,
+    required String vietnamesePreview,
+    String? timestampsJson,
+    String? title,
+  }) async {
+    final db = await database;
+    final values = <String, dynamic>{
+      'korean_full': koreanFull,
+      'vietnamese_full': vietnameseFull,
+      'korean_preview': koreanPreview,
+      'vietnamese_preview': vietnamesePreview,
+    };
+    if (timestampsJson != null) {
+      values['timestamps_json'] = timestampsJson;
+    }
+    if (title != null) {
+      values['title'] = title;
+    }
+    await db.update(
+      'sessions',
+      values,
+      where: 'created_at = ?',
+      whereArgs: [createdAt],
+    );
+  }
+
+  Future<void> deleteSessionByCreatedAt(String createdAt) async {
+    final db = await database;
+    final maps = await db.query(
+      'sessions',
+      where: 'created_at = ?',
+      whereArgs: [createdAt],
+    );
+    for (final map in maps) {
+      final audioPath = map['audio_path'] as String?;
+      if (audioPath != null) {
+        final file = File(audioPath);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      }
+    }
+    await db
+        .delete('sessions', where: 'created_at = ?', whereArgs: [createdAt]);
+  }
+
   Future<int> getSessionCount() async {
     final db = await database;
     final result = await db.rawQuery('SELECT COUNT(*) as cnt FROM sessions');

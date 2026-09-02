@@ -3,6 +3,7 @@ package com.silsigan.app
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
@@ -95,7 +96,15 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
             if (ok) {
                 pending.success(null)
             } else {
-                pending.error("CAPTURE", error ?: "Speaker capture failed", null)
+                val blob = (error ?: "").lowercase()
+                val cancelled = blob.contains("not granted") ||
+                    blob.contains("permission") ||
+                    blob.contains("cancel")
+                pending.error(
+                    if (cancelled) "CANCELLED" else "CAPTURE",
+                    error ?: "Speaker capture failed",
+                    null,
+                )
             }
         }
     }
@@ -141,7 +150,16 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
         pendingStart = result
         waitingForConsent = true
         try {
-            act.startActivityForResult(mgr.createScreenCaptureIntent(), REQUEST_PROJECTION)
+            // API 34+: default the picker to the entire screen, not a single
+            // app. ReplayKit on iOS has no equivalent, so this is Android-only.
+            val intent = if (Build.VERSION.SDK_INT >= 34) {
+                mgr.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay(),
+                )
+            } else {
+                mgr.createScreenCaptureIntent()
+            }
+            act.startActivityForResult(intent, REQUEST_PROJECTION)
         } catch (e: Exception) {
             waitingForConsent = false
             pendingStart = null

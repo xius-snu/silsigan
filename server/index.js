@@ -460,6 +460,17 @@ async function start() {
     // device keeps its name and line-by-line structure.
     await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS timestamps_json TEXT`);
     await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS title TEXT`);
+
+    // Tombstones so a delete on one device cannot be bounced back by another
+    // device that still has the row and would re-upload it.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS saved_session_deletes (
+            user_id TEXT NOT NULL REFERENCES users(user_id),
+            created_at TEXT NOT NULL,
+            deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, created_at)
+        )
+    `);
     fastify.addHook('preHandler', authenticateRequest);
 
     // ==================
@@ -1296,6 +1307,19 @@ async function start() {
             return reply.code(400).send({ error: 'Missing fields' });
         }
         try {
+            const tomb = await pool.query(
+                'SELECT 1 FROM saved_session_deletes WHERE user_id = $1 AND created_at = $2',
+                [userId, createdAt]
+            );
+            if (tomb.rows.length > 0) {
+                // Deleted stays deleted — do not resurrect from a device that
+                // still holds the local row.
+                await pool.query(
+                    'DELETE FROM saved_sessions WHERE user_id = $1 AND created_at = $2',
+                    [userId, createdAt]
+                );
+                return { success: true, deleted: true };
+            }
             const audioData = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
             await pool.query(`
                 INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data, timestamps_json, title)
@@ -1326,9 +1350,19 @@ async function start() {
                        (audio_data IS NOT NULL) as has_audio
                 FROM saved_sessions
                 WHERE user_id = $1
+                  AND created_at NOT IN (
+                      SELECT created_at FROM saved_session_deletes WHERE user_id = $1
+                  )
                 ORDER BY created_at DESC
             `, [userId]);
-            return { sessions: res.rows };
+            const deleted = await pool.query(
+                'SELECT created_at FROM saved_session_deletes WHERE user_id = $1',
+                [userId]
+            );
+            return {
+                sessions: res.rows,
+                deleted: deleted.rows.map((r) => r.created_at),
+            };
         } catch (e) {
             fastify.log.error('List sessions error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
@@ -1366,6 +1400,12 @@ async function start() {
         const { userId, createdAt } = req.body;
         if (!userId || !createdAt) return reply.code(400).send({ error: 'Missing fields' });
         try {
+            await pool.query(
+                `INSERT INTO saved_session_deletes (user_id, created_at)
+                 VALUES ($1, $2)
+                 ON CONFLICT (user_id, created_at) DO NOTHING`,
+                [userId, createdAt]
+            );
             await pool.query(
                 'DELETE FROM saved_sessions WHERE user_id = $1 AND created_at = $2',
                 [userId, createdAt]
@@ -1501,7 +1541,23 @@ async function start() {
             );
 
             // Hand the device's cloud sessions to the account so its history
-            // shows up on every signed-in device.
+            // shows up on every signed-in device. Copy tombstones first so a
+            // session already deleted on either side stays deleted.
+            await client.query(
+                `INSERT INTO saved_session_deletes (user_id, created_at, deleted_at)
+                 SELECT $2, created_at, deleted_at
+                 FROM saved_session_deletes WHERE user_id = $1
+                 ON CONFLICT (user_id, created_at) DO NOTHING`,
+                [deviceUserId, accountId]
+            );
+            await client.query(
+                `DELETE FROM saved_sessions
+                  WHERE user_id = $1
+                    AND created_at IN (
+                        SELECT created_at FROM saved_session_deletes WHERE user_id = $1
+                    )`,
+                [accountId]
+            );
             await client.query(
                 `INSERT INTO saved_sessions
                      (user_id, created_at, transcription, translation,
@@ -1511,10 +1567,14 @@ async function start() {
                         transcription_preview, translation_preview,
                         timestamps_json, title, audio_data
                  FROM saved_sessions WHERE user_id = $1
+                   AND created_at NOT IN (
+                       SELECT created_at FROM saved_session_deletes WHERE user_id = $2
+                   )
                  ON CONFLICT (user_id, created_at) DO NOTHING`,
                 [deviceUserId, accountId]
             );
             await client.query('DELETE FROM saved_sessions WHERE user_id = $1', [deviceUserId]);
+            await client.query('DELETE FROM saved_session_deletes WHERE user_id = $1', [deviceUserId]);
 
             await client.query('COMMIT');
             return { accountId, contributedMinutes };

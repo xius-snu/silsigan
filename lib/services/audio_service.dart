@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
@@ -8,6 +9,44 @@ import '../providers/desktop_audio_source_provider.dart';
 import '../utils/constants.dart';
 import '../utils/pcm_mixer.dart';
 import 'desktop_audio_devices.dart';
+
+/// Calm copy when the user cancels or denies the screen-audio picker
+/// (MediaProjection / ReplayKit). Never dump PlatformException text.
+const kScreenAudioDeniedMessage =
+    "Screen audio wasn't started. You can try again, or switch to Mic.";
+
+bool isScreenAudioDenied(Object e) {
+  final code = e is PlatformException ? e.code : '';
+  final message = e is PlatformException ? (e.message ?? '') : e.toString();
+  final details = e is PlatformException ? '${e.details ?? ''}' : '';
+  final blob = '$code $message $details'.toLowerCase();
+  final cancelish = blob.contains('permission') ||
+      blob.contains('not granted') ||
+      blob.contains('cancel') ||
+      blob.contains('result_canceled') ||
+      blob.contains('denied');
+  if (!cancelish) return false;
+  return blob.contains('screen') ||
+      blob.contains('capture') ||
+      blob.contains('broadcast') ||
+      blob.contains('projection') ||
+      code.toUpperCase() == 'CANCELLED' ||
+      code.toUpperCase() == 'DENIED';
+}
+
+String recordingStartErrorMessage(Object e) {
+  if (isScreenAudioDenied(e)) return kScreenAudioDeniedMessage;
+  if (e is PlatformException) {
+    return "Couldn't start recording. You can try again.";
+  }
+  return 'Failed to start: $e';
+}
+
+String _captureErrorText(Object e) {
+  if (isScreenAudioDenied(e)) return kScreenAudioDeniedMessage;
+  if (e is PlatformException) return 'Capture error';
+  return e.toString();
+}
 
 class AudioService {
   // flutter_sound (iOS only — its openRecorder also configures the
@@ -277,7 +316,7 @@ class AudioService {
     });
     _stateErrorSub = recorder.onStateChanged().listen(
           (_) {},
-          onError: (Object e) => onCaptureError?.call('$e'),
+          onError: (Object e) => onCaptureError?.call(_captureErrorText(e)),
         );
   }
 
@@ -329,7 +368,7 @@ class AudioService {
         _speakerPending.add(extra);
       }
     } catch (e) {
-      onCaptureError?.call('$e');
+      onCaptureError?.call(_captureErrorText(e));
     }
     _flushPending();
   }
