@@ -132,11 +132,13 @@ class PurchaseService {
 
       final productId = package.storeProduct.identifier;
 
-      // Get transaction ID from the purchase result.
-      String? transactionId;
-      final txns = result.nonSubscriptionTransactions;
-      if (txns.isNotEmpty) {
-        transactionId = txns.last.transactionIdentifier;
+      // purchases_flutter 9+ returns PurchaseResult, not CustomerInfo.
+      String? transactionId = result.storeTransaction.transactionIdentifier;
+      if (transactionId.isEmpty) {
+        final txns = result.customerInfo.nonSubscriptionTransactions;
+        if (txns.isNotEmpty) {
+          transactionId = txns.last.transactionIdentifier;
+        }
       }
 
       // Stable per-purchase idempotency key. Unlike transactionId (which can be
