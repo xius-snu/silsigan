@@ -8,9 +8,9 @@ bool get isDesktopPlatform {
   return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 }
 
-/// System-audio (speaker) loopback is implemented on Windows (WASAPI) and
-/// Linux (Pulse/PipeWire monitor sources). macOS can still pick a mic.
+/// System-audio (speaker) loopback is implemented on Windows (WASAPI),
+/// macOS (ScreenCaptureKit), and Linux (Pulse/PipeWire monitor sources).
 bool get desktopSpeakerCaptureSupported {
   if (kIsWeb) return false;
-  return Platform.isWindows || Platform.isLinux;
+  return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 }

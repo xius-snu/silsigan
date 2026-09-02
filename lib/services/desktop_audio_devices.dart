@@ -16,8 +16,8 @@ class DesktopAudioDevice {
   final bool isDefault;
 }
 
-/// Lists desktop input/output devices and, on Windows, pulls WASAPI loopback
-/// PCM. Linux speaker capture uses Pulse monitor sources through `record`.
+/// Lists desktop input/output devices and, on Windows/macOS, pulls native
+/// loopback PCM. Linux speaker capture uses Pulse monitor sources through `record`.
 class DesktopAudioDevices {
   DesktopAudioDevices._();
 
@@ -25,7 +25,7 @@ class DesktopAudioDevices {
 
   static bool get nativeLoopbackSupported {
     if (kIsWeb) return false;
-    return Platform.isWindows;
+    return Platform.isWindows || Platform.isMacOS;
   }
 
   static Future<List<DesktopAudioDevice>> listInputs() async {
@@ -57,7 +57,8 @@ class DesktopAudioDevices {
 
   static Future<void> startLoopback({String? deviceId}) async {
     if (!nativeLoopbackSupported) {
-      throw UnsupportedError('WASAPI loopback is only available on Windows');
+      throw UnsupportedError(
+          'Native loopback is only available on Windows and macOS');
     }
     await _channel.invokeMethod<void>('startLoopback', {
       if (deviceId != null && deviceId.isNotEmpty) 'deviceId': deviceId,

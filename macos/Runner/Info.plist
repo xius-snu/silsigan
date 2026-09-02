@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Silsigan records the microphone and (when you pick Speaker/Both) system audio to translate it.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Silsigan records the microphone and (when you pick Speaker/Both) system audio to translate it.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Silsigan records the microphone and (when you pick Speaker/Both) system audio to translate it.</string>
 </dict>
 </plist>

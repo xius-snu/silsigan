@@ -9,7 +9,12 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    RegisterDesktopAudioCapture(messenger: flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
+  }
+
+  deinit {
+    UnregisterDesktopAudioCapture()
   }
 }
