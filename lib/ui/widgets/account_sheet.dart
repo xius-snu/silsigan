@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../providers/account_provider.dart';
 import '../../services/account_service.dart';
@@ -253,7 +254,35 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
         style: TextStyle(fontSize: 11, color: AppConstants.textFaint),
         textAlign: TextAlign.center,
       ),
+      const SizedBox(height: 8),
+      _desktopDownloadLink(),
     ];
+  }
+
+  Widget _desktopDownloadLink() {
+    return Center(
+      child: TextButton(
+        onPressed: () => launchUrl(
+          Uri.parse(AppConstants.desktopDownloadUrl),
+          mode: LaunchMode.externalApplication,
+        ),
+        style: TextButton.styleFrom(
+          foregroundColor: AppConstants.textMuted,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(
+          'Download on Windows/Mac',
+          style: TextStyle(
+            fontSize: 13,
+            color: AppConstants.textMuted,
+            decoration: TextDecoration.underline,
+            decorationColor: AppConstants.textMuted,
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _googleButton() {
@@ -413,6 +442,8 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
         ),
       ],
       const SizedBox(height: 20),
+      _desktopDownloadLink(),
+      const SizedBox(height: 8),
       if (_busy)
         Center(
           child: SizedBox(

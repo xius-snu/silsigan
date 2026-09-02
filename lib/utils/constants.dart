@@ -13,6 +13,7 @@ class AppConstants {
       'https://apps.apple.com/us/app/silsigan/id6760031656';
   static const playStoreUrl =
       'https://play.google.com/store/apps/details?id=com.silsigan.app';
+  static const desktopDownloadUrl = 'https://silsigan.xyz';
 
   // ── Account sync (optional Google / Apple login) ──
   // OAuth client IDs are public identifiers, not secrets — they ship in the
@@ -20,10 +21,12 @@ class AppConstants {
   // Info.plist). Leaving a value empty hides that sign-in button rather than
   // failing at tap time. Register these in Google Cloud Console → Credentials
   // and mirror them into the server's GOOGLE_CLIENT_IDS.
-  static const googleIosClientId = '287776800654-rebo3m3pe7fp1ape20ktqk5mc7e2pn50.apps.googleusercontent.com';
+  static const googleIosClientId =
+      '287776800654-rebo3m3pe7fp1ape20ktqk5mc7e2pn50.apps.googleusercontent.com';
   // The Web client ID. Android's Credential Manager flow needs it as the
   // "server" client so the ID token's audience is stable across platforms.
-  static const googleServerClientId = '287776800654-eqfu7k983n904heci4qdm1ffj9ekd5vi.apps.googleusercontent.com';
+  static const googleServerClientId =
+      '287776800654-eqfu7k983n904heci4qdm1ffj9ekd5vi.apps.googleusercontent.com';
 
   /// Free allowance a device starts with, mirrored from the server's
   /// FREE_BASE_MINUTES. Only used for copy in the account sheet — the server
