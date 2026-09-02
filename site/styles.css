@@ -1,6 +1,5 @@
 :root {
-  --bg-top: #f8eafb;
-  --bg-bottom: #f7e6ee;
+  --bg: #ffffff;
   --panel: #fcfcfc;
   --text: #111111;
   --text-2: #333333;
@@ -31,7 +30,7 @@ body {
 
 body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  background: var(--bg);
   color: var(--text);
   line-height: 1.5;
   min-height: 100vh;
@@ -60,10 +59,6 @@ a {
   font-weight: 700;
   font-size: 15px;
   letter-spacing: -0.03em;
-  background: var(--brand-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
 .hero-wrap {
@@ -87,10 +82,14 @@ a {
 
 .kicker {
   margin: 0 0 12px;
-  color: var(--accent);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  width: fit-content;
 }
 
 h1 {
@@ -101,12 +100,6 @@ h1 {
   line-height: 0.95;
 }
 
-.hero h1 {
-  background: var(--brand-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
 
 .tagline {
   margin: 0 0 32px;
@@ -131,7 +124,7 @@ h1 {
   min-height: 52px;
   padding: 14px 22px;
   border-radius: 10px;
-  background: var(--brand-gradient);
+  background: var(--text);
   color: #fff;
   text-decoration: none;
   font-size: 15px;
@@ -140,7 +133,7 @@ h1 {
 }
 
 .btn:hover {
-  filter: brightness(1.06);
+  background: var(--text-2);
 }
 
 .btn:focus-visible {
