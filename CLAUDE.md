@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick), twelve target languages, and a light/dark theme toggle.
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick), twelve target languages, a light/dark theme toggle, and optional Google/Apple account sync that pools time and saved recordings across a user's devices.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -79,6 +79,7 @@ lib/
 │   ├── conversation_provider.dart         # Conversation mode: myLanguage/theirLanguage/messages
 │   ├── quick_provider.dart                # Quick mode: quickTranscript + quickTranslation (strings)
 │   ├── tts_provider.dart                  # ttsEnabled, ttsRate (0.5–1.5×)
+│   ├── account_provider.dart              # AccountState mirror of AccountService
 │   └── session_history_provider.dart      # FutureProvider over SQLite
 ├── services/
 │   ├── soniox_realtime_service.dart       # WS to proxy; rotation timer, reconnect, 4005 handling
@@ -89,6 +90,7 @@ lib/
 │   ├── sync_service.dart                  # Upload saved sessions to Render
 │   ├── purchase_service.dart              # RevenueCat init/purchase/pending retry
 │   ├── update_service.dart                # Force-update check
+│   ├── account_service.dart               # Optional Google/Apple sign-in + merge
 │   └── background_service.dart            # Android foreground service (flutter_foreground_task)
 ├── ui/
 │   ├── screens/
@@ -105,7 +107,8 @@ lib/
 │       ├── history_sheet.dart             # Bottom sheet: list + inline detail + audio player
 │       ├── session_card.dart              # History list item
 │       ├── status_bar.dart                # Pulsing recording dot + remaining time
-│       └── tts_control_button.dart        # TTS toggle + rate slider
+│       ├── tts_control_button.dart        # TTS toggle + rate slider
+│       └── account_sheet.dart             # Optional account-sync sign-in sheet
 └── utils/
     ├── audio_utils.dart
     └── constants.dart                     # serverBaseUrl, proxy URLs, design tokens
@@ -184,6 +187,42 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - `UserService` registers the device on first launch (hardware ID for stable identity), generates an 8-char code, fetches an auth token.
 - The code is still called `friendCode` internally (pref key + server field), but the friend/live-session feature was removed (2026-07); the code now surfaces only as the **customer ID** in the Add More Time purchase sheet, with tap-to-copy, for support/purchase enquiries.
 - Activity reporting: `UserService.reportActivity('event_name', metadata)` for analytics (app_open, recording_start/stop, session_save, …).
+
+### Account Sync (optional Google / Apple login)
+- **Off by default and invisible without config** — with no OAuth client IDs in
+  `AppConstants`/server env, the account sheet shows no sign-in buttons and
+  every device stays standalone. Full setup: [docs/account-sync-setup.md](docs/account-sync-setup.md).
+- **An account is itself a `users` row** (`acct_…`, no hardware id). Usage
+  metering, proxy billing, purchases and cloud sessions all key off
+  `users.user_id`, so a signed-in device just addresses a different row and
+  every one of those paths works unchanged. `UserService.userId` resolves to the
+  account when linked, the device otherwise; `deviceUserId` stays available
+  because account endpoints authenticate as the *device* (the account may not
+  exist yet at link time).
+- **Time merges once per device, ledgered.** A device contributes
+  `limit - FREE_BASE_MINUTES` purchased minutes plus its used seconds (clamped to
+  the merged limit so a merge can exhaust but never indebt an account); the free
+  30 is granted once per *account*, not per device. `account_members` records the
+  contribution, so signing out and back in — or linking a different account —
+  contributes zero and can never mint minutes. The device row drops back to the
+  free tier at merge time, so purchased time exists in exactly one place.
+- **Sign-out detaches this device only** (membership marked inactive, its
+  account tokens deleted); it falls back to its own free-tier row and signing
+  back in restores the shared balance.
+- **Multi-token auth is required** — `users.auth_token_hash` is a single column,
+  so two devices on one row would invalidate each other every re-registration,
+  401-ping-ponging and dropping live WS proxy sessions. Tokens live in
+  `auth_tokens`; `tokenMatchesUser()` also accepts the legacy column so older
+  clients keep working.
+- **Sync carries text + word timestamps + title, never audio** — raw PCM16 WAV is
+  ~172 MB/hour against a 50 MB request cap. A synced session shows full text with
+  no audio player on the device that didn't record it.
+- Native sign-in on iOS/Android (`google_sign_in`, `sign_in_with_apple`);
+  desktop has no native SDK and uses the server's browser OAuth broker
+  (`/auth/google` → `/api/account/poll`). Apple's button is iOS/macOS only.
+- `AccountService.stateListenable` pushes changes (the once-per-install restore
+  probe can land seconds after launch); `MainScreen` listens and re-fetches usage
+  + invalidates history, since both now address a different row.
 
 ### Theme (light/dark)
 - `darkModeProvider` (`theme_provider.dart`) — toggle button in the main-screen header (sun/moon icon), persisted in SharedPreferences (`dark_mode`), **default light, independent of the OS setting**.

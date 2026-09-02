@@ -53,5 +53,21 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- Google Sign-In redirect. Replace the string below with the REVERSED
+	     iOS OAuth client ID from Google Cloud Console (it looks like
+	     com.googleusercontent.apps.123456789-abcdef), and set the matching
+	     forward form in AppConstants.googleIosClientId. Until both are filled
+	     in, the app hides the Google button rather than failing at tap time. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.287776800654-rebo3m3pe7fp1ape20ktqk5mc7e2pn50</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

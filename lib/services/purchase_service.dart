@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -21,9 +22,21 @@ class PurchaseService {
   static final PurchaseService instance = PurchaseService._();
   PurchaseService._();
 
-  static const _apiKey = 'appl_CtsSSvxoAlcxysdpTOomFleNOof';
+  static const _iosApiKey = 'appl_CtsSSvxoAlcxysdpTOomFleNOof';
+  static const _androidApiKey = 'goog_HRRUrwKMJfQzRtsNwizGwWlmaEf';
+
   static const _pendingKey = 'pending_purchases';
   static final Random _rand = Random();
+
+  static String? get _platformApiKey {
+    if (kIsWeb) return null;
+    if (Platform.isIOS) return _iosApiKey;
+    if (Platform.isAndroid) return _androidApiKey;
+    return null;
+  }
+
+  /// RevenueCat is iOS/Android only. Desktop shows the customer ID instead.
+  static bool get isSupported => _platformApiKey != null;
 
   bool _initialized = false;
   Offerings? _offerings;
@@ -33,24 +46,49 @@ class PurchaseService {
 
   Future<void> init() async {
     if (_initialized) return;
+    final apiKey = _platformApiKey;
+    if (apiKey == null) {
+      debugPrint('PurchaseService: no SDK key for this platform');
+      return;
+    }
     try {
       await Purchases.setLogLevel(LogLevel.debug);
       final userId = UserService.instance.userId;
-      final config = PurchasesConfiguration(_apiKey);
+      final config = PurchasesConfiguration(apiKey);
       if (userId != null) {
         config.appUserID = userId;
       }
       await Purchases.configure(config);
       _initialized = true;
       await refreshOfferings();
-      // Retry any purchases that succeeded with Apple but failed to credit
+      // Retry any purchases that succeeded in the store but failed to credit
       await _retryPendingPurchases();
     } catch (e) {
       debugPrint('PurchaseService init error: $e');
     }
   }
 
+  /// Re-point RevenueCat at a new identity after the user signs in or out of a
+  /// synced account. Purchases are credited server-side against whatever
+  /// userId the client posts, and the server verifies that same id against
+  /// RevenueCat — so the two must never drift apart.
+  Future<void> switchUser(String userId) async {
+    if (!isSupported) return;
+    if (!_initialized) {
+      // Not configured yet: init() reads the current userId itself.
+      await init();
+      return;
+    }
+    try {
+      await Purchases.logIn(userId);
+      await refreshOfferings();
+    } catch (e) {
+      debugPrint('PurchaseService switchUser error: $e');
+    }
+  }
+
   Future<void> refreshOfferings() async {
+    if (!_initialized) return;
     try {
       _offerings = await Purchases.getOfferings();
     } catch (e) {
@@ -61,6 +99,22 @@ class PurchaseService {
   /// Returns the list of packages from the default offering.
   List<Package> get availablePackages {
     return _offerings?.current?.availablePackages ?? [];
+  }
+
+  /// Restore purchases from the store. Returns true if the SDK call
+  /// succeeded (consumable hour packs typically have nothing to restore).
+  Future<bool> restore() async {
+    if (!_initialized) {
+      await init();
+    }
+    if (!_initialized) return false;
+    try {
+      await Purchases.restorePurchases();
+      return true;
+    } catch (e) {
+      debugPrint('Restore purchases error: $e');
+      return false;
+    }
   }
 
   /// Purchase a package. Returns the number of minutes granted, or null on

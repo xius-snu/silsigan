@@ -1,6 +1,9 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
+import '../utils/constants.dart';
 
 class UpdateInfo {
   final String latestVersion;
@@ -20,6 +23,8 @@ class UpdateService {
 
   /// Returns [UpdateInfo] if an update is available, null otherwise.
   static Future<UpdateInfo?> checkForUpdate() async {
+    // Store URLs are iOS/Android only — don't send desktop users to them.
+    if (kIsWeb || !(Platform.isIOS || Platform.isAndroid)) return null;
     try {
       final response = await http
           .get(Uri.parse(_versionUrl))
@@ -28,8 +33,11 @@ class UpdateService {
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final latestVersion = data['latest_version'] as String? ?? '';
-      final updateUrl = data['update_url'] as String? ?? '';
       final forceUpdate = data['force_update'] as bool? ?? false;
+      final iosUrl = data['update_url'] as String? ?? AppConstants.appStoreUrl;
+      final androidUrl =
+          data['android_update_url'] as String? ?? AppConstants.playStoreUrl;
+      final updateUrl = (!kIsWeb && Platform.isAndroid) ? androidUrl : iosUrl;
 
       if (latestVersion.isEmpty || updateUrl.isEmpty) return null;
 
@@ -65,7 +73,7 @@ class UpdateService {
       final r = i < remoteParts.length ? remoteParts[i] : 0;
       final l = i < localParts.length ? localParts[i] : 0;
       if (r > l) return true;
-      if (r < l) return false;
+      if (l > r) return false;
     }
     return false;
   }

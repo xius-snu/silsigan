@@ -35,6 +35,53 @@ function nextLimitedSonioxKey() {
 // Private key — used when client requests private=1
 const SONIOX_PRIVATE_KEY = process.env.SONIOX_PRIVATE_KEY || null;
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
+// ============================================
+// ACCOUNT SYNC (Google / Apple)
+// ============================================
+
+// Free allowance every device starts with. An account row also starts at this
+// value, and each device that links contributes only its PURCHASED minutes
+// (limit - free base) — so linking two fresh 30-minute devices yields 30
+// minutes, not 60, while two 10h30m devices yield 20h30m.
+const FREE_BASE_MINUTES = parseInt(process.env.FREE_BASE_MINUTES || '30');
+
+// Accepted `aud` values for provider ID tokens. OAuth client IDs are public
+// identifiers, not secrets. Comma-separated so one deployment can accept the
+// iOS, Android and Web client IDs at once.
+const GOOGLE_CLIENT_IDS = (process.env.GOOGLE_CLIENT_IDS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+// Apple: the iOS bundle id for native Sign in with Apple, plus the Services ID
+// if the browser flow is ever enabled.
+const APPLE_CLIENT_IDS = (process.env.APPLE_CLIENT_IDS || 'com.silsigan.app')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+// Browser (desktop) sign-in flow. Needs a Google "Web application" OAuth
+// client — the only place a client secret is involved. Unset = the desktop
+// flow reports "not configured" and mobile native sign-in still works.
+const GOOGLE_WEB_CLIENT_ID = process.env.GOOGLE_WEB_CLIENT_ID || '';
+const GOOGLE_WEB_CLIENT_SECRET = process.env.GOOGLE_WEB_CLIENT_SECRET || '';
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://silsigan.onrender.com')
+    .replace(/\/+$/, '');
+
+const PROVIDERS = {
+    google: {
+        jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
+        issuers: ['accounts.google.com', 'https://accounts.google.com'],
+        get audiences() {
+            return GOOGLE_WEB_CLIENT_ID
+                ? GOOGLE_CLIENT_IDS.concat([GOOGLE_WEB_CLIENT_ID])
+                : GOOGLE_CLIENT_IDS;
+        },
+    },
+    apple: {
+        jwksUrl: 'https://appleid.apple.com/auth/keys',
+        issuers: ['https://appleid.apple.com'],
+        get audiences() { return APPLE_CLIENT_IDS; },
+    },
+};
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+
 
 // When true: reject all non-private WebSocket connections immediately
 // without hitting DB or opening a Soniox upstream. Used to shut down
@@ -80,6 +127,100 @@ function hashToken(token) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+// ── Provider ID-token verification ──────────────────────────────────
+// Verified locally against the provider's JWKS (no SDK, no extra deps).
+// Google's tokeninfo endpoint would be one HTTP call, but Apple has no
+// equivalent, so one JWKS verifier serves both.
+
+const JWKS_CACHE = new Map(); // url -> { keys, fetchedAt }
+const JWKS_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function getJwks(url, { force = false } = {}) {
+    const hit = JWKS_CACHE.get(url);
+    if (!force && hit && Date.now() - hit.fetchedAt < JWKS_TTL_MS) return hit.keys;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`JWKS fetch failed (${res.status})`);
+    const body = await res.json();
+    const keys = body.keys || [];
+    JWKS_CACHE.set(url, { keys, fetchedAt: Date.now() });
+    return keys;
+}
+
+function b64urlDecode(part) {
+    return Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+/// Verifies an RS256 ID token and returns its payload. Throws on any failure —
+/// callers must treat a throw as "not signed in", never as "probably fine".
+async function verifyIdToken(idToken, providerName) {
+    const provider = PROVIDERS[providerName];
+    if (!provider) throw new Error('Unknown provider');
+    if (provider.audiences.length === 0) {
+        throw new Error(`No client IDs configured for ${providerName}`);
+    }
+
+    const parts = String(idToken || '').split('.');
+    if (parts.length !== 3) throw new Error('Malformed token');
+    const header = JSON.parse(b64urlDecode(parts[0]).toString('utf8'));
+    const payload = JSON.parse(b64urlDecode(parts[1]).toString('utf8'));
+    if (header.alg !== 'RS256') throw new Error('Unsupported algorithm');
+
+    // Providers rotate signing keys; an unknown kid means our cache is stale.
+    let keys = await getJwks(provider.jwksUrl);
+    let jwk = keys.find(k => k.kid === header.kid);
+    if (!jwk) {
+        keys = await getJwks(provider.jwksUrl, { force: true });
+        jwk = keys.find(k => k.kid === header.kid);
+    }
+    if (!jwk) throw new Error('Signing key not found');
+
+    const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    const signed = `${parts[0]}.${parts[1]}`;
+    const ok = crypto.createVerify('RSA-SHA256')
+        .update(signed)
+        .verify(publicKey, b64urlDecode(parts[2]));
+    if (!ok) throw new Error('Bad signature');
+
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload.exp || payload.exp < now - 60) throw new Error('Token expired');
+    if (payload.iat && payload.iat > now + 300) throw new Error('Token from the future');
+    if (!provider.issuers.includes(payload.iss)) throw new Error('Unexpected issuer');
+    const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (!auds.some(a => provider.audiences.includes(a))) {
+        throw new Error('Unexpected audience');
+    }
+    if (!payload.sub) throw new Error('Token has no subject');
+    return payload;
+}
+
+// ── Multi-device auth tokens ────────────────────────────────────────
+// A synced account is used by several devices at once, so a single
+// auth_token_hash column on users can't work: each device registering would
+// invalidate the others, 401-ping-ponging them and dropping their WS proxy
+// sessions mid-recording. Tokens live in their own table; the legacy column
+// stays valid so clients that predate this keep working.
+
+async function issueAuthToken(userId, deviceUserId) {
+    const token = crypto.randomUUID();
+    await pool.query(
+        `INSERT INTO auth_tokens (token_hash, user_id, device_user_id)
+         VALUES ($1, $2, $3) ON CONFLICT (token_hash) DO NOTHING`,
+        [hashToken(token), userId, deviceUserId || null]
+    );
+    return token;
+}
+
+async function tokenMatchesUser(userId, tokenHash) {
+    const res = await pool.query(
+        `SELECT 1 FROM auth_tokens WHERE token_hash = $1 AND user_id = $2
+         UNION ALL
+         SELECT 1 FROM users WHERE user_id = $2 AND auth_token_hash = $1
+         LIMIT 1`,
+        [tokenHash, userId]
+    );
+    return res.rows.length > 0;
+}
+
 // ============================================
 // AUTH MIDDLEWARE
 // ============================================
@@ -97,6 +238,12 @@ const PUBLIC_ROUTES = new Set([
     'POST:/api/user/usage',
     'POST:/api/proxy-auth',
     'POST:/api/proxy-bill',
+    // Desktop browser sign-in: hit by the user's browser, not the app, so
+    // there is no bearer token to present. The ticket in the query string is
+    // the capability, and the resulting session token is only ever handed
+    // back over the authenticated /api/account/poll.
+    'GET:/auth/google',
+    'GET:/auth/google/callback',
 ]);
 
 async function authenticateRequest(req, reply) {
@@ -119,11 +266,7 @@ async function authenticateRequest(req, reply) {
     const { userId } = req.body || {};
     if (!userId) return reply.code(400).send({ error: 'Missing userId' });
 
-    const res = await pool.query(
-        'SELECT auth_token_hash FROM users WHERE user_id = $1',
-        [userId]
-    );
-    if (res.rows.length === 0 || res.rows[0].auth_token_hash !== tokenHash) {
+    if (!await tokenMatchesUser(userId, tokenHash)) {
         return reply.code(401).send({ error: 'Invalid token' });
     }
 }
@@ -246,13 +389,84 @@ async function start() {
         )
     `);
 
+
+    // ── Account sync (optional Google / Apple login) ────────────────
+    // An account is itself a row in `users` (user_id 'acct_…', no hardware).
+    // That keeps every usage, billing, purchase and session code path
+    // untouched — a signed-in device simply acts as the account row.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_account BOOLEAN DEFAULT FALSE`);
+
+    // Provider identity → account row. One account per (provider, subject).
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS account_identities (
+            provider TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            account_id TEXT NOT NULL REFERENCES users(user_id),
+            email TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (provider, subject)
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_account_identities_account ON account_identities(account_id)`);
+
+    // Ledger of which device rows have folded their balance into an account.
+    // A device contributes its purchased minutes exactly ONCE, ever — a
+    // second link (same account after signing out, or a different account)
+    // contributes zero, so unlink/relink can never mint time.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS account_members (
+            account_id TEXT NOT NULL REFERENCES users(user_id),
+            device_user_id TEXT NOT NULL REFERENCES users(user_id),
+            contributed_minutes INT NOT NULL DEFAULT 0,
+            contributed_used_seconds INT NOT NULL DEFAULT 0,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (account_id, device_user_id)
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_account_members_device ON account_members(device_user_id)`);
+    // Signing out deactivates membership instead of deleting it, so the
+    // contribution ledger above outlives the session.
+    await pool.query(`ALTER TABLE account_members ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`);
+
+    // Per-device auth tokens. See tokenMatchesUser() for why the single
+    // users.auth_token_hash column cannot serve a multi-device account.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(user_id),
+            device_user_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)`);
+
+    // Short-lived tickets for the desktop browser sign-in handshake.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS auth_tickets (
+            ticket TEXT PRIMARY KEY,
+            device_user_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            provider TEXT,
+            account_id TEXT,
+            token TEXT,
+            email TEXT,
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    // Saved sessions gained per-line word timestamps and a title after this
+    // table was first created; both sync so a session opened on another
+    // device keeps its name and line-by-line structure.
+    await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS timestamps_json TEXT`);
+    await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS title TEXT`);
     fastify.addHook('preHandler', authenticateRequest);
 
     // ==================
     // HEALTH CHECK
     // ==================
 
-    fastify.get('/', async () => ({ status: 'ok', version: 5 }));
+    fastify.get('/', async () => ({ status: 'ok', version: 6 }));
 
     // ==================
     // USER ENDPOINTS
@@ -426,10 +640,12 @@ async function start() {
         if (!userId || !tokenHash) return reply.code(400).send({ valid: false });
         try {
             const res = await pool.query(
-                'SELECT auth_token_hash, COALESCE(is_private, FALSE) AS is_private, COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
+                'SELECT COALESCE(is_private, FALSE) AS is_private, COALESCE(used_seconds, 0) AS used_seconds, COALESCE(usage_limit_minutes, 30) AS limit_minutes FROM users WHERE user_id = $1',
                 [userId]
             );
-            if (res.rows.length === 0 || res.rows[0].auth_token_hash !== tokenHash) {
+            // Any of the account's live device tokens is acceptable here —
+            // a second signed-in device must not knock the first off the WS.
+            if (res.rows.length === 0 || !(await tokenMatchesUser(userId, tokenHash))) {
                 return { valid: false };
             }
             const row = res.rows[0];
@@ -472,11 +688,7 @@ async function start() {
             return reply.code(400).send({ valid: false });
         }
         try {
-            const auth = await pool.query(
-                'SELECT auth_token_hash FROM users WHERE user_id = $1',
-                [userId]
-            );
-            if (auth.rows.length === 0 || auth.rows[0].auth_token_hash !== tokenHash) {
+            if (!(await tokenMatchesUser(userId, tokenHash))) {
                 return { valid: false };
             }
             const r = await billUsageSeconds(userId, secs);
@@ -1079,22 +1291,24 @@ async function start() {
 
     // Save/upsert a session
     fastify.post('/api/sessions/save', async (req, reply) => {
-        const { userId, createdAt, transcription, translation, transcriptionPreview, translationPreview, audioBase64 } = req.body;
+        const { userId, createdAt, transcription, translation, transcriptionPreview, translationPreview, audioBase64, timestampsJson, title } = req.body;
         if (!userId || !createdAt || transcription == null || translation == null) {
             return reply.code(400).send({ error: 'Missing fields' });
         }
         try {
             const audioData = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
             await pool.query(`
-                INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data, timestamps_json, title)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (user_id, created_at) DO UPDATE SET
                     transcription = EXCLUDED.transcription,
                     translation = EXCLUDED.translation,
                     transcription_preview = EXCLUDED.transcription_preview,
                     translation_preview = EXCLUDED.translation_preview,
-                    audio_data = COALESCE(EXCLUDED.audio_data, saved_sessions.audio_data)
-            `, [userId, createdAt, transcription, translation, transcriptionPreview || '', translationPreview || '', audioData]);
+                    audio_data = COALESCE(EXCLUDED.audio_data, saved_sessions.audio_data),
+                    timestamps_json = COALESCE(EXCLUDED.timestamps_json, saved_sessions.timestamps_json),
+                    title = COALESCE(EXCLUDED.title, saved_sessions.title)
+            `, [userId, createdAt, transcription, translation, transcriptionPreview || '', translationPreview || '', audioData, timestampsJson || null, title || null]);
             return { success: true };
         } catch (e) {
             fastify.log.error('Save session error: ' + e.message);
@@ -1108,7 +1322,7 @@ async function start() {
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
         try {
             const res = await pool.query(`
-                SELECT id, created_at, transcription_preview, translation_preview,
+                SELECT id, created_at, transcription_preview, translation_preview, title,
                        (audio_data IS NOT NULL) as has_audio
                 FROM saved_sessions
                 WHERE user_id = $1
@@ -1128,7 +1342,8 @@ async function start() {
         try {
             const res = await pool.query(`
                 SELECT id, created_at, transcription, translation,
-                       transcription_preview, translation_preview, audio_data
+                       transcription_preview, translation_preview,
+                       timestamps_json, title, audio_data
                 FROM saved_sessions
                 WHERE id = $1 AND user_id = $2
             `, [sessionId, userId]);
@@ -1162,6 +1377,462 @@ async function start() {
         }
     });
 
+    // ==================
+    // ACCOUNT SYNC
+    // ==================
+
+    // Folds a device row's balance into an account row, exactly once per
+    // device, and moves its cloud sessions across. Runs in one transaction so
+    // a crash can never leave minutes credited to the account but still
+    // spendable on the device (or vice versa).
+    async function linkDeviceToAccount(deviceUserId, provider, subject, email) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            // Two devices signing into the same brand-new identity at once
+            // would both miss the SELECT below and race to insert it, and the
+            // loser's whole transaction would fail on the primary key. FOR
+            // UPDATE cannot lock a row that does not exist yet, so serialize
+            // on the identity itself.
+            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',
+                [`${provider}:${subject}`]);
+
+            // Resolve (or create) the account this identity owns.
+            let accountId;
+            const ident = await client.query(
+                'SELECT account_id FROM account_identities WHERE provider = $1 AND subject = $2 FOR UPDATE',
+                [provider, subject]
+            );
+            if (ident.rows.length > 0) {
+                accountId = ident.rows[0].account_id;
+                if (email) {
+                    await client.query(
+                        'UPDATE account_identities SET email = $3 WHERE provider = $1 AND subject = $2',
+                        [provider, subject, email]
+                    );
+                }
+            } else {
+                accountId = 'acct_' + crypto.randomUUID().replace(/-/g, '');
+                // The account starts with the free allowance. Devices add only
+                // their PURCHASED minutes on top, so the 30 free minutes are
+                // granted once per account, never once per device.
+                await client.query(
+                    `INSERT INTO users (user_id, usage_limit_minutes, used_seconds, is_account)
+                     VALUES ($1, $2, 0, TRUE)`,
+                    [accountId, FREE_BASE_MINUTES]
+                );
+                await client.query(
+                    'INSERT INTO account_identities (provider, subject, account_id, email) VALUES ($1, $2, $3, $4)',
+                    [provider, subject, accountId, email || null]
+                );
+            }
+
+            const device = await client.query(
+                `SELECT COALESCE(usage_limit_minutes, $2) AS limit_minutes,
+                        COALESCE(used_seconds, 0) AS used_seconds,
+                        COALESCE(is_private, FALSE) AS is_private
+                 FROM users WHERE user_id = $1 FOR UPDATE`,
+                [deviceUserId, FREE_BASE_MINUTES]
+            );
+            if (device.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return { error: 'device_not_found' };
+            }
+
+            // A device contributes its balance ONCE in its lifetime. Signing
+            // out and back in, or linking a second account later, contributes
+            // nothing — otherwise unlink/relink would mint minutes.
+            const priorContribution = await client.query(
+                'SELECT 1 FROM account_members WHERE device_user_id = $1 LIMIT 1',
+                [deviceUserId]
+            );
+            const alreadyContributed = priorContribution.rows.length > 0;
+
+            const d = device.rows[0];
+            const deviceLimit = parseInt(d.limit_minutes);
+            const deviceUsed = parseInt(d.used_seconds);
+            const contributedMinutes = alreadyContributed
+                ? 0
+                : Math.max(0, deviceLimit - FREE_BASE_MINUTES);
+            // Used time is real spend and follows the minutes. Clamping to the
+            // device's own limit stops a device that overshot its cap (billing
+            // ticks land after the close) from importing phantom debt.
+            const contributedUsed = alreadyContributed
+                ? 0
+                : Math.max(0, Math.min(deviceUsed, deviceLimit * 60));
+
+            if (!alreadyContributed) {
+                await client.query(
+                    `UPDATE users
+                       SET usage_limit_minutes = COALESCE(usage_limit_minutes, $2) + $3,
+                           is_private = (COALESCE(is_private, FALSE) OR $4)
+                     WHERE user_id = $1`,
+                    [accountId, FREE_BASE_MINUTES, contributedMinutes, d.is_private]
+                );
+                // Clamp to the freshly widened limit so a merge can leave the
+                // account exhausted but never in debt — otherwise summed spend
+                // would silently eat the user's next purchase.
+                await client.query(
+                    `UPDATE users
+                       SET used_seconds = LEAST(COALESCE(used_seconds, 0) + $2,
+                                                COALESCE(usage_limit_minutes, $3) * 60)
+                     WHERE user_id = $1`,
+                    [accountId, contributedUsed, FREE_BASE_MINUTES]
+                );
+                // The device keeps only the free tier: its purchased time now
+                // lives in the account. This is what makes signing out safe —
+                // the time exists in exactly one place at a time.
+                await client.query(
+                    `UPDATE users
+                       SET usage_limit_minutes = $2,
+                           used_seconds = LEAST(COALESCE(used_seconds, 0), $2 * 60)
+                     WHERE user_id = $1`,
+                    [deviceUserId, FREE_BASE_MINUTES]
+                );
+            }
+
+            await client.query(
+                `INSERT INTO account_members
+                     (account_id, device_user_id, contributed_minutes, contributed_used_seconds, active)
+                 VALUES ($1, $2, $3, $4, TRUE)
+                 ON CONFLICT (account_id, device_user_id) DO UPDATE SET active = TRUE`,
+                [accountId, deviceUserId, contributedMinutes, contributedUsed]
+            );
+
+            // Hand the device's cloud sessions to the account so its history
+            // shows up on every signed-in device.
+            await client.query(
+                `INSERT INTO saved_sessions
+                     (user_id, created_at, transcription, translation,
+                      transcription_preview, translation_preview,
+                      timestamps_json, title, audio_data)
+                 SELECT $2, created_at, transcription, translation,
+                        transcription_preview, translation_preview,
+                        timestamps_json, title, audio_data
+                 FROM saved_sessions WHERE user_id = $1
+                 ON CONFLICT (user_id, created_at) DO NOTHING`,
+                [deviceUserId, accountId]
+            );
+            await client.query('DELETE FROM saved_sessions WHERE user_id = $1', [deviceUserId]);
+
+            await client.query('COMMIT');
+            return { accountId, contributedMinutes };
+        } catch (e) {
+            try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
+            throw e;
+        } finally {
+            client.release();
+        }
+    }
+
+    // Current sync state for one device, as the app's account sheet shows it.
+    async function accountStateFor(deviceUserId) {
+        const res = await pool.query(
+            `SELECT m.account_id, i.provider, i.email,
+                    (SELECT COUNT(*) FROM account_members
+                      WHERE account_id = m.account_id AND active) AS device_count
+             FROM account_members m
+             LEFT JOIN account_identities i ON i.account_id = m.account_id
+             WHERE m.device_user_id = $1 AND m.active
+             ORDER BY m.joined_at DESC
+             LIMIT 1`,
+            [deviceUserId]
+        );
+        if (res.rows.length === 0) return { linked: false };
+        const row = res.rows[0];
+        return {
+            linked: true,
+            accountUserId: row.account_id,
+            provider: row.provider || null,
+            email: row.email || null,
+            deviceCount: parseInt(row.device_count) || 1,
+        };
+    }
+
+    async function accountUsageRow(accountId) {
+        const res = await pool.query(
+            `SELECT COALESCE(used_seconds, 0) AS used_seconds,
+                    COALESCE(usage_limit_minutes, $2) AS limit_minutes,
+                    COALESCE(is_private, FALSE) AS is_private
+             FROM users WHERE user_id = $1`,
+            [accountId, FREE_BASE_MINUTES]
+        );
+        const row = res.rows[0];
+        return {
+            usedSeconds: parseInt(row ? row.used_seconds : 0),
+            limitMinutes: parseInt(row ? row.limit_minutes : FREE_BASE_MINUTES),
+            isPrivate: row ? row.is_private === true : false,
+        };
+    }
+
+    // Sign in / link. Authenticated as the DEVICE (the account may not exist
+    // yet), carrying an ID token minted by Google or Apple on the client.
+    fastify.post('/api/account/link', async (req, reply) => {
+        const { userId, provider, idToken } = req.body || {};
+        if (!userId || !provider || !idToken) {
+            return reply.code(400).send({ error: 'Missing fields' });
+        }
+        if (!PROVIDERS[provider]) {
+            return reply.code(400).send({ error: 'Unknown provider' });
+        }
+
+        let claims;
+        try {
+            claims = await verifyIdToken(idToken, provider);
+        } catch (e) {
+            fastify.log.warn(`Account link rejected (${provider}): ${e.message}`);
+            return reply.code(401).send({ error: 'Invalid identity token' });
+        }
+
+        try {
+            const result = await linkDeviceToAccount(
+                userId, provider, claims.sub, claims.email || null
+            );
+            if (result.error) return reply.code(409).send({ error: result.error });
+
+            const token = await issueAuthToken(result.accountId, userId);
+            const usage = await accountUsageRow(result.accountId);
+            const state = await accountStateFor(userId);
+            return {
+                success: true,
+                accountUserId: result.accountId,
+                token,
+                provider,
+                email: claims.email || state.email || null,
+                deviceCount: state.deviceCount || 1,
+                addedMinutes: result.contributedMinutes,
+                ...usage,
+            };
+        } catch (e) {
+            fastify.log.error('Account link error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    fastify.post('/api/account/status', async (req, reply) => {
+        const { userId } = req.body || {};
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            return await accountStateFor(userId);
+        } catch (e) {
+            fastify.log.error('Account status error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Mint a fresh account token for a device that is still an active member
+    // but lost its copy — an Android data clear, or a reinstall that restored
+    // the same hardware identity. Authenticated by the device's own token.
+    fastify.post('/api/account/refresh', async (req, reply) => {
+        const { userId } = req.body || {};
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            const state = await accountStateFor(userId);
+            if (!state.linked) return reply.code(404).send({ error: 'Not linked' });
+            const token = await issueAuthToken(state.accountUserId, userId);
+            const usage = await accountUsageRow(state.accountUserId);
+            return { success: true, token, ...state, ...usage };
+        } catch (e) {
+            fastify.log.error('Account refresh error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Sign out on this device only. Membership is deactivated rather than
+    // deleted so the one-time contribution ledger survives — re-linking later
+    // adds nothing, which is what stops unlink/relink from minting minutes.
+    fastify.post('/api/account/signout', async (req, reply) => {
+        const { userId } = req.body || {};
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            await pool.query(
+                'UPDATE account_members SET active = FALSE WHERE device_user_id = $1',
+                [userId]
+            );
+            // Drop only the account-scoped tokens this device holds; its own
+            // device token must survive so it can still talk to us.
+            await pool.query(
+                'DELETE FROM auth_tokens WHERE device_user_id = $1 AND user_id <> $1',
+                [userId]
+            );
+            return { success: true, linked: false };
+        } catch (e) {
+            fastify.log.error('Account signout error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // ── Desktop browser sign-in ─────────────────────────────────────
+    // Windows and Linux have no native Google/Apple sign-in, so the app opens
+    // the system browser, this server runs the OAuth exchange, and the app
+    // polls for the resulting token.
+
+    const TICKET_TTL_MINUTES = 15;
+
+    fastify.post('/api/account/ticket', async (req, reply) => {
+        const { userId } = req.body || {};
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        if (!GOOGLE_WEB_CLIENT_ID || !GOOGLE_WEB_CLIENT_SECRET) {
+            return reply.code(503).send({ error: 'browser_signin_unconfigured' });
+        }
+        try {
+            const ticket = crypto.randomUUID();
+            await pool.query(
+                'INSERT INTO auth_tickets (ticket, device_user_id) VALUES ($1, $2)',
+                [ticket, userId]
+            );
+            // Opportunistic cleanup — tickets are single-use and short-lived.
+            await pool.query(
+                `DELETE FROM auth_tickets WHERE created_at < NOW() - INTERVAL '1 hour'`
+            );
+            return {
+                ticket,
+                url: `${PUBLIC_BASE_URL}/auth/google?ticket=${encodeURIComponent(ticket)}`,
+            };
+        } catch (e) {
+            fastify.log.error('Auth ticket error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    function ticketResultPage(title, message, ok) {
+        const esc = s => String(s).replace(/[&<>"]/g, c => HTML_ESCAPES[c]);
+        return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Silsigan</title></head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#EAEAEA;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#111">
+<div style="text-align:center;padding:32px;max-width:420px">
+<div style="font-size:44px;margin-bottom:12px">${ok ? '&#10003;' : '&#9888;'}</div>
+<h1 style="font-size:20px;margin:0 0 8px">${esc(title)}</h1>
+<p style="font-size:15px;color:#555;margin:0">${esc(message)}</p>
+</div></body></html>`;
+    }
+
+    fastify.get('/auth/google', async (req, reply) => {
+        const { ticket } = req.query || {};
+        if (!GOOGLE_WEB_CLIENT_ID) {
+            return reply.code(503).type('text/html').send(ticketResultPage(
+                'Not available', 'Browser sign-in is not configured for this server.', false));
+        }
+        const res = ticket ? await pool.query(
+            `SELECT status FROM auth_tickets
+             WHERE ticket = $1 AND created_at > NOW() - INTERVAL '${TICKET_TTL_MINUTES} minutes'`,
+            [ticket]
+        ) : { rows: [] };
+        if (res.rows.length === 0 || res.rows[0].status !== 'pending') {
+            return reply.code(400).type('text/html').send(ticketResultPage(
+                'Link expired', 'Start sign-in again from the Silsigan app.', false));
+        }
+        const params = new URLSearchParams({
+            client_id: GOOGLE_WEB_CLIENT_ID,
+            redirect_uri: `${PUBLIC_BASE_URL}/auth/google/callback`,
+            response_type: 'code',
+            scope: 'openid email',
+            state: ticket,
+            prompt: 'select_account',
+        });
+        return reply.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, 302);
+    });
+
+    fastify.get('/auth/google/callback', async (req, reply) => {
+        const { code, state } = req.query || {};
+        const fail = async (msg, ticket) => {
+            if (ticket) {
+                await pool.query(
+                    `UPDATE auth_tickets SET status = 'error', error = $2 WHERE ticket = $1`,
+                    [ticket, msg]
+                ).catch(() => {});
+            }
+            return reply.code(400).type('text/html')
+                .send(ticketResultPage('Sign-in failed', msg, false));
+        };
+        if (!code || !state) return fail('Missing authorization code.', state);
+        try {
+            const res = await pool.query(
+                `SELECT device_user_id, status FROM auth_tickets
+                 WHERE ticket = $1 AND created_at > NOW() - INTERVAL '${TICKET_TTL_MINUTES} minutes'`,
+                [state]
+            );
+            if (res.rows.length === 0 || res.rows[0].status !== 'pending') {
+                return fail('This sign-in link has expired.', null);
+            }
+            const deviceUserId = res.rows[0].device_user_id;
+
+            const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    code,
+                    client_id: GOOGLE_WEB_CLIENT_ID,
+                    client_secret: GOOGLE_WEB_CLIENT_SECRET,
+                    redirect_uri: `${PUBLIC_BASE_URL}/auth/google/callback`,
+                    grant_type: 'authorization_code',
+                }),
+            });
+            if (!tokenRes.ok) return fail('Google rejected the sign-in.', state);
+            const tokens = await tokenRes.json();
+            if (!tokens.id_token) return fail('Google returned no identity token.', state);
+
+            const claims = await verifyIdToken(tokens.id_token, 'google');
+            const link = await linkDeviceToAccount(
+                deviceUserId, 'google', claims.sub, claims.email || null
+            );
+            if (link.error) return fail('This device could not be linked.', state);
+
+            const appToken = await issueAuthToken(link.accountId, deviceUserId);
+            await pool.query(
+                `UPDATE auth_tickets
+                    SET status = 'ready', provider = 'google', account_id = $2,
+                        token = $3, email = $4
+                  WHERE ticket = $1`,
+                [state, link.accountId, appToken, claims.email || null]
+            );
+            return reply.type('text/html').send(ticketResultPage(
+                'Signed in', 'You can close this tab and return to Silsigan.', true));
+        } catch (e) {
+            fastify.log.error('Google callback error: ' + e.message);
+            return fail('Something went wrong signing you in.', state);
+        }
+    });
+
+    fastify.post('/api/account/poll', async (req, reply) => {
+        const { userId, ticket } = req.body || {};
+        if (!userId || !ticket) return reply.code(400).send({ error: 'Missing fields' });
+        try {
+            const res = await pool.query(
+                `SELECT status, provider, account_id, token, email, error
+                 FROM auth_tickets
+                 WHERE ticket = $1 AND device_user_id = $2
+                   AND created_at > NOW() - INTERVAL '${TICKET_TTL_MINUTES} minutes'`,
+                [ticket, userId]
+            );
+            if (res.rows.length === 0) return { status: 'expired' };
+            const row = res.rows[0];
+            if (row.status !== 'ready') {
+                return { status: row.status, error: row.error || null };
+            }
+            // Single use: the token leaves the ticket the first time it is read.
+            await pool.query(
+                `UPDATE auth_tickets SET status = 'consumed', token = NULL WHERE ticket = $1`,
+                [ticket]
+            );
+            const usage = await accountUsageRow(row.account_id);
+            const state = await accountStateFor(userId);
+            return {
+                status: 'ready',
+                accountUserId: row.account_id,
+                token: row.token,
+                provider: row.provider,
+                email: row.email,
+                deviceCount: state.deviceCount || 1,
+                ...usage,
+            };
+        } catch (e) {
+            fastify.log.error('Account poll error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
     // ==================
     // WEBSOCKET SESSION RELAY
     // ==================

@@ -1,19 +1,28 @@
 # Privacy Policy for Silsigan
 
-**Last updated: July 1, 2026**
+**Last updated: August 25, 2026**
 
 Silsigan ("the App") is a real-time speech translation app. This policy describes what data the App collects, how it is used, and your choices.
 
 ## Data We Collect
 
-### Device Identifier
-The App generates a random identifier stored on your device. This identifier is used solely to sync your saved sessions across app launches. It is not linked to your name, email, Apple ID, or any personally identifiable information.
+### Device identifier
+The App creates an anonymous account on first launch. On Android this is derived from the device's `ANDROID_ID`; on iOS it is a stable identifier stored in the Keychain. It is used to:
 
-### Saved Sessions
+- Keep your remaining translation minutes across app launches and reinstalls
+- Sync saved sessions
+- Credit in-app purchases to the correct account
+
+It is not linked to your name, email, Apple ID, or Google account. A short customer ID shown in the App can be copied if you contact support about a purchase.
+
+### Saved sessions
 When you save a transcription session, the text (transcription and translation) is uploaded to our server for cloud sync. This allows your sessions to persist if you reinstall the App.
 
-### Activity Timestamps
-The App records when you last opened it and when you last started a recording. These timestamps are stored alongside your random device identifier on our server.
+### Activity timestamps
+The App records when you last opened it and when you last started a recording. These timestamps are stored alongside your device identifier on our server.
+
+### Purchases
+If you buy additional minutes, Apple or Google (depending on the store) processes the payment. We receive a product identifier and a purchase receipt via RevenueCat so we can credit minutes to your account. We do not receive your full card number or store password.
 
 ## Data That Stays on Your Device
 
@@ -32,8 +41,14 @@ To provide real-time translation, the App shares your personal data with a third
 
 We confirm that this provider offers protections for your data comparable to those described in this policy. See [the provider's privacy policy](https://soniox.com/policies/privacy-policy) for details.
 
+### Payments
+Purchases go through Apple App Store, Google Play, and RevenueCat. Those services process payment data under their own policies.
+
 ### Your consent
 On first launch the App shows a disclosure screen explaining what data is sent and to whom, and asks for your agreement before any audio is shared. You can withdraw consent at any time by discontinuing use of the App and deleting it.
+
+## Android background recording
+On Android, while you are recording, the App runs a microphone foreground service and may show a persistent notification so capture can continue if you leave the App. That notification is not used for advertising.
 
 ## Data We Do NOT Collect
 

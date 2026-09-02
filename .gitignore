@@ -49,3 +49,12 @@ server/node_modules/
 
 # Local data dumps (transcript exports, etc.)
 full_transcripts.jsonl
+
+# Windows installer output + downloaded VC++ redistributable
+/dist/
+windows/installer/vc_redist.x64.exe
+
+# Android signing (local)
+android/key.properties
+*.jks
+android/.kotlin/

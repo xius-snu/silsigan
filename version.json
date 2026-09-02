@@ -1,5 +1,6 @@
 {
   "latest_version": "1.0.13",
   "update_url": "https://apps.apple.com/us/app/silsigan/id6760031656",
+  "android_update_url": "https://play.google.com/store/apps/details?id=com.silsigan.app",
   "force_update": true
 }

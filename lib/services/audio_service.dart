@@ -4,7 +4,11 @@ import 'dart:typed_data';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
+import '../providers/desktop_audio_source_provider.dart';
 import '../utils/constants.dart';
+import '../utils/desktop.dart';
+import '../utils/pcm_mixer.dart';
+import 'desktop_audio_devices.dart';
 
 class AudioService {
   // flutter_sound (iOS only — its openRecorder also configures the
@@ -22,6 +26,15 @@ class AudioService {
   rec.AudioRecorder? _streamRecorder;
   StreamSubscription? _streamSubscription;
   StreamSubscription? _stateErrorSub;
+
+  // Linux "both": a second record instance on the sink monitor. Windows
+  // speaker capture goes through WASAPI loopback instead.
+  rec.AudioRecorder? _loopbackRecorder;
+  StreamSubscription? _loopbackSubscription;
+
+  DesktopAudioSettings? _desktop;
+  final BytesBuilder _speakerPending = BytesBuilder(copy: false);
+  bool _chunkBusy = false;
 
   /// Native capture failure after start (record-package path). flutter_sound
   /// surfaced these by throwing from startRecorder; record reports them
@@ -82,7 +95,16 @@ class AudioService {
   // hot on an orphaned recorder and appending post-stop audio to the WAV.
   int _stopGen = 0;
 
-  Future<void> start() {
+  bool get _wantMic => _desktop == null || _desktop!.captureMic;
+  bool get _wantSpeaker =>
+      isDesktopPlatform && _desktop != null && _desktop!.captureSpeaker;
+
+  Future<void> start({DesktopAudioSettings? desktop}) {
+    // Snapshot before any await so a stop() racing this start cannot see a
+    // half-applied desktop config. Mobile callers omit [desktop] and keep
+    // the existing default-mic path.
+    _desktop =
+        isDesktopPlatform ? (desktop ?? const DesktopAudioSettings()) : null;
     // Single-flight: a second start while one is in flight would skip the
     // isRecording guard in _doStart (the chunk timer isn't armed yet) and
     // leak the first timer/subscription when both complete.
@@ -99,6 +121,7 @@ class AudioService {
     if (isRecording) await _teardown();
     if (!_isInitialized) await init();
     _pending.clear();
+    _speakerPending.clear();
 
     // Close any lingering file handle before (re)opening
     try {
@@ -120,10 +143,17 @@ class AudioService {
     // Leave the post-stop state (raf open for a potential save) untouched.
     if (gen != _stopGen) return;
 
-    if (_useRecord) {
-      await _startWithRecord(gen);
-    } else {
-      await _startWithFlutterSound(gen);
+    try {
+      if (_useRecord) {
+        await _startDesktopCapture(gen);
+      } else {
+        await _startWithFlutterSound(gen);
+      }
+    } catch (e) {
+      // Mic or loopback may already be live — release them so a failed
+      // speaker device cannot leave the default mic open.
+      await _teardown();
+      rethrow;
     }
     if (gen != _stopGen) return;
 
@@ -134,22 +164,90 @@ class AudioService {
     );
   }
 
-  Future<void> _startWithRecord(int gen) async {
+  Future<void> _startDesktopCapture(int gen) async {
+    if (_wantMic) {
+      await _startWithRecord(gen, deviceId: _desktop?.micDeviceId);
+      if (gen != _stopGen) return;
+    } else if (_wantSpeaker && !DesktopAudioDevices.nativeLoopbackSupported) {
+      // Linux speaker-only: the monitor source is just another capture
+      // device as far as `record` is concerned.
+      await _startWithRecord(
+        gen,
+        deviceId: await _resolvedSpeakerDeviceId(),
+      );
+      if (gen != _stopGen) return;
+    }
+
+    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
+      await DesktopAudioDevices.startLoopback(
+        deviceId: _desktop?.speakerDeviceId,
+      );
+      if (gen != _stopGen) {
+        await DesktopAudioDevices.stopLoopback();
+      }
+    } else if (_wantMic &&
+        _wantSpeaker &&
+        !DesktopAudioDevices.nativeLoopbackSupported) {
+      await _startLinuxMonitor(gen, await _resolvedSpeakerDeviceId());
+    }
+  }
+
+  Future<String?> _resolvedSpeakerDeviceId() async {
+    final id = _desktop?.speakerDeviceId;
+    if (id != null && id.isNotEmpty) return id;
+    final outputs = await DesktopAudioDevices.listOutputs();
+    if (outputs.isEmpty) {
+      throw Exception(
+        'No speaker device found. Pick a speaker in the audio source menu.',
+      );
+    }
+    return outputs.first.id;
+  }
+
+  Future<void> _startLinuxMonitor(int gen, String? deviceId) async {
+    _loopbackRecorder = rec.AudioRecorder();
+    final recorder = _loopbackRecorder!;
+    final rec.InputDevice? device = (deviceId != null && deviceId.isNotEmpty)
+        ? rec.InputDevice(id: deviceId, label: deviceId)
+        : null;
+    final stream = await recorder.startStream(
+      rec.RecordConfig(
+        encoder: rec.AudioEncoder.pcm16bits,
+        sampleRate: AppConstants.sampleRate,
+        numChannels: AppConstants.numChannels,
+        device: device,
+      ),
+    );
+    if (gen != _stopGen) {
+      unawaited(recorder.stop().catchError((_) => null));
+      return;
+    }
+    _loopbackSubscription = stream.listen((data) {
+      _lastDataAt = DateTime.now();
+      _speakerPending.add(data);
+    });
+  }
+
+  Future<void> _startWithRecord(int gen, {String? deviceId}) async {
     // Pin the instance being started: a concurrent stop()'s timeout path can
     // swap _streamRecorder mid-flight, and the abort below must release the
     // recorder that actually went live.
     final recorder = _streamRecorder!;
+    final rec.InputDevice? device = (deviceId != null && deviceId.isNotEmpty)
+        ? rec.InputDevice(id: deviceId, label: deviceId)
+        : null;
     final stream = await recorder.startStream(
-      const rec.RecordConfig(
+      rec.RecordConfig(
         encoder: rec.AudioEncoder.pcm16bits,
         sampleRate: AppConstants.sampleRate,
         numChannels: AppConstants.numChannels,
+        device: device,
         // Match the capture behavior the app has always had on Android
         // (raw default mic, no session effects): the record package would
         // otherwise start a Bluetooth SCO link whenever a headset is
         // connected, silently switching capture to the low-bandwidth
         // headset mic.
-        androidConfig: rec.AndroidRecordConfig(
+        androidConfig: const rec.AndroidRecordConfig(
           manageBluetooth: false,
           audioSource: rec.AndroidAudioSource.defaultSource,
         ),
@@ -202,8 +300,43 @@ class AudioService {
   }
 
   void _sendChunk() {
-    if (_pending.isEmpty) return;
-    final bytes = _pending.takeBytes();
+    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
+      if (_chunkBusy) return;
+      _chunkBusy = true;
+      unawaited(_sendChunkAsync().whenComplete(() => _chunkBusy = false));
+      return;
+    }
+    _flushPending();
+  }
+
+  Future<void> _sendChunkAsync() async {
+    try {
+      final extra = await DesktopAudioDevices.readLoopback();
+      if (extra.isNotEmpty) {
+        _lastDataAt = DateTime.now();
+        _speakerPending.add(extra);
+      }
+    } catch (e) {
+      onCaptureError?.call('$e');
+    }
+    _flushPending();
+  }
+
+  void _flushPending() {
+    final Uint8List bytes;
+    if (_wantMic && _wantSpeaker) {
+      if (_pending.isEmpty && _speakerPending.isEmpty) return;
+      bytes = mixPcm16Le(_pending.takeBytes(), _speakerPending.takeBytes());
+    } else if (_wantSpeaker &&
+        !_wantMic &&
+        DesktopAudioDevices.nativeLoopbackSupported) {
+      if (_speakerPending.isEmpty) return;
+      bytes = _speakerPending.takeBytes();
+    } else {
+      if (_pending.isEmpty) return;
+      bytes = _pending.takeBytes();
+    }
+    if (bytes.isEmpty) return;
     // One disk write per tick instead of one per recorder callback — the
     // recorder delivers many small buffers per second and each writeFromSync
     // was a blocking syscall on the UI isolate.
@@ -228,6 +361,26 @@ class AudioService {
   Future<void> _teardown() async {
     _chunkTimer?.cancel();
     _chunkTimer = null;
+
+    _loopbackSubscription?.cancel();
+    _loopbackSubscription = null;
+    final loopbackRecorder = _loopbackRecorder;
+    _loopbackRecorder = null;
+    if (loopbackRecorder != null) {
+      try {
+        await loopbackRecorder.stop().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+      unawaited(loopbackRecorder.dispose().catchError((_) {}));
+    }
+    if (DesktopAudioDevices.nativeLoopbackSupported) {
+      try {
+        final extra = await DesktopAudioDevices.readLoopback();
+        if (extra.isNotEmpty) {
+          _speakerPending.add(extra);
+        }
+      } catch (_) {}
+      await DesktopAudioDevices.stopLoopback();
+    }
 
     if (_useRecord) {
       _streamSubscription?.cancel();
@@ -274,9 +427,22 @@ class AudioService {
 
     // Write the tail captured since the last chunk tick so the saved WAV
     // doesn't lose the final ≤100ms.
-    if (_pending.isNotEmpty) {
+    if (_wantMic && _wantSpeaker) {
+      if (_pending.isNotEmpty || _speakerPending.isNotEmpty) {
+        _writeToDisk(
+          mixPcm16Le(_pending.takeBytes(), _speakerPending.takeBytes()),
+        );
+      }
+    } else if (_wantSpeaker &&
+        !_wantMic &&
+        DesktopAudioDevices.nativeLoopbackSupported) {
+      if (_speakerPending.isNotEmpty) {
+        _writeToDisk(_speakerPending.takeBytes());
+      }
+    } else if (_pending.isNotEmpty) {
       _writeToDisk(_pending.takeBytes());
     }
+    _speakerPending.clear();
 
     // Flush and keep temp file open for potential save
     try {

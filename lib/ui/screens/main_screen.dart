@@ -36,11 +36,17 @@ import '../widgets/tts_control_button.dart';
 import '../../providers/conversation_provider.dart';
 import '../../providers/quick_provider.dart';
 import '../../providers/theme_provider.dart';
+import '../../providers/desktop_audio_source_provider.dart';
 import '../../services/user_service.dart';
+import '../../services/account_service.dart';
+import '../../providers/account_provider.dart';
+import '../widgets/account_sheet.dart';
 import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
 import '../../services/update_service.dart';
 import '../../services/purchase_service.dart';
+import '../../utils/desktop.dart';
+import '../widgets/desktop_audio_source_button.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -204,6 +210,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Transient "copied" state for the customer-ID row in the purchase sheet.
   bool _idCopiedInSheet = false;
+  String? _restoreFeedbackInSheet;
 
   // Autosave: periodic timer + session start timestamp
   Timer? _autosaveTimer;
@@ -255,6 +262,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sonioxService.onUsageLimitReached = () {
       _forceStopForUsageLimit();
     };
+    // Signing in or out repoints usage, purchases and cloud history at a
+    // different server row. The change can also arrive unprompted — the
+    // once-per-install restore probe lands a second or two after launch — so
+    // the screen follows the service rather than only the sheet's buttons.
+    AccountService.instance.stateListenable.addListener(_onAccountChanged);
     // Restore saved languages and autosaved draft
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoreSavedLanguages();
@@ -265,9 +277,26 @@ class _MainScreenState extends ConsumerState<MainScreen>
     });
   }
 
+  void _onAccountChanged() {
+    if (!mounted) return;
+    ref.read(accountProvider.notifier).state = AccountService.instance.state;
+    _fetchUsage(force: true);
+    ref.invalidate(sessionHistoryProvider);
+  }
+
+  Future<void> _showAccountSheet() async {
+    await showAccountSheet(context);
+    if (!mounted) return;
+    // Covers dismissal too: the sheet may have changed the identity and then
+    // been swiped away, and both figures below now address a different row.
+    _fetchUsage(force: true);
+    ref.invalidate(sessionHistoryProvider);
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    AccountService.instance.stateListenable.removeListener(_onAccountChanged);
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     _sentenceBreakTimer?.cancel();
@@ -321,7 +350,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // timeout is a safety net for a wedged audio HAL after an OEM mic
       // kill — without it a stalled native stop/start would hang this
       // resume chain forever.
-      await _audioService.start().timeout(const Duration(seconds: 8));
+      await _startAudioCapture().timeout(const Duration(seconds: 8));
     } on TimeoutException {
       // .timeout() doesn't cancel the underlying start — a merely-slow
       // restart often still succeeds moments later, so re-check before
@@ -379,7 +408,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // Same restart the resume path uses: appends to the existing temp
         // PCM, and the bounded stop inside start() clears the dead native
         // recorder (which never answers a plain stop).
-        await _audioService.start().timeout(const Duration(seconds: 8));
+        await _startAudioCapture().timeout(const Duration(seconds: 8));
         return; // recovered — the session continues seamlessly
       } catch (_) {
         // fall through to stop + notify
@@ -415,7 +444,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // ── Usage Limit ─────────────��──────────────────────────────────
 
-  Future<void> _fetchUsage() async {
+  /// [force] accepts the server figure even when it is lower than what we hold
+  /// locally. Required after an account sign-in or sign-out: the reading now
+  /// comes from a different `users` row entirely, so the monotonic guard below
+  /// would otherwise pin a stale balance from the previous identity.
+  Future<void> _fetchUsage({bool force = false}) async {
     if (_isPrivateMode) return; // compile-time private skips fetch entirely
     final usage = await UserService.instance.fetchUsage();
     if (usage != null && mounted) {
@@ -423,7 +456,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // Only accept server value if >= local (avoids race where
         // _fetchUsage returns before reportActivity is processed)
         final serverUsed = usage['usedSeconds'] as int;
-        if (serverUsed >= _usedSeconds) {
+        if (force || serverUsed >= _usedSeconds) {
           _usedSeconds = serverUsed;
         }
         _limitMinutes = usage['limitMinutes'] as int;
@@ -506,29 +539,38 @@ class _MainScreenState extends ConsumerState<MainScreen>
   };
 
   Future<void> _showPurchasePage() async {
-    List<Package> rcPackages = [];
-    if (!Platform.isAndroid) {
-      final purchaseService = PurchaseService.instance;
-      if (!purchaseService.isInitialized) {
-        await purchaseService.init();
-      }
-      await purchaseService.refreshOfferings();
-      rcPackages = purchaseService.availablePackages;
+    final purchaseService = PurchaseService.instance;
+    if (!purchaseService.isInitialized) {
+      await purchaseService.init();
     }
+    await purchaseService.refreshOfferings();
+    final rcPackages = purchaseService.availablePackages;
 
     if (!mounted) return;
+    _idCopiedInSheet = false;
+    _restoreFeedbackInSheet = null;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
+        final media = MediaQuery.of(ctx);
+        // Modal sheets sit outside the scaffold SafeArea. Android's 3-button
+        // nav / gesture inset covers the Privacy Policy row unless we lift
+        // this padding; iOS's home indicator doesn't collide the same way
+        // (the existing 32px is enough). viewPadding stays correct if a
+        // keyboard is up, unlike padding.bottom which is consumed.
+        final navInset = Platform.isAndroid ? media.viewPadding.bottom : 0.0;
         return Container(
+          constraints: BoxConstraints(
+            maxHeight: media.size.height - media.viewPadding.top - 12,
+          ),
           decoration: BoxDecoration(
             color: AppConstants.sheetColor,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           ),
           padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            bottom: media.viewInsets.bottom + navInset,
           ),
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
@@ -614,15 +656,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 ),
                 const SizedBox(height: 16),
 
-                // Package cards — RevenueCat on iOS, mock on Android
-                if (Platform.isAndroid)
-                  ..._androidMockPackages
-                      .map((pkg) => _buildMockPackageCard(ctx, pkg))
-                else if (rcPackages.isEmpty)
+                // Package cards — same RevenueCat offering on iOS and Android
+                if (rcPackages.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Text(
-                      'Unable to load packages. Please try again later.',
+                      PurchaseService.isSupported
+                          ? 'Unable to load packages. Please try again later.'
+                          : 'In-app purchases are not available on Windows. '
+                              'Use the iOS or Android app, or quote your ID '
+                              'above for help with your account.',
                       style: TextStyle(
                           fontSize: 14, color: AppConstants.textMuted),
                       textAlign: TextAlign.center,
@@ -631,37 +674,52 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 else
                   ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
-                const SizedBox(height: 24),
+                if (PurchaseService.isSupported) ...[
+                  const SizedBox(height: 24),
 
-                // Restore purchases
-                Center(
-                  child: GestureDetector(
-                    onTap: () async {
-                      try {
-                        await Purchases.restorePurchases();
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Purchases restored')),
-                          );
-                        }
-                      } catch (e) {
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Nothing to restore')),
-                          );
-                        }
-                      }
+                  // Restore purchases — snackbars land on the Scaffold behind
+                  // this sheet, so confirmation is inline (same as customer ID).
+                  StatefulBuilder(
+                    builder: (restoreCtx, setRestoreState) {
+                      return Column(
+                        children: [
+                          Center(
+                            child: GestureDetector(
+                              onTap: () async {
+                                final ok =
+                                    await PurchaseService.instance.restore();
+                                setRestoreState(() {
+                                  _restoreFeedbackInSheet = ok
+                                      ? 'Purchases restored'
+                                      : 'Nothing to restore';
+                                });
+                              },
+                              child: Text(
+                                'Restore Purchases',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: AppConstants.textMuted,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_restoreFeedbackInSheet != null) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              _restoreFeedbackInSheet!,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppConstants.textMuted,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ],
+                      );
                     },
-                    child: Text(
-                      'Restore Purchases',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: AppConstants.textMuted,
-                        decoration: TextDecoration.underline,
-                      ),
-                    ),
                   ),
-                ),
+                ],
 
                 const SizedBox(height: 12),
 
@@ -671,8 +729,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   children: [
                     GestureDetector(
                       onTap: () => launchUrl(
-                        Uri.parse(
-                            'https://xius-snu.github.io/silsigan/privacy'),
+                        Uri.parse(AppConstants.privacyPolicyUrl),
                         mode: LaunchMode.externalApplication,
                       ),
                       child: Text(
@@ -695,7 +752,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     GestureDetector(
                       onTap: () => launchUrl(
                         Uri.parse(
-                            'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/'),
+                          Platform.isIOS
+                              ? AppConstants.appleEulaUrl
+                              : AppConstants.termsOfUseUrl,
+                        ),
                         mode: LaunchMode.externalApplication,
                       ),
                       child: Text(
@@ -795,134 +855,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
         SnackBar(content: Text('$label added!')),
       );
     }
-  }
-
-  static const _androidMockPackages = [
-    {'label': '1 Hour', 'price': '\$0.99', 'per': '\$0.99/hr', 'hours': 1},
-    {
-      'label': '5 Hours',
-      'price': '\$2.99',
-      'per': '\$0.60/hr',
-      'hours': 5,
-      'discount': '40% OFF'
-    },
-    {
-      'label': '10 Hours',
-      'price': '\$5.99',
-      'per': '\$0.60/hr',
-      'hours': 10,
-      'discount': '40% OFF',
-      'badge': 'POPULAR'
-    },
-    {
-      'label': '30 Hours',
-      'price': '\$14.99',
-      'per': '\$0.50/hr',
-      'hours': 30,
-      'discount': '50% OFF',
-      'badge': 'SAVE 50%'
-    },
-    {
-      'label': '50 Hours',
-      'price': '\$24.99',
-      'per': '\$0.50/hr',
-      'hours': 50,
-      'discount': '50% OFF',
-      'badge': 'BEST VALUE'
-    },
-  ];
-
-  Widget _buildMockPackageCard(BuildContext ctx, Map<String, Object> pkg) {
-    final label = pkg['label'] as String;
-    final price = pkg['price'] as String;
-    final perHour = pkg['per'] as String;
-    final badge = pkg['badge'] as String?;
-    final discount = pkg['discount'] as String?;
-    final hasBadge = badge != null;
-    final hasDiscount = discount != null;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: GestureDetector(
-        onTap: () {
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            const SnackBar(
-                content: Text('Purchases are not available on Android yet')),
-          );
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: hasBadge
-                ? AppConstants.cardHighlightColor
-                : AppConstants.cardColor,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: hasBadge
-                  ? AppConstants.cardHighlightBorderColor
-                  : AppConstants.cardBorderColor,
-              width: hasBadge ? 1.5 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(label,
-                            style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: AppConstants.textPrimary)),
-                        if (hasBadge) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF2C2C2E),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(badge,
-                                style: const TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.white)),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Text(perHour,
-                        style: TextStyle(
-                            fontSize: 12, color: AppConstants.textMuted)),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(price,
-                      style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                          color: AppConstants.textPrimary)),
-                  if (hasDiscount)
-                    Text(discount,
-                        style: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF4CAF50))),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Widget _buildRcPackageCard(BuildContext ctx, Package rcPkg) {
@@ -1035,6 +967,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  /// Mic is required to start, except desktop speaker-only capture which
+  /// listens to the output device and never opens the microphone.
+  /// On Android 13+ we also ask for notifications so the recording foreground
+  /// service can show its persistent notice. Notification denial must not
+  /// block capture.
+  Future<PermissionStatus> _requestRecordingPermissions() async {
+    if (isDesktopPlatform &&
+        ref.read(desktopAudioSettingsProvider).source ==
+            DesktopAudioSource.speaker) {
+      return PermissionStatus.granted;
+    }
+    if (!(Platform.isAndroid || Platform.isIOS || Platform.isWindows)) {
+      return PermissionStatus.granted;
+    }
+    final status = await Permission.microphone.request();
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
+    return status;
+  }
+
   Future<void> _startRecording() async {
     if (_isStartingRecording) return;
 
@@ -1049,10 +1002,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // attach that stale (shorter) audio to the continued session.
     await _cleanupPendingSaveAudio();
 
-    final needsPermission = Platform.isAndroid || Platform.isIOS;
-    final status = needsPermission
-        ? await Permission.microphone.request()
-        : PermissionStatus.granted;
+    final status = await _requestRecordingPermissions();
     if (!status.isGranted) {
       if (mounted) {
         showDialog(
@@ -1060,7 +1010,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
           builder: (ctx) => AlertDialog(
             title: const Text('Microphone Required'),
             content: const Text(
-              'This app needs microphone access to transcribe Korean speech. '
+              'This app needs microphone access to transcribe speech. '
               'Please enable it in Settings.',
             ),
             actions: [
@@ -1383,7 +1333,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
             ? AppConstants.lineByLineEndpointLatencyAdjustmentLevel
             : null,
       ));
-      await _audioService.start();
+      await _startAudioCapture();
       // The recording state now holds the toggle gate; the flag must clear
       // here or the toggle would stay dimmed after the session ends.
       _isStartingRecording = false;
@@ -1771,6 +1721,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  Future<void> _startAudioCapture() {
+    return _audioService.start(
+      desktop:
+          isDesktopPlatform ? ref.read(desktopAudioSettingsProvider) : null,
+    );
+  }
+
   void _toggleDarkMode() {
     HapticFeedback.selectionClick();
     final next = !ref.read(darkModeProvider);
@@ -1882,6 +1839,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(ttsRateProvider.notifier).state = ttsRate;
     final diarization = await loadSavedDiarizationEnabled();
     ref.read(diarizationEnabledProvider.notifier).state = diarization;
+    if (isDesktopPlatform) {
+      final desktopAudio = await loadSavedDesktopAudioSettings();
+      ref.read(desktopAudioSettingsProvider.notifier).state = desktopAudio;
+    }
   }
 
   /// True while any mode's session is live or in its optimistic-start window.
@@ -2219,10 +2180,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _convWantActive = true;
     _convStarting = true;
 
-    final needsPermission = Platform.isAndroid || Platform.isIOS;
-    final status = needsPermission
-        ? await Permission.microphone.request()
-        : PermissionStatus.granted;
+    final status = await _requestRecordingPermissions();
     if (!status.isGranted) {
       _convWantActive = false;
       _convStarting = false;
@@ -2260,7 +2218,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _convConnectFuture = _sonioxService.connect(
         twoWayLanguageCodes: [myLang.code, theirLang.code],
       );
-      await _audioService.start();
+      await _startAudioCapture();
       _recordingStartedAt = DateTime.now();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
@@ -2477,10 +2435,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _quickHolding = true;
     _quickStarting = true;
 
-    final needsPermission = Platform.isAndroid || Platform.isIOS;
-    final status = needsPermission
-        ? await Permission.microphone.request()
-        : PermissionStatus.granted;
+    final status = await _requestRecordingPermissions();
     if (!status.isGranted) {
       _quickHolding = false;
       _quickStarting = false;
@@ -2517,7 +2472,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         forceTranslation: true,
         languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
       );
-      await _audioService.start();
+      await _startAudioCapture();
       _recordingStartedAt = DateTime.now();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
@@ -2880,6 +2835,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       color: AppConstants.textSecondary,
                     ),
                   ),
+                  if (isDesktopPlatform) ...[
+                    const SizedBox(width: 16),
+                    DesktopAudioSourceButton(
+                      enabled: !isRecordingOrProcessing,
+                    ),
+                  ],
                   const SizedBox(width: 16),
                   PopupMenuButton<DisplayMode>(
                     onSelected: (mode) {
@@ -3078,6 +3039,27 @@ class _MainScreenState extends ConsumerState<MainScreen>
                       color: AppConstants.textSecondary,
                     ),
                   ),
+                  const SizedBox(width: 16),
+                  // Account sync — optional, so it sits last and stays quiet
+                  // (outlined) until the user actually signs in. Scoped to its
+                  // own Consumer: the header rebuilds on every Soniox token in
+                  // the panels below, and this must not widen that.
+                  Consumer(builder: (context, ref, _) {
+                    final linked = ref.watch(accountProvider).linked;
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _showAccountSheet,
+                      child: Icon(
+                        linked
+                            ? Icons.account_circle
+                            : Icons.account_circle_outlined,
+                        size: 24,
+                        color: linked
+                            ? AppConstants.textPrimary
+                            : AppConstants.textSecondary,
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),

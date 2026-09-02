@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +12,7 @@ import '../../models/transcript_session.dart';
 import '../../models/word_timestamp.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
+import '../../services/session_audio_player.dart';
 import '../../services/sync_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
@@ -48,7 +49,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   TranscriptSession? _selectedSession;
 
   // Audio player
-  final FlutterSoundPlayer _player = FlutterSoundPlayer();
+  final SessionAudioPlayer _player = SessionAudioPlayer();
   bool _playerInitialized = false;
 
   // Word timestamps for tap-to-seek (per-line, for transcription)
@@ -98,16 +99,20 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   Future<void> _initPlayer() async {
-    await _player.openPlayer();
-    _player.setSubscriptionDuration(const Duration(milliseconds: 100));
-    _player.onProgress?.listen((event) {
-      if (!mounted) return;
-      _position.value = event.position;
-      if (event.duration > Duration.zero) {
-        _duration.value = event.duration;
-      }
-    });
-    _playerInitialized = true;
+    try {
+      await _player.openPlayer(
+        onProgress: (position, duration) {
+          if (!mounted) return;
+          _position.value = position;
+          if (duration > Duration.zero) {
+            _duration.value = duration;
+          }
+        },
+      );
+      _playerInitialized = true;
+    } catch (e) {
+      debugPrint('Session audio player init failed: $e');
+    }
   }
 
   @override
@@ -212,6 +217,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           _isEditingTitle = false;
         });
         ref.invalidate(sessionHistoryProvider);
+        // Push the rename up so the other devices on a synced account see it —
+        // the pull side only fetches sessions it doesn't already have, so an
+        // edit to an existing one has to be sent.
+        SyncService.instance.uploadSession(updated);
       }
     } else {
       setState(() => _isEditingTitle = false);
@@ -432,6 +441,13 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     return '$minutes:$seconds';
   }
 
+  /// Android's system nav bar (3-button or gesture pill) sits under sheet
+  /// content; modal routes are not inside the scaffold SafeArea. iOS's home
+  /// indicator doesn't collide the same way. viewPadding stays correct if a
+  /// keyboard is up, unlike padding.bottom which is consumed.
+  double get _androidNavInset =>
+      Platform.isAndroid ? MediaQuery.of(context).viewPadding.bottom : 0.0;
+
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
@@ -528,7 +544,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
               }
               return ListView.builder(
                 controller: scrollController,
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: EdgeInsets.only(
+                  top: 8,
+                  bottom: 8 + _androidNavInset,
+                ),
                 itemCount: sessions.length,
                 itemBuilder: (context, index) {
                   final session = sessions[index];
@@ -634,7 +653,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                     fullText: session.vietnameseFull,
                   ),
                 ],
-                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height: 16 + (hasAudio ? 0 : _androidNavInset),
+                  ),
+                ),
               ],
             ),
           ),
@@ -664,7 +687,8 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   Widget _buildAudioPlayer() {
     return Container(
       color: AppConstants.panelColor,
-      padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 24),
+      padding: EdgeInsets.only(
+          left: 16, right: 16, top: 12, bottom: 24 + _androidNavInset),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

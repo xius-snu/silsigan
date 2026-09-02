@@ -28,6 +28,10 @@ class SyncService {
       if (userId == null) return;
       if (UserService.instance.authToken == null) return;
 
+      // Audio deliberately stays local: raw PCM16 WAV runs ~172 MB per hour,
+      // which neither the 50 MB request cap nor Postgres storage can absorb.
+      // Word timestamps and the title are kilobytes and do sync, so a session
+      // opened on another device keeps its name and line-by-line structure.
       final body = json.encode({
         'userId': userId,
         'createdAt': session.createdAt,
@@ -35,6 +39,8 @@ class SyncService {
         'translation': session.vietnameseFull,
         'transcriptionPreview': session.koreanPreview,
         'translationPreview': session.vietnamesePreview,
+        'timestampsJson': session.timestampsJson,
+        'title': session.title,
       });
 
       var response = await http
@@ -155,6 +161,10 @@ class SyncService {
         vietnameseFull: session['translation'] as String,
         koreanPreview: session['transcription_preview'] as String,
         vietnamesePreview: session['translation_preview'] as String,
+        timestampsJson: session['timestamps_json'] as String?,
+        title: session['title'] as String?,
+        // audioPath stays null — audio never leaves the device that recorded
+        // it, so a synced session simply shows no player elsewhere.
       );
 
       await DatabaseService.instance.insertSession(newSession);

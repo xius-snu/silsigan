@@ -4,6 +4,32 @@ class AppConstants {
   // Server
   static const serverBaseUrl = 'https://silsigan.onrender.com';
 
+  // Store / legal
+  static const privacyPolicyUrl = 'https://xius-snu.github.io/silsigan/privacy';
+  static const termsOfUseUrl = 'https://xius-snu.github.io/silsigan/terms';
+  static const appleEulaUrl =
+      'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
+  static const appStoreUrl =
+      'https://apps.apple.com/us/app/silsigan/id6760031656';
+  static const playStoreUrl =
+      'https://play.google.com/store/apps/details?id=com.silsigan.app';
+
+  // ── Account sync (optional Google / Apple login) ──
+  // OAuth client IDs are public identifiers, not secrets — they ship in the
+  // binary either way (iOS needs the reversed ID as a URL scheme in
+  // Info.plist). Leaving a value empty hides that sign-in button rather than
+  // failing at tap time. Register these in Google Cloud Console → Credentials
+  // and mirror them into the server's GOOGLE_CLIENT_IDS.
+  static const googleIosClientId = '287776800654-rebo3m3pe7fp1ape20ktqk5mc7e2pn50.apps.googleusercontent.com';
+  // The Web client ID. Android's Credential Manager flow needs it as the
+  // "server" client so the ID token's audience is stable across platforms.
+  static const googleServerClientId = '287776800654-eqfu7k983n904heci4qdm1ffj9ekd5vi.apps.googleusercontent.com';
+
+  /// Free allowance a device starts with, mirrored from the server's
+  /// FREE_BASE_MINUTES. Only used for copy in the account sheet — the server
+  /// stays authoritative for the real balance.
+  static const freeBaseMinutes = 30;
+
   // Soniox (proxied through our server)
   static const sonioxProxyUrl = 'wss://proxy.silsigan.xyz/ws/soniox';
   static const sonioxLimitedProxyUrl =
