@@ -20,7 +20,7 @@ class DatabaseService {
     final fullPath = '$dbPath/silsigan.db';
     return openDatabase(
       fullPath,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE sessions (
@@ -32,9 +32,13 @@ class DatabaseService {
             vietnamese_preview TEXT NOT NULL,
             audio_path TEXT,
             timestamps_json TEXT,
-            title TEXT
+            title TEXT,
+            updated_at TEXT
           )
         ''');
+        await db.execute(
+          'CREATE UNIQUE INDEX idx_sessions_created_at ON sessions(created_at)',
+        );
         await db.execute('''
           CREATE TABLE autosave_draft (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -44,6 +48,13 @@ class DatabaseService {
             target_language TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE session_tombstones (
+            created_at TEXT PRIMARY KEY,
+            deleted_at TEXT NOT NULL,
+            synced INTEGER NOT NULL DEFAULT 0
           )
         ''');
       },
@@ -74,6 +85,29 @@ class DatabaseService {
         if (oldVersion < 5) {
           await db.execute(
             'ALTER TABLE sessions ADD COLUMN title TEXT',
+          );
+        }
+        if (oldVersion < 6) {
+          await db.execute(
+            'ALTER TABLE sessions ADD COLUMN updated_at TEXT',
+          );
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS session_tombstones (
+              created_at TEXT PRIMARY KEY,
+              deleted_at TEXT NOT NULL,
+              synced INTEGER NOT NULL DEFAULT 0
+            )
+          ''');
+          // Keep the newest row when the same created_at was inserted twice
+          // (sync without a unique key), then lock the identity going forward.
+          await db.execute('''
+            DELETE FROM sessions WHERE id NOT IN (
+              SELECT MAX(id) FROM sessions GROUP BY created_at
+            )
+          ''');
+          await db.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_created_at '
+            'ON sessions(created_at)',
           );
         }
       },
@@ -110,7 +144,11 @@ class DatabaseService {
 
   Future<List<TranscriptSession>> getAllSessions() async {
     final db = await database;
-    final maps = await db.query('sessions', orderBy: 'created_at DESC');
+    final maps = await db.rawQuery('''
+      SELECT s.* FROM sessions s
+      WHERE s.created_at NOT IN (SELECT created_at FROM session_tombstones)
+      ORDER BY s.created_at DESC
+    ''');
     return maps.map((map) => TranscriptSession.fromMap(map)).toList();
   }
 
@@ -127,7 +165,27 @@ class DatabaseService {
 
   Future<int> insertSession(TranscriptSession session) async {
     final db = await database;
-    return db.insert('sessions', session.toMap());
+    final values = session.toMap();
+    values['updated_at'] ??=
+        session.updatedAt ?? DateTime.now().toUtc().toIso8601String();
+    try {
+      return await db.insert('sessions', values);
+    } catch (_) {
+      // Unique created_at — another sync flight inserted first. Patch the
+      // cloud fields and keep the existing row (and its local audio_path).
+      await updateSessionFromServer(
+        createdAt: session.createdAt,
+        koreanFull: session.koreanFull,
+        vietnameseFull: session.vietnameseFull,
+        koreanPreview: session.koreanPreview,
+        vietnamesePreview: session.vietnamesePreview,
+        timestampsJson: session.timestampsJson,
+        title: session.title,
+        updatedAt: session.updatedAt ?? values['updated_at'] as String?,
+      );
+      final existing = await getSessionByCreatedAt(session.createdAt);
+      return existing?.id ?? 0;
+    }
   }
 
   Future<TranscriptSession?> getSessionByCreatedAt(String createdAt) async {
@@ -143,11 +201,17 @@ class DatabaseService {
   }
 
   Future<void> updateSessionTitleByCreatedAt(
-      String createdAt, String title) async {
+    String createdAt,
+    String title, {
+    String? updatedAt,
+  }) async {
     final db = await database;
     await db.update(
       'sessions',
-      {'title': title},
+      {
+        'title': title,
+        'updated_at': updatedAt ?? DateTime.now().toUtc().toIso8601String(),
+      },
       where: 'created_at = ?',
       whereArgs: [createdAt],
     );
@@ -163,6 +227,7 @@ class DatabaseService {
     required String vietnamesePreview,
     String? timestampsJson,
     String? title,
+    String? updatedAt,
   }) async {
     final db = await database;
     final values = <String, dynamic>{
@@ -177,6 +242,9 @@ class DatabaseService {
     if (title != null) {
       values['title'] = title;
     }
+    if (updatedAt != null) {
+      values['updated_at'] = updatedAt;
+    }
     await db.update(
       'sessions',
       values,
@@ -185,7 +253,11 @@ class DatabaseService {
     );
   }
 
-  Future<void> deleteSessionByCreatedAt(String createdAt) async {
+  Future<void> deleteSessionByCreatedAt(
+    String createdAt, {
+    bool fromServer = false,
+  }) async {
+    await addTombstone(createdAt, synced: fromServer);
     final db = await database;
     final maps = await db.query(
       'sessions',
@@ -205,17 +277,84 @@ class DatabaseService {
         .delete('sessions', where: 'created_at = ?', whereArgs: [createdAt]);
   }
 
+  Future<void> addTombstone(String createdAt, {bool synced = false}) async {
+    final db = await database;
+    await db.rawInsert(
+      '''
+      INSERT INTO session_tombstones (created_at, deleted_at, synced)
+      VALUES (?, ?, ?)
+      ON CONFLICT(created_at) DO UPDATE SET
+        synced = CASE
+          WHEN session_tombstones.synced = 1 OR excluded.synced = 1 THEN 1
+          ELSE 0
+        END
+      ''',
+      [
+        createdAt,
+        DateTime.now().toUtc().toIso8601String(),
+        synced ? 1 : 0,
+      ],
+    );
+  }
+
+  Future<Set<String>> getTombstoneCreatedAts() async {
+    final db = await database;
+    final maps = await db.query('session_tombstones', columns: ['created_at']);
+    return maps.map((m) => m['created_at'] as String).toSet();
+  }
+
+  Future<List<String>> getUnsyncedTombstones() async {
+    final db = await database;
+    final maps = await db.query(
+      'session_tombstones',
+      columns: ['created_at'],
+      where: 'synced = 0',
+    );
+    return maps.map((m) => m['created_at'] as String).toList();
+  }
+
+  Future<bool> isTombstoned(String createdAt) async {
+    final db = await database;
+    final maps = await db.query(
+      'session_tombstones',
+      columns: ['created_at'],
+      where: 'created_at = ?',
+      whereArgs: [createdAt],
+      limit: 1,
+    );
+    return maps.isNotEmpty;
+  }
+
+  Future<void> markTombstonesSynced(Iterable<String> createdAts) async {
+    if (createdAts.isEmpty) return;
+    final db = await database;
+    final batch = db.batch();
+    for (final createdAt in createdAts) {
+      batch.update(
+        'session_tombstones',
+        {'synced': 1},
+        where: 'created_at = ?',
+        whereArgs: [createdAt],
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
   Future<int> getSessionCount() async {
     final db = await database;
     final result = await db.rawQuery('SELECT COUNT(*) as cnt FROM sessions');
     return (result.first['cnt'] as int?) ?? 0;
   }
 
-  Future<void> updateSessionTitle(int id, String title) async {
+  Future<void> updateSessionTitle(int id, String title,
+      {String? updatedAt}) async {
     final db = await database;
     await db.update(
       'sessions',
-      {'title': title},
+      {
+        'title': title,
+        'updated_at': updatedAt ?? DateTime.now().toUtc().toIso8601String(),
+      },
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -245,8 +384,10 @@ class DatabaseService {
   }
 
   Future<int> deleteSession(int id) async {
-    // Also delete the audio file if it exists
     final session = await getSession(id);
+    if (session != null) {
+      await addTombstone(session.createdAt);
+    }
     if (session?.audioPath != null) {
       final file = File(session!.audioPath!);
       if (await file.exists()) {

@@ -36,10 +36,7 @@ bool isScreenAudioDenied(Object e) {
 
 String recordingStartErrorMessage(Object e) {
   if (isScreenAudioDenied(e)) return kScreenAudioDeniedMessage;
-  if (e is PlatformException) {
-    return "Couldn't start recording. You can try again.";
-  }
-  return 'Failed to start: $e';
+  return "Couldn't start recording. You can try again.";
 }
 
 String _captureErrorText(Object e) {

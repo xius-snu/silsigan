@@ -52,6 +52,10 @@ private final class DesktopAudioCapturePlugin: NSObject {
   func shutdown() {
     startTimeout?.cancel()
     stopWork?.cancel()
+    failPending(
+      code: "CANCELLED",
+      message: "Screen audio wasn’t started. Choose Silsigan in the broadcast picker and tap Start Broadcast."
+    )
     removeObservers()
     picker?.removeFromSuperview()
     picker = nil
@@ -110,18 +114,11 @@ private final class DesktopAudioCapturePlugin: NSObject {
     ring.reset()
     pendingStart = result
     let timeout = DispatchWorkItem { [weak self] in
-      guard let self else { return }
-      if let pending = self.pendingStart {
-        self.pendingStart = nil
-        pending(
-          FlutterError(
-            code: "CANCELLED",
-            message:
-              "Screen audio wasn’t started. Choose Silsigan in the broadcast picker and tap Start Broadcast.",
-            details: nil
-          )
-        )
-      }
+      self?.failPending(
+        code: "CANCELLED",
+        message:
+          "Screen audio wasn’t started. Choose Silsigan in the broadcast picker and tap Start Broadcast."
+      )
     }
     startTimeout?.cancel()
     startTimeout = timeout
@@ -219,6 +216,20 @@ private final class DesktopAudioCapturePlugin: NSObject {
     stoppedObserver = nil
   }
 
+  private func failPending(code: String, message: String) {
+    startTimeout?.cancel()
+    startTimeout = nil
+    guard let pending = pendingStart else { return }
+    pendingStart = nil
+    pending(
+      FlutterError(
+        code: code,
+        message: message,
+        details: nil
+      )
+    )
+  }
+
   private func onBroadcastStarted() {
     startTimeout?.cancel()
     startTimeout = nil
@@ -229,17 +240,9 @@ private final class DesktopAudioCapturePlugin: NSObject {
   }
 
   private func onBroadcastStopped() {
-    startTimeout?.cancel()
-    startTimeout = nil
-    if let pending = pendingStart {
-      pendingStart = nil
-      pending(
-        FlutterError(
-          code: "CANCELLED",
-          message: "Broadcast ended before screen audio started",
-          details: nil
-        )
-      )
-    }
+    failPending(
+      code: "CANCELLED",
+      message: "Broadcast ended before screen audio started"
+    )
   }
 }

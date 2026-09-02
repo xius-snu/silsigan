@@ -319,6 +319,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         _resumeRecording();
       }
       _wasPaused = false;
+      unawaited(_syncCloudHistory());
     } else if (state == AppLifecycleState.paused) {
       _wasPaused = true;
       final recordingState = ref.read(recordingStateProvider);
@@ -366,9 +367,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (mounted) {
         final resumeMsg = isScreenAudioDenied(e)
             ? kScreenAudioDeniedMessage
-            : e is PlatformException
-                ? "Couldn't resume microphone"
-                : 'Failed to resume microphone: $e';
+            : "Couldn't resume microphone";
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(resumeMsg)),
         );
@@ -1338,6 +1337,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 : null,
           );
       if (_needsScreenSharePicker) {
+        try {
+          await _sonioxService.disconnect().timeout(const Duration(seconds: 2));
+        } catch (_) {}
         await _startAudioCapture();
         unawaited(connectProxy());
       } else {
@@ -1636,8 +1638,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
       }
     }
 
+    final now = DateTime.now();
     final session = TranscriptSession(
-      createdAt: DateTime.now().toIso8601String(),
+      createdAt: now.toIso8601String(),
       koreanFull: koreanFull,
       vietnameseFull: vietnameseFull,
       koreanPreview: koreanFull.length > AppConstants.previewMaxLength
@@ -1649,6 +1652,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       audioPath: audioPath,
       timestampsJson: timestampsJson,
       title: sessionTitle,
+      updatedAt: now.toUtc().toIso8601String(),
     );
 
     try {
@@ -1816,6 +1820,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   void _showSonioxError(String error) {
     if (!mounted) return;
     if (_awaitingCaptureStart) return;
+    // Leftover proxy errors after a cancelled start (or after stop) must not
+    // surface as a transcription failure — especially while the screen-share
+    // picker is still on screen.
+    if (ref.read(recordingStateProvider) == RecordingState.idle) return;
     final now = DateTime.now();
     if (_lastErrorShown != null &&
         now.difference(_lastErrorShown!).inSeconds < 10) {
@@ -1825,6 +1833,30 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(error)),
     );
+  }
+
+  DateTime? _lastCloudSyncAt;
+  bool _cloudSyncInFlight = false;
+
+  /// Pull remote deletes/titles and push local-only rows. Debounced so a
+  /// resume + history-open pair doesn't double-fetch.
+  Future<void> _syncCloudHistory() async {
+    if (_cloudSyncInFlight) return;
+    final last = _lastCloudSyncAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 8)) {
+      return;
+    }
+    _cloudSyncInFlight = true;
+    _lastCloudSyncAt = DateTime.now();
+    try {
+      final changed = await SyncService.instance.syncFromServer();
+      if (changed && mounted) {
+        ref.invalidate(sessionHistoryProvider);
+      }
+    } finally {
+      _cloudSyncInFlight = false;
+    }
   }
 
   Future<void> _startAudioCapture() {
@@ -2319,6 +2351,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
             twoWayLanguageCodes: [myLang.code, theirLang.code],
           );
       if (_needsScreenSharePicker) {
+        try {
+          await _sonioxService.disconnect().timeout(const Duration(seconds: 2));
+        } catch (_) {}
         await _startAudioCapture();
         _convConnectFuture = connectProxy();
       } else {
@@ -2572,6 +2607,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
             languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
           );
       if (_needsScreenSharePicker) {
+        try {
+          await _sonioxService.disconnect().timeout(const Duration(seconds: 2));
+        } catch (_) {}
         await _startAudioCapture();
         _quickConnectFuture = connectProxy();
       } else {

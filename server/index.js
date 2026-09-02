@@ -460,6 +460,7 @@ async function start() {
     // device keeps its name and line-by-line structure.
     await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS timestamps_json TEXT`);
     await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS title TEXT`);
+    await pool.query(`ALTER TABLE saved_sessions ADD COLUMN IF NOT EXISTS updated_at TEXT`);
 
     // Tombstones so a delete on one device cannot be bounced back by another
     // device that still has the row and would re-upload it.
@@ -1302,41 +1303,84 @@ async function start() {
 
     // Save/upsert a session
     fastify.post('/api/sessions/save', async (req, reply) => {
-        const { userId, createdAt, transcription, translation, transcriptionPreview, translationPreview, audioBase64, timestampsJson, title } = req.body;
+        const { userId, createdAt, transcription, translation, transcriptionPreview, translationPreview, audioBase64, timestampsJson, title, updatedAt } = req.body;
         if (!userId || !createdAt || transcription == null || translation == null) {
             return reply.code(400).send({ error: 'Missing fields' });
         }
+        const client = await pool.connect();
         try {
-            const tomb = await pool.query(
+            await client.query('BEGIN');
+            const tomb = await client.query(
                 'SELECT 1 FROM saved_session_deletes WHERE user_id = $1 AND created_at = $2',
                 [userId, createdAt]
             );
             if (tomb.rows.length > 0) {
                 // Deleted stays deleted — do not resurrect from a device that
                 // still holds the local row.
-                await pool.query(
+                await client.query(
                     'DELETE FROM saved_sessions WHERE user_id = $1 AND created_at = $2',
                     [userId, createdAt]
                 );
+                await client.query('COMMIT');
                 return { success: true, deleted: true };
             }
             const audioData = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
-            await pool.query(`
-                INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data, timestamps_json, title)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            const incomingUpdatedAt = (typeof updatedAt === 'string' && updatedAt.trim())
+                ? updatedAt.trim()
+                : new Date().toISOString();
+            const incomingTitle = (typeof title === 'string' && title.trim()) ? title.trim() : null;
+            await client.query(`
+                INSERT INTO saved_sessions (user_id, created_at, transcription, translation, transcription_preview, translation_preview, audio_data, timestamps_json, title, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (user_id, created_at) DO UPDATE SET
-                    transcription = EXCLUDED.transcription,
-                    translation = EXCLUDED.translation,
-                    transcription_preview = EXCLUDED.transcription_preview,
-                    translation_preview = EXCLUDED.translation_preview,
+                    transcription = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.transcription
+                        ELSE saved_sessions.transcription
+                    END,
+                    translation = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.translation
+                        ELSE saved_sessions.translation
+                    END,
+                    transcription_preview = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.transcription_preview
+                        ELSE saved_sessions.transcription_preview
+                    END,
+                    translation_preview = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.translation_preview
+                        ELSE saved_sessions.translation_preview
+                    END,
                     audio_data = COALESCE(EXCLUDED.audio_data, saved_sessions.audio_data),
                     timestamps_json = COALESCE(EXCLUDED.timestamps_json, saved_sessions.timestamps_json),
-                    title = COALESCE(EXCLUDED.title, saved_sessions.title)
-            `, [userId, createdAt, transcription, translation, transcriptionPreview || '', translationPreview || '', audioData, timestampsJson || null, title || null]);
+                    title = CASE
+                        WHEN EXCLUDED.title IS NULL THEN saved_sessions.title
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.title
+                        ELSE COALESCE(saved_sessions.title, EXCLUDED.title)
+                    END,
+                    updated_at = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN EXCLUDED.updated_at
+                        ELSE saved_sessions.updated_at
+                    END
+            `, [userId, createdAt, transcription, translation, transcriptionPreview || '', translationPreview || '', audioData, timestampsJson || null, incomingTitle, incomingUpdatedAt]);
+            await client.query('COMMIT');
             return { success: true };
         } catch (e) {
+            try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
             fastify.log.error('Save session error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
+        } finally {
+            client.release();
         }
     });
 
@@ -1346,7 +1390,7 @@ async function start() {
         if (!userId) return reply.code(400).send({ error: 'Missing userId' });
         try {
             const res = await pool.query(`
-                SELECT id, created_at, transcription_preview, translation_preview, title,
+                SELECT id, created_at, transcription_preview, translation_preview, title, updated_at,
                        (audio_data IS NOT NULL) as has_audio
                 FROM saved_sessions
                 WHERE user_id = $1
@@ -1375,11 +1419,15 @@ async function start() {
         if (!userId || !sessionId) return reply.code(400).send({ error: 'Missing fields' });
         try {
             const res = await pool.query(`
-                SELECT id, created_at, transcription, translation,
-                       transcription_preview, translation_preview,
-                       timestamps_json, title, audio_data
-                FROM saved_sessions
-                WHERE id = $1 AND user_id = $2
+                SELECT s.id, s.created_at, s.transcription, s.translation,
+                       s.transcription_preview, s.translation_preview,
+                       s.timestamps_json, s.title, s.updated_at, s.audio_data
+                FROM saved_sessions s
+                WHERE s.id = $1 AND s.user_id = $2
+                  AND NOT EXISTS (
+                      SELECT 1 FROM saved_session_deletes d
+                       WHERE d.user_id = s.user_id AND d.created_at = s.created_at
+                  )
             `, [sessionId, userId]);
             if (res.rows.length === 0) return reply.code(404).send({ error: 'Session not found' });
             const { audio_data, ...rest } = res.rows[0];
@@ -1399,21 +1447,27 @@ async function start() {
     fastify.post('/api/sessions/delete', async (req, reply) => {
         const { userId, createdAt } = req.body;
         if (!userId || !createdAt) return reply.code(400).send({ error: 'Missing fields' });
+        const client = await pool.connect();
         try {
-            await pool.query(
+            await client.query('BEGIN');
+            await client.query(
                 `INSERT INTO saved_session_deletes (user_id, created_at)
                  VALUES ($1, $2)
                  ON CONFLICT (user_id, created_at) DO NOTHING`,
                 [userId, createdAt]
             );
-            await pool.query(
+            await client.query(
                 'DELETE FROM saved_sessions WHERE user_id = $1 AND created_at = $2',
                 [userId, createdAt]
             );
+            await client.query('COMMIT');
             return { success: true };
         } catch (e) {
+            try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
             fastify.log.error('Delete session error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
+        } finally {
+            client.release();
         }
     });
 
@@ -1562,15 +1616,23 @@ async function start() {
                 `INSERT INTO saved_sessions
                      (user_id, created_at, transcription, translation,
                       transcription_preview, translation_preview,
-                      timestamps_json, title, audio_data)
+                      timestamps_json, title, updated_at, audio_data)
                  SELECT $2, created_at, transcription, translation,
                         transcription_preview, translation_preview,
-                        timestamps_json, title, audio_data
+                        timestamps_json, title, updated_at, audio_data
                  FROM saved_sessions WHERE user_id = $1
                    AND created_at NOT IN (
                        SELECT created_at FROM saved_session_deletes WHERE user_id = $2
                    )
-                 ON CONFLICT (user_id, created_at) DO NOTHING`,
+                 ON CONFLICT (user_id, created_at) DO UPDATE SET
+                    title = COALESCE(EXCLUDED.title, saved_sessions.title),
+                    timestamps_json = COALESCE(EXCLUDED.timestamps_json, saved_sessions.timestamps_json),
+                    updated_at = CASE
+                        WHEN saved_sessions.updated_at IS NULL
+                          OR EXCLUDED.updated_at::timestamptz >= saved_sessions.updated_at::timestamptz
+                        THEN COALESCE(EXCLUDED.updated_at, saved_sessions.updated_at)
+                        ELSE saved_sessions.updated_at
+                    END`,
                 [deviceUserId, accountId]
             );
             await client.query('DELETE FROM saved_sessions WHERE user_id = $1', [deviceUserId]);

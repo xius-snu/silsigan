@@ -40,6 +40,8 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
     }
 
     fun unregister() {
+        waitingForConsent = false
+        notifyStartFinished(false, "Screen-audio permission was not granted")
         channel?.setMethodCallHandler(null)
         channel = null
         activity = null
@@ -69,6 +71,9 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
         }
         if (resultCode != Activity.RESULT_OK || data == null) {
             notifyStartFinished(false, "Screen-audio permission was not granted")
+            return true
+        }
+        if (pendingStart == null) {
             return true
         }
         val intent = Intent(act, PlaybackCaptureService::class.java).apply {
@@ -152,19 +157,27 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
         try {
             // API 34+: default the picker to the entire screen, not a single
             // app. ReplayKit on iOS has no equivalent, so this is Android-only.
-            val intent = if (Build.VERSION.SDK_INT >= 34) {
-                mgr.createScreenCaptureIntent(
-                    MediaProjectionConfig.createConfigForDefaultDisplay(),
-                )
-            } else {
-                mgr.createScreenCaptureIntent()
-            }
+            val intent = createCaptureIntent(mgr)
             act.startActivityForResult(intent, REQUEST_PROJECTION)
         } catch (e: Exception) {
             waitingForConsent = false
             pendingStart = null
             result.error("CAPTURE", "Could not show capture permission: ${e.message}", null)
         }
+    }
+
+    @Suppress("NewApi")
+    private fun createCaptureIntent(mgr: MediaProjectionManager): Intent {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                return mgr.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay(),
+                )
+            } catch (_: Exception) {
+                // Some OEM builds reject the config form; fall through.
+            }
+        }
+        return mgr.createScreenCaptureIntent()
     }
 
     private fun scheduleStop() {

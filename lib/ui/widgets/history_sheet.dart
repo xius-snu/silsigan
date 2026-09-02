@@ -226,7 +226,6 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     final id = _selectedSession!.id;
     if (id != null) {
       await DatabaseService.instance.updateSessionTitle(id, newTitle);
-      // Reload the session to get updated data
       final updated = await DatabaseService.instance.getSession(id);
       if (updated != null && mounted) {
         setState(() {
@@ -234,10 +233,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           _isEditingTitle = false;
         });
         ref.invalidate(sessionHistoryProvider);
-        // Push the rename up so the other devices on a synced account see it —
-        // the pull side only fetches sessions it doesn't already have, so an
-        // edit to an existing one has to be sent.
-        SyncService.instance.uploadSession(updated);
+        unawaited(SyncService.instance.uploadSession(updated));
       }
     } else {
       setState(() => _isEditingTitle = false);
@@ -373,8 +369,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       if (_isPlaying) await _player.stopPlayer();
       final createdAt = _selectedSession!.createdAt;
       await DatabaseService.instance.deleteSession(_selectedSession!.id!);
-      // Delete from server (fire-and-forget)
-      SyncService.instance.deleteFromServer(createdAt);
+      unawaited(SyncService.instance.deleteFromServer(createdAt).then((ok) {
+        if (ok) {
+          return DatabaseService.instance.markTombstonesSynced([createdAt]);
+        }
+      }).catchError((_) {}));
       UserService.instance.reportActivity('session_delete');
       ref.invalidate(sessionHistoryProvider);
       _goBackToList();
