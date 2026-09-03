@@ -22,15 +22,13 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>NSExtension</key>
 	<dict>
-		<key>NSExtensionAttributes</key>
-		<dict>
-			<key>RPBroadcastProcessMode</key>
-			<string>RPBroadcastProcessModeSampleBuffer</string>
-		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.broadcast-services-upload</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).SampleHandler</string>
+		<!-- Xcode 26 / altool 90362 looks here, not under NSExtensionAttributes. -->
+		<key>RPBroadcastProcessMode</key>
+		<string>RPBroadcastProcessModeSampleBuffer</string>
 	</dict>
 </dict>
 </plist>
