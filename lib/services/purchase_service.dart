@@ -30,12 +30,14 @@ class PurchaseService {
 
   static String? get _platformApiKey {
     if (kIsWeb) return null;
-    if (Platform.isIOS) return _iosApiKey;
+    // Same Apple public SDK key for iOS and the Mac App Store build.
+    if (Platform.isIOS || Platform.isMacOS) return _iosApiKey;
     if (Platform.isAndroid) return _androidApiKey;
     return null;
   }
 
-  /// RevenueCat is iOS/Android only. Desktop shows the customer ID instead.
+  /// StoreKit / Play Billing. Windows and Linux have no store, so the
+  /// purchase sheet shows the customer ID instead of package cards.
   static bool get isSupported => _platformApiKey != null;
 
   bool _initialized = false;

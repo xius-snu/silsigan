@@ -661,16 +661,17 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 ),
                 const SizedBox(height: 16),
 
-                // Package cards — same RevenueCat offering on iOS and Android
+                // Package cards — same RevenueCat offering on iOS, macOS, Android
                 if (rcPackages.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Text(
                       PurchaseService.isSupported
                           ? 'Unable to load packages. Please try again later.'
-                          : 'In-app purchases are not available on Windows. '
-                              'Use the iOS or Android app, or quote your ID '
-                              'above for help with your account.',
+                          : 'In-app purchases are not available on this '
+                              'platform. Use the iOS, Android, or Mac App Store '
+                              'app, or quote your ID above for help with your '
+                              'account.',
                       style: TextStyle(
                           fontSize: 14, color: AppConstants.textMuted),
                       textAlign: TextAlign.center,

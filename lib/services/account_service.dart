@@ -257,8 +257,10 @@ class AccountService {
         return const AccountResult(AccountResultKind.cancelled);
       }
       debugPrint('Apple sign-in failed: ${e.code} ${e.message}');
-      return const AccountResult(AccountResultKind.failed,
-          message: 'Sign in with Apple failed.');
+      return AccountResult(AccountResultKind.failed,
+          message: e.message.isNotEmpty
+              ? 'Sign in with Apple failed. ${e.message}'
+              : 'Sign in with Apple failed.');
     } catch (e) {
       debugPrint('Apple sign-in error: $e');
       return const AccountResult(AccountResultKind.failed,

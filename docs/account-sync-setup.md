@@ -139,9 +139,12 @@ Finally set `GOOGLE_CLIENT_IDS` on Render to all three IDs, comma-separated.
 2. Regenerate the provisioning profiles (Codemagic will do this automatically if
    it manages signing; otherwise refresh them in Xcode).
 
-`ios/Runner/Runner.entitlements` and the `CODE_SIGN_ENTITLEMENTS` build setting
-are already committed. **The iOS build will fail to sign until step 1 is done** —
-the entitlement has to exist on the App ID.
+`ios/Runner/Runner.entitlements` and both `macos/Runner/*.entitlements` files
+include `com.apple.developer.applesignin`. **The iOS/macOS build will fail to
+sign until step 1 is done** — the entitlement has to exist on the App ID.
+A Mac App Store / TestFlight build that ships without that entitlement in the
+macOS files will show the button but fail at tap time (ASAuthorization error
+1000).
 
 The button is shown on iOS/macOS only. Android and Windows would need Apple's web
 flow (a Services ID plus a server-signed ES256 client secret); Google sign-in
@@ -161,10 +164,9 @@ endpoints, same merge, different front door.
 It activates only when `GOOGLE_WEB_CLIENT_ID` / `GOOGLE_WEB_CLIENT_SECRET` are
 set; otherwise the sheet reports that browser sign-in is unavailable.
 
-> macOS note: `macos/Runner/Release.entitlements` currently lacks
-> `com.apple.security.network.client`, so a sandboxed macOS *release* build
-> cannot make outbound requests at all — pre-existing, and it affects the whole
-> app rather than just this feature.
+> macOS release builds are sandboxed; `macos/Runner/Release.entitlements` must
+> keep `com.apple.security.network.client` (already present) or the whole app
+> cannot make outbound requests, including this flow.
 
 ---
 
