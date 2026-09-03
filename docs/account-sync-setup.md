@@ -61,6 +61,16 @@ holds just the free tier, because its purchased time lives in the account.
 Signing back in restores everything. The account keeps its balance and history
 throughout, and other devices are unaffected.
 
+### Deleting the account
+
+**Delete account** (in the same sheet, with a confirmation) destroys the
+Apple/Google `acct_…` row. The device that taps it receives the account's live
+balance (`usage_limit_minutes` + `used_seconds`) on its own hardware row so
+purchased minutes are not lost. The provider identity, cloud transcripts, and
+every other device's membership are removed; those devices fall back to their
+free-tier rows. Signing into Apple/Google afterwards creates a new empty
+account, and this device can contribute its restored balance into it.
+
 ### What syncs
 
 Transcript, translation, previews, **word timestamps** and **title**. Audio does
@@ -92,7 +102,7 @@ Add these environment variables. See `server/.env.example`.
 | `FREE_BASE_MINUTES` | optional | Defaults to 30. Must match `AppConstants.freeBaseMinutes`. |
 
 Schema migrations are additive and run on boot — no manual SQL. `GET /` reports
-`version: 6` once the new build is live.
+`version: 7` once the new build is live.
 
 **The Hetzner WS proxy does not need redeploying.** It only forwards
 `userId` + `token`; the multi-token check happens on the Render side, in
@@ -187,3 +197,6 @@ set; otherwise the sheet reports that browser sign-in is unavailable.
    `account_members.contributed_minutes` is unchanged).
 8. **Both devices recording at once** — neither gets kicked off the WS proxy
    (this is the multi-token path).
+9. **Delete account on A** — A's remaining time stays on A; B is signed out onto
+   the free tier; the Apple/Google identity is gone, so signing in again creates
+   a new empty account.

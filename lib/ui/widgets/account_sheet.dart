@@ -102,6 +102,68 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
     });
   }
 
+  Future<void> _deleteAccount(AccountState account) async {
+    final providerLabel = account.provider == 'apple'
+        ? 'Apple'
+        : account.provider == 'google'
+            ? 'Google'
+            : null;
+    final otherDevices = account.deviceCount > 1;
+    final providerName = providerLabel ?? 'synced';
+    final body = StringBuffer()
+      ..writeln(
+          'This permanently deletes the $providerName account used to share '
+          'time and history across devices.')
+      ..writeln()
+      ..writeln('Purchased time stays on this device.');
+    if (otherDevices) {
+      body
+        ..writeln()
+        ..writeln(
+            'Other devices signed into this account will be signed out and '
+            'will not keep the shared time.');
+    }
+    body
+      ..writeln()
+      ..write(
+          'Cloud-synced transcripts for the account are deleted. Recordings '
+          'and transcripts already on this device stay.');
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete account?'),
+        content: Text(
+          body.toString(),
+          style: TextStyle(color: AppConstants.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final result = await AccountService.instance.deleteAccount();
+    if (!mounted) return;
+    ref.read(accountProvider.notifier).state = AccountService.instance.state;
+    setState(() {
+      _busy = false;
+      _addedMinutes = 0;
+      _error = result.isSuccess ? null : result.message;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final account = ref.watch(accountProvider);
@@ -457,12 +519,23 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
           ),
         )
       else
-        Center(
-          child: TextButton(
-            onPressed: _signOut,
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Sign out on this device'),
-          ),
+        Column(
+          children: [
+            Center(
+              child: TextButton(
+                onPressed: _signOut,
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: const Text('Sign out on this device'),
+              ),
+            ),
+            Center(
+              child: TextButton(
+                onPressed: () => _deleteAccount(account),
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+                child: const Text('Delete account'),
+              ),
+            ),
+          ],
         ),
     ];
   }

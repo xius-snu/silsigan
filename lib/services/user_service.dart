@@ -64,7 +64,7 @@ class UserService {
   String get _baseUrl => AppConstants.serverBaseUrl;
 
   /// Headers that authenticate as the device rather than the account. Account
-  /// endpoints (link/refresh/signout/ticket/poll) all use these.
+  /// endpoints (link/refresh/signout/delete/ticket/poll) all use these.
   Map<String, String> get deviceAuthHeaders => {
         'Content-Type': 'application/json',
         if (_deviceToken != null) 'Authorization': 'Bearer $_deviceToken',

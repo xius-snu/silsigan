@@ -392,6 +392,34 @@ class AccountService {
       // and the local clear below is what the user actually asked for.
       await _postAsDevice('/api/account/signout', {});
     }
+    await _signOutGoogleSdk();
+    await user.clearAccount();
+    _setState(AccountState.signedOut);
+    await _afterIdentityChange();
+  }
+
+  /// Deletes the Apple/Google account row after moving its live balance onto
+  /// this device. Unlike [signOut], a server failure must not clear locally —
+  /// otherwise the minutes could sit on an account the UI no longer shows.
+  Future<AccountResult> deleteAccount() async {
+    final user = UserService.instance;
+    if (!user.isAccountLinked) {
+      _setState(AccountState.signedOut);
+      return const AccountResult(AccountResultKind.success);
+    }
+    final data = await _postAsDevice('/api/account/delete', {});
+    if (data == null || data['success'] != true) {
+      return const AccountResult(AccountResultKind.failed,
+          message: 'Could not delete the account. Try again.');
+    }
+    await _signOutGoogleSdk();
+    await user.clearAccount();
+    _setState(AccountState.signedOut);
+    await _afterIdentityChange();
+    return const AccountResult(AccountResultKind.success);
+  }
+
+  Future<void> _signOutGoogleSdk() async {
     try {
       if (!usesBrowserFlow && _googleInitialized) {
         await GoogleSignIn.instance.signOut();
@@ -399,9 +427,6 @@ class AccountService {
     } catch (e) {
       debugPrint('Google sign-out error: $e');
     }
-    await user.clearAccount();
-    _setState(AccountState.signedOut);
-    await _afterIdentityChange();
   }
 
   // ── Plumbing ────────────────────────────────────────────────────────

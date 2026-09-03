@@ -1,6 +1,6 @@
 # Privacy Policy for Silsigan
 
-**Last updated: August 25, 2026**
+**Last updated: September 3, 2026**
 
 Silsigan ("the App") is a real-time speech translation app. This policy describes what data the App collects, how it is used, and your choices.
 
@@ -23,6 +23,9 @@ The App records when you last opened it and when you last started a recording. T
 
 ### Purchases
 If you buy additional minutes, Apple or Google (depending on the store) processes the payment. We receive a product identifier and a purchase receipt via RevenueCat so we can credit minutes to your account. We do not receive your full card number or store password.
+
+### Optional account sync
+If you choose to sign in with Google or Apple, we store the email and a provider identifier those services give us so we can show the signed-in account and sync purchased time and saved transcripts across your devices. Signing in is optional; the App works without it.
 
 ## Data That Stays on Your Device
 
@@ -52,7 +55,7 @@ On Android, while you are recording, the App runs a microphone foreground servic
 
 ## Data We Do NOT Collect
 
-- Name, email, or account credentials
+- Name or passwords
 - Location data
 - Contacts or phone number
 - Analytics, advertising identifiers, or tracking data
@@ -60,7 +63,11 @@ On Android, while you are recording, the App runs a microphone foreground servic
 
 ## Data Retention and Deletion
 
-You can delete any saved session from within the App at any time. Deleting a session removes it from both your device and our server. If you uninstall the App, your local data (including audio recordings) is deleted. To request deletion of all server-side data, contact us at the email below.
+You can delete any saved session from within the App at any time. Deleting a session removes it from both your device and our server.
+
+If you signed in with Google or Apple, you can delete that account from the account sheet in the App. Deletion removes the synced account and its cloud transcripts from our server. Purchased translation time stays on the device that confirmed deletion. Recordings and transcripts already stored on your device stay on that device. Other devices signed into the same account are signed out.
+
+If you uninstall the App, your local data (including audio recordings) is deleted. To request deletion of remaining server-side device data, contact us at the email below.
 
 ## Children's Privacy
 

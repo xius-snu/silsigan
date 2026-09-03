@@ -478,7 +478,7 @@ async function start() {
     // HEALTH CHECK
     // ==================
 
-    fastify.get('/', async () => ({ status: 'ok', version: 6 }));
+    fastify.get('/', async () => ({ status: 'ok', version: 7 }));
 
     // ==================
     // USER ENDPOINTS
@@ -1781,6 +1781,122 @@ async function start() {
             return { success: true, linked: false };
         } catch (e) {
             fastify.log.error('Account signout error: ' + e.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
+    // Permanently delete the Apple/Google account row. Purchased time and
+    // current usage move onto THIS device's row so the minutes are not lost;
+    // the identity, cloud history, and other devices' membership disappear.
+    // Idempotent: a device that is not an active member gets success anyway.
+    async function deleteAccountForDevice(deviceUserId) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            const membership = await client.query(
+                `SELECT account_id FROM account_members
+                  WHERE device_user_id = $1 AND active
+                  ORDER BY joined_at DESC
+                  LIMIT 1`,
+                [deviceUserId]
+            );
+            if (membership.rows.length === 0) {
+                await client.query('COMMIT');
+                return { success: true, linked: false };
+            }
+            const accountId = membership.rows[0].account_id;
+
+            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',
+                [`acctdel:${accountId}`]);
+
+            const still = await client.query(
+                `SELECT 1 FROM account_members
+                  WHERE account_id = $1 AND device_user_id = $2 AND active`,
+                [accountId, deviceUserId]
+            );
+            if (still.rows.length === 0) {
+                await client.query('COMMIT');
+                return { success: true, linked: false };
+            }
+
+            const account = await client.query(
+                `SELECT COALESCE(usage_limit_minutes, $2) AS limit_minutes,
+                        COALESCE(used_seconds, 0) AS used_seconds,
+                        COALESCE(is_private, FALSE) AS is_private
+                 FROM users WHERE user_id = $1 AND is_account = TRUE FOR UPDATE`,
+                [accountId, FREE_BASE_MINUTES]
+            );
+            await client.query(
+                'SELECT 1 FROM users WHERE user_id = $1 FOR UPDATE',
+                [deviceUserId]
+            );
+
+            if (account.rows.length > 0) {
+                const a = account.rows[0];
+                await client.query(
+                    `UPDATE users
+                       SET usage_limit_minutes = $2,
+                           used_seconds = $3,
+                           is_private = (COALESCE(is_private, FALSE) OR $4)
+                     WHERE user_id = $1`,
+                    [
+                        deviceUserId,
+                        parseInt(a.limit_minutes),
+                        parseInt(a.used_seconds),
+                        a.is_private === true,
+                    ]
+                );
+            }
+
+            await client.query(
+                'UPDATE purchases SET user_id = $2 WHERE user_id = $1',
+                [accountId, deviceUserId]
+            );
+            await client.query(
+                'UPDATE premium_codes SET used_by = $2 WHERE used_by = $1',
+                [accountId, deviceUserId]
+            );
+            await client.query('DELETE FROM saved_sessions WHERE user_id = $1', [accountId]);
+            await client.query('DELETE FROM saved_session_deletes WHERE user_id = $1', [accountId]);
+            await client.query('DELETE FROM account_identities WHERE account_id = $1', [accountId]);
+            await client.query('DELETE FROM auth_tokens WHERE user_id = $1', [accountId]);
+            await client.query('DELETE FROM auth_tickets WHERE account_id = $1', [accountId]);
+            await client.query(
+                'DELETE FROM friends WHERE user_id = $1 OR friend_id = $1',
+                [accountId]
+            );
+            await client.query(
+                `DELETE FROM session_invites
+                  WHERE from_user_id = $1 OR to_user_id = $1`,
+                [accountId]
+            );
+            await client.query('DELETE FROM activity_log WHERE user_id = $1', [accountId]);
+            await client.query('DELETE FROM account_members WHERE account_id = $1', [accountId]);
+            await client.query(
+                'DELETE FROM users WHERE user_id = $1 AND is_account = TRUE',
+                [accountId]
+            );
+
+            await client.query('COMMIT');
+            return { success: true, linked: false };
+        } catch (e) {
+            try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
+            throw e;
+        } finally {
+            client.release();
+        }
+    }
+
+    fastify.post('/api/account/delete', async (req, reply) => {
+        const { userId } = req.body || {};
+        if (!userId) return reply.code(400).send({ error: 'Missing userId' });
+        try {
+            const result = await deleteAccountForDevice(userId);
+            const usage = await accountUsageRow(userId);
+            return { ...result, ...usage };
+        } catch (e) {
+            fastify.log.error('Account delete error: ' + e.message);
             return reply.code(500).send({ error: 'Database error' });
         }
     });
