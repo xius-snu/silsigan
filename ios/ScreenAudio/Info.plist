@@ -22,11 +22,17 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>NSExtension</key>
 	<dict>
+		<!-- Xcode's template nests the mode here; ReplayKit reads it at runtime. -->
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>RPBroadcastProcessMode</key>
+			<string>RPBroadcastProcessModeSampleBuffer</string>
+		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.broadcast-services-upload</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).SampleHandler</string>
-		<!-- Xcode 26 / altool 90362 looks here, not under NSExtensionAttributes. -->
+		<!-- Xcode 26 / altool 90362 validates this direct child, not the nested one. -->
 		<key>RPBroadcastProcessMode</key>
 		<string>RPBroadcastProcessModeSampleBuffer</string>
 	</dict>

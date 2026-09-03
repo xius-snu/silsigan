@@ -173,15 +173,19 @@ class SampleHandler: RPBroadcastSampleHandler {
         blockBufferOut: &blockBuffer
       )
       guard status == noErr else { return }
-      _ = blockBuffer
+      // The ABL's mData pointers live inside blockBuffer. When the alignment
+      // flag forced a copy, this local is the only owner — Swift may release
+      // it at last use, so pin it until the converter has read the samples.
       var pcm = Data()
       pcm.reserveCapacity(frames * 2)
-      converter.convert(
-        abl: UnsafeMutableAudioBufferListPointer(abl),
-        frames: frames,
-        asbd: asbd,
-        into: &pcm
-      )
+      withExtendedLifetime(blockBuffer) {
+        converter.convert(
+          abl: UnsafeMutableAudioBufferListPointer(abl),
+          frames: frames,
+          asbd: asbd,
+          into: &pcm
+        )
+      }
       if !pcm.isEmpty {
         ring.write(pcm)
       }
