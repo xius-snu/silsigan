@@ -13,15 +13,22 @@ import AVFoundation
 /// still enables Mic from Control Center, that path would double-capture.
 class SampleHandler: RPBroadcastSampleHandler {
   private let ring = AudioRingBuffer()
-  private let resampler = PcmResampler()
+  private var converter = Pcm24kConverter()
   private var lastBeat: Date = .distantPast
+  private var finishing = false
+  private var stopPoll: DispatchSourceTimer?
+  private var stopObserver: UnsafeRawPointer?
 
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
     BroadcastIPC.clearStop()
     _ = ring.open(create: true)
     ring.reset()
+    converter.reset()
+    finishing = false
     BroadcastIPC.setRunning(true)
     BroadcastIPC.post(BroadcastIPC.startedNotification)
+    installStopObserver()
+    startStopPoll()
   }
 
   override func broadcastPaused() {}
@@ -29,13 +36,11 @@ class SampleHandler: RPBroadcastSampleHandler {
   override func broadcastResumed() {}
 
   override func broadcastFinished() {
-    BroadcastIPC.setRunning(false)
-    BroadcastIPC.post(BroadcastIPC.stoppedNotification)
-    ring.close()
+    tearDownIpc()
   }
 
   override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-    if BroadcastIPC.stopRequested() {
+    if shouldStop() {
       finishQuietly()
       return
     }
@@ -56,22 +61,134 @@ class SampleHandler: RPBroadcastSampleHandler {
     }
   }
 
-  private func finishQuietly() {
-    BroadcastIPC.setRunning(false)
-    BroadcastIPC.post(BroadcastIPC.stoppedNotification)
-    let error = NSError(
-      domain: "com.silsigan.app.ScreenAudio",
-      code: 0,
-      userInfo: [NSLocalizedDescriptionKey: "Stopped"]
-    )
-    finishBroadcastWithError(error)
+  private func shouldStop() -> Bool {
+    finishing || ring.isStopRequested() || BroadcastIPC.stopRequested()
   }
 
+  private func finishQuietly() {
+    let work = { [self] in
+      if finishing { return }
+      finishing = true
+      tearDownIpc()
+      // userDeclined dismisses the broadcast without a red error banner.
+      let error = NSError(
+        domain: RPRecordingErrorDomain,
+        code: RPRecordingErrorCode.userDeclined.rawValue,
+        userInfo: [NSLocalizedDescriptionKey: "Stopped"]
+      )
+      finishBroadcastWithError(error)
+    }
+    if Thread.isMainThread {
+      work()
+    } else {
+      DispatchQueue.main.async(execute: work)
+    }
+  }
+
+  private func tearDownIpc() {
+    stopPoll?.cancel()
+    stopPoll = nil
+    removeStopObserver()
+    BroadcastIPC.setRunning(false)
+    BroadcastIPC.post(BroadcastIPC.stoppedNotification)
+    ring.close()
+  }
+
+  private func installStopObserver() {
+    guard stopObserver == nil else { return }
+    let callback: CFNotificationCallback = { _, observer, _, _, _ in
+      guard let observer else { return }
+      let me = Unmanaged<SampleHandler>.fromOpaque(observer).takeUnretainedValue()
+      me.finishQuietly()
+    }
+    let ptr = Unmanaged.passUnretained(self).toOpaque()
+    stopObserver = UnsafeRawPointer(ptr)
+    CFNotificationCenterAddObserver(
+      CFNotificationCenterGetDarwinNotifyCenter(),
+      ptr,
+      callback,
+      BroadcastIPC.stopNotification,
+      nil,
+      .deliverImmediately
+    )
+  }
+
+  private func removeStopObserver() {
+    guard let ptr = stopObserver else { return }
+    CFNotificationCenterRemoveEveryObserver(
+      CFNotificationCenterGetDarwinNotifyCenter(),
+      ptr
+    )
+    stopObserver = nil
+  }
+
+  private func startStopPoll() {
+    stopPoll?.cancel()
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+    timer.setEventHandler { [weak self] in
+      guard let self, self.shouldStop() else { return }
+      self.finishQuietly()
+    }
+    timer.resume()
+    stopPoll = timer
+  }
+
+  /// ReplayKit `audioApp` is typically stereo Float32 *non-interleaved*.
+  /// `CMSampleBufferGetDataBuffer` is often nil for that layout — use the
+  /// AudioBufferList path (same as the macOS ScreenCaptureKit reader).
   private func writeAudio(_ sampleBuffer: CMSampleBuffer) {
     guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
           let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(format)
     else { return }
     let asbd = asbdPtr.pointee
+    let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+    guard frames > 0 else { return }
+
+    var sizeNeeded = 0
+    _ = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+      sampleBuffer,
+      bufferListSizeNeededOut: &sizeNeeded,
+      bufferListOut: nil,
+      bufferListSize: 0,
+      blockBufferAllocator: nil,
+      blockBufferMemoryAllocator: nil,
+      flags: 0,
+      blockBufferOut: nil
+    )
+    if sizeNeeded > 0 {
+      let raw = UnsafeMutableRawPointer.allocate(byteCount: sizeNeeded, alignment: 16)
+      defer { raw.deallocate() }
+      raw.initializeMemory(as: UInt8.self, repeating: 0, count: sizeNeeded)
+      let abl = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+      var blockBuffer: CMBlockBuffer?
+      let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer,
+        bufferListSizeNeededOut: nil,
+        bufferListOut: abl,
+        bufferListSize: sizeNeeded,
+        blockBufferAllocator: kCFAllocatorDefault,
+        blockBufferMemoryAllocator: kCFAllocatorDefault,
+        flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        blockBufferOut: &blockBuffer
+      )
+      guard status == noErr else { return }
+      _ = blockBuffer
+      var pcm = Data()
+      pcm.reserveCapacity(frames * 2)
+      converter.convert(
+        abl: UnsafeMutableAudioBufferListPointer(abl),
+        frames: frames,
+        asbd: asbd,
+        into: &pcm
+      )
+      if !pcm.isEmpty {
+        ring.write(pcm)
+      }
+      return
+    }
+
+    // Rare interleaved fallback when the list query reports no size.
     guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
     let length = CMBlockBufferGetDataLength(block)
     if length <= 0 { return }
@@ -81,131 +198,192 @@ class SampleHandler: RPBroadcastSampleHandler {
       return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: base)
     }
     guard copy == noErr else { return }
-
-    let channels = max(1, Int(asbd.mChannelsPerFrame))
-    let srcRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44_100
-    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-    let bits = Int(asbd.mBitsPerChannel)
-    let floats = Self.monoFloats(
-      bytes: bytes,
-      channels: channels,
-      isFloat: isFloat,
-      bits: bits
-    )
-    let pcm = resampler.convert(floats, srcRate: srcRate)
+    let pcm = converter.convertPacked(bytes: bytes, frames: frames, asbd: asbd)
     if !pcm.isEmpty {
       ring.write(pcm)
     }
   }
-
-  private static func monoFloats(
-    bytes: Data,
-    channels: Int,
-    isFloat: Bool,
-    bits: Int
-  ) -> [Float] {
-    if isFloat && bits == 32 {
-      let count = bytes.count / 4
-      if count == 0 { return [] }
-      return bytes.withUnsafeBytes { raw in
-        let ptr = raw.bindMemory(to: Float.self)
-        if channels <= 1 {
-          return Array(ptr.prefix(count))
-        }
-        let frames = count / channels
-        var out = [Float](repeating: 0, count: frames)
-        for i in 0..<frames {
-          var sum: Float = 0
-          for c in 0..<channels {
-            sum += ptr[i * channels + c]
-          }
-          out[i] = sum / Float(channels)
-        }
-        return out
-      }
-    }
-    if bits == 16 {
-      let count = bytes.count / 2
-      if count == 0 { return [] }
-      return bytes.withUnsafeBytes { raw in
-        let ptr = raw.bindMemory(to: Int16.self)
-        func s(_ v: Int16) -> Float { Float(v) / 32768.0 }
-        if channels <= 1 {
-          var out = [Float](repeating: 0, count: count)
-          for i in 0..<count { out[i] = s(ptr[i]) }
-          return out
-        }
-        let frames = count / channels
-        var out = [Float](repeating: 0, count: frames)
-        for i in 0..<frames {
-          var sum: Float = 0
-          for c in 0..<channels {
-            sum += s(ptr[i * channels + c])
-          }
-          out[i] = sum / Float(channels)
-        }
-        return out
-      }
-    }
-    return []
-  }
 }
 
-/// Linear-interpolation resampler to 24 kHz PCM16 mono.
-final class PcmResampler {
+/// Linear-interpolation resampler to 24 kHz PCM16 mono. Handles the ReplayKit
+/// layouts we actually see: Float32/Int16/Int32, interleaved or not.
+private struct Pcm24kConverter {
   private let dstRate: Double = 24_000
   private var srcRate: Double = 44_100
+  private var frac: Double = 0
   private var prev: Float = 0
-  private var phase: Double = 1
   private var hasPrev = false
 
-  func convert(_ samples: [Float], srcRate: Double) -> Data {
-    if samples.isEmpty { return Data() }
-    if abs(self.srcRate - srcRate) > 0.5 {
-      self.srcRate = srcRate
-      phase = 1
-      hasPrev = false
-    }
-    let step = srcRate / dstRate
-    var out = [Int16]()
-    out.reserveCapacity(max(1, Int(Double(samples.count) * dstRate / srcRate) + 2))
-    var idx = 0
-    var current = samples[0]
-    if !hasPrev {
-      prev = current
-      hasPrev = true
-      idx = 1
-      if idx >= samples.count {
-        return int16Data([Self.q(current)])
-      }
-      current = samples[idx]
-    }
-    while true {
-      while phase >= 1 {
-        prev = current
-        idx += 1
-        if idx >= samples.count {
-          phase -= 1
-          // Keep leftover phase for the next buffer.
-          return int16Data(out)
-        }
-        current = samples[idx]
-        phase -= 1
-      }
-      let mixed = prev + Float(phase) * (current - prev)
-      out.append(Self.q(mixed))
-      phase += step
-    }
+  mutating func reset() {
+    srcRate = 44_100
+    frac = 0
+    prev = 0
+    hasPrev = false
   }
 
-  private func int16Data(_ samples: [Int16]) -> Data {
-    if samples.isEmpty { return Data() }
-    return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+  mutating func convert(
+    abl: UnsafeMutableAudioBufferListPointer,
+    frames: Int,
+    asbd: AudioStreamBasicDescription,
+    into out: inout Data
+  ) {
+    srcRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44_100
+    let channels = max(Int(asbd.mChannelsPerFrame), 1)
+    var bits = Int(asbd.mBitsPerChannel)
+    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+    let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+      || abl.count > 1
+    if bits <= 0 {
+      bits = isFloat ? 32 : 16
+    }
+    let bytesPer = max(bits / 8, 1)
+
+    var mono = [Float](repeating: 0, count: frames)
+    if nonInterleaved {
+      let nBuf = min(abl.count, channels)
+      guard nBuf > 0 else { return }
+      for f in 0..<frames {
+        var acc: Float = 0
+        for c in 0..<nBuf {
+          guard let data = abl[c].mData else { continue }
+          acc += Self.readSample(
+            data: data,
+            byteOffset: f * bytesPer,
+            isFloat: isFloat,
+            bits: bits
+          )
+        }
+        mono[f] = acc / Float(nBuf)
+      }
+    } else {
+      guard abl.count > 0, let data = abl[0].mData else { return }
+      for f in 0..<frames {
+        var acc: Float = 0
+        for c in 0..<channels {
+          acc += Self.readSample(
+            data: data,
+            byteOffset: (f * channels + c) * bytesPer,
+            isFloat: isFloat,
+            bits: bits
+          )
+        }
+        mono[f] = acc / Float(channels)
+      }
+    }
+    resample(mono, into: &out)
+  }
+
+  mutating func convertPacked(
+    bytes: Data,
+    frames: Int,
+    asbd: AudioStreamBasicDescription
+  ) -> Data {
+    srcRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44_100
+    let channels = max(Int(asbd.mChannelsPerFrame), 1)
+    var bits = Int(asbd.mBitsPerChannel)
+    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+    if bits <= 0 { bits = isFloat ? 32 : 16 }
+    let bytesPer = max(bits / 8, 1)
+    var mono = [Float](repeating: 0, count: frames)
+    bytes.withUnsafeBytes { raw in
+      guard let base = raw.baseAddress else { return }
+      for f in 0..<frames {
+        var acc: Float = 0
+        for c in 0..<channels {
+          let offset = (f * channels + c) * bytesPer
+          if offset + bytesPer > bytes.count { break }
+          acc += Self.readSample(
+            data: UnsafeMutableRawPointer(mutating: base),
+            byteOffset: offset,
+            isFloat: isFloat,
+            bits: bits
+          )
+        }
+        mono[f] = acc / Float(channels)
+      }
+    }
+    var out = Data()
+    out.reserveCapacity(frames * 2)
+    resample(mono, into: &out)
+    return out
+  }
+
+  private static func readSample(
+    data: UnsafeMutableRawPointer,
+    byteOffset: Int,
+    isFloat: Bool,
+    bits: Int
+  ) -> Float {
+    let ptr = data.advanced(by: byteOffset)
+    if isFloat && bits == 32 {
+      return ptr.load(as: Float.self)
+    }
+    if bits == 16 {
+      return Float(ptr.load(as: Int16.self)) / 32768.0
+    }
+    if bits == 32 && !isFloat {
+      return Float(ptr.load(as: Int32.self)) / 2_147_483_648.0
+    }
+    if bits == 24 {
+      let p = ptr.assumingMemoryBound(to: UInt8.self)
+      var s = Int32(p[0]) | (Int32(p[1]) << 8) | (Int32(p[2]) << 16)
+      if (s & 0x800000) != 0 {
+        s |= Int32(bitPattern: 0xFF00_0000)
+      }
+      return Float(s) / 8_388_608.0
+    }
+    return 0
+  }
+
+  private mutating func resample(_ mono: [Float], into out: inout Data) {
+    if mono.isEmpty { return }
+    if abs(srcRate - dstRate) < 0.5 {
+      for s in mono {
+        appendS16(Self.q(s), into: &out)
+      }
+      return
+    }
+    let step = srcRate / dstRate
+    let n = mono.count
+    while true {
+      let srcIndex = frac
+      let i0 = Int(srcIndex.rounded(.towardZero))
+      let t = srcIndex - Double(i0)
+      var s0: Float = 0
+      var s1: Float = 0
+      var have1 = false
+      if i0 < 0 {
+        if !hasPrev { break }
+        s0 = prev
+        if n > 0 {
+          s1 = mono[0]
+          have1 = true
+        }
+      } else if i0 >= n {
+        break
+      } else {
+        s0 = mono[i0]
+        if i0 + 1 < n {
+          s1 = mono[i0 + 1]
+          have1 = true
+        }
+      }
+      if !have1 { break }
+      appendS16(Self.q(s0 + Float(t) * (s1 - s0)), into: &out)
+      frac += step
+    }
+    prev = mono[n - 1]
+    hasPrev = true
+    frac -= Double(n)
+  }
+
+  private func appendS16(_ v: Int16, into out: inout Data) {
+    var le = v.littleEndian
+    withUnsafeBytes(of: &le) { out.append(contentsOf: $0) }
   }
 
   private static func q(_ v: Float) -> Int16 {
     let clipped = max(-1.0, min(1.0, v))
-    let scaled = Int(clipped * 32767.0)
-    return Int16(clamping: scaled)
+    return Int16(clipped * 32767.0)
   }
 }

@@ -10,6 +10,7 @@ enum BroadcastIPC {
   static let ringFileName = "loopback.ring"
   static let startedNotification = "com.silsigan.app.broadcast.started" as CFString
   static let stoppedNotification = "com.silsigan.app.broadcast.stopped" as CFString
+  static let stopNotification = "com.silsigan.app.broadcast.stop" as CFString
   static let defaultsSuite = groupId
   static let runningKey = "broadcastRunning"
   static let stopKey = "stopRequested"
@@ -62,9 +63,11 @@ enum BroadcastIPC {
   }
 
   static func requestStop() {
-    guard let d = defaults() else { return }
-    d.set(true, forKey: stopKey)
-    d.synchronize()
+    if let d = defaults() {
+      d.set(true, forKey: stopKey)
+      d.synchronize()
+    }
+    post(stopNotification)
   }
 
   static func clearStop() {
@@ -96,6 +99,13 @@ final class AudioRingBuffer {
   private var dataRegion: UnsafeMutableRawPointer? {
     guard let map else { return nil }
     return map.advanced(by: BroadcastIPC.headerSize)
+  }
+
+  /// Instant cross-process stop (offset 16). UserDefaults can lag 1–3s
+  /// between the app and the ReplayKit extension.
+  private var stopFlag: UnsafeMutablePointer<UInt32>? {
+    guard let map else { return nil }
+    return map.advanced(by: 16).assumingMemoryBound(to: UInt32.self)
   }
 
   deinit { close() }
@@ -139,6 +149,17 @@ final class AudioRingBuffer {
   func reset() {
     writePos?.pointee = 0
     readPos?.pointee = 0
+    stopFlag?.pointee = 0
+  }
+
+  func setStopRequested(_ value: Bool) {
+    _ = open(create: true)
+    stopFlag?.pointee = value ? 1 : 0
+  }
+
+  func isStopRequested() -> Bool {
+    if map == nil { _ = open(create: false) }
+    return (stopFlag?.pointee ?? 0) != 0
   }
 
   func write(_ data: Data) {

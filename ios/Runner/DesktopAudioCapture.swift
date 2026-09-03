@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import ReplayKit
 import UIKit
@@ -7,7 +8,6 @@ private let kSystemAudioId = "system"
 private let kSystemAudioLabel = "System / screen audio"
 private let kExtensionBundleId = "com.silsigan.app.ScreenAudio"
 private let kStartTimeout: TimeInterval = 90
-private let kStopGrace: TimeInterval = 1.5
 
 private var gPlugin: DesktopAudioCapturePlugin?
 
@@ -32,7 +32,7 @@ private final class DesktopAudioCapturePlugin: NSObject {
   private var picker: RPSystemBroadcastPickerView?
   private var pendingStart: FlutterResult?
   private var startTimeout: DispatchWorkItem?
-  private var stopWork: DispatchWorkItem?
+  private var keepAlivePlayer: AVAudioPlayer?
   private var startedObserver: UnsafeRawPointer?
   private var stoppedObserver: UnsafeRawPointer?
 
@@ -51,7 +51,7 @@ private final class DesktopAudioCapturePlugin: NSObject {
 
   func shutdown() {
     startTimeout?.cancel()
-    stopWork?.cancel()
+    stopKeepAlive()
     failPending(
       code: "CANCELLED",
       message: "Screen audio wasn’t started. Choose Silsigan in the broadcast picker and tap Start Broadcast."
@@ -71,7 +71,7 @@ private final class DesktopAudioCapturePlugin: NSObject {
     case "startLoopback":
       startLoopback(result)
     case "stopLoopback":
-      scheduleStop()
+      requestStopNow()
       result(nil)
     case "readLoopback":
       result(FlutterStandardTypedData(bytes: ring.take()))
@@ -94,13 +94,19 @@ private final class DesktopAudioCapturePlugin: NSObject {
   }
 
   private func startLoopback(_ result: @escaping FlutterResult) {
-    stopWork?.cancel()
-    stopWork = nil
-    BroadcastIPC.clearStop()
-    if BroadcastIPC.isBroadcastRunning() {
+    // Reuse only a live broadcast that is not already stopping. Clearing
+    // the stop flag first would make a dying session look running.
+    if BroadcastIPC.isBroadcastRunning()
+      && !BroadcastIPC.stopRequested()
+      && !ring.isStopRequested()
+    {
+      startKeepAlive()
       result(nil)
       return
     }
+    enableMixWithOthers()
+    BroadcastIPC.clearStop()
+    ring.setStopRequested(false)
     if pendingStart != nil {
       result(
         FlutterError(
@@ -128,14 +134,69 @@ private final class DesktopAudioCapturePlugin: NSObject {
     }
   }
 
-  private func scheduleStop() {
-    stopWork?.cancel()
-    let work = DispatchWorkItem { [weak self] in
-      BroadcastIPC.requestStop()
-      self?.stopWork = nil
+  /// Stop the ReplayKit extension immediately. The 1.5s UserDefaults grace
+  /// left the 화면방송 indicator up for ~3s after Stop; the mmap flag +
+  /// Darwin ping is visible to the extension on the next sample / 100ms poll.
+  private func requestStopNow() {
+    ring.setStopRequested(true)
+    BroadcastIPC.requestStop()
+    stopKeepAlive()
+  }
+
+  /// Speaker-only never opens the mic, so iOS would suspend us a few seconds
+  /// after the user jumps to YouTube/TikTok — the isolate would stop polling
+  /// the ring and Soniox would see silence. A muted looping player +
+  /// `UIBackgroundModes: audio` keeps Flutter alive. mixWithOthers so we
+  /// don't duck the video the user is trying to transcribe.
+  private func startKeepAlive() {
+    enableMixWithOthers()
+    if keepAlivePlayer != nil { return }
+    guard let player = try? AVAudioPlayer(data: Self.silentWav()) else { return }
+    player.numberOfLoops = -1
+    player.volume = 0.001
+    player.play()
+    keepAlivePlayer = player
+  }
+
+  private func stopKeepAlive() {
+    keepAlivePlayer?.stop()
+    keepAlivePlayer = nil
+  }
+
+  private func enableMixWithOthers() {
+    let session = AVAudioSession.sharedInstance()
+    do {
+      var options = session.categoryOptions
+      options.insert(.mixWithOthers)
+      let category: AVAudioSession.Category =
+        session.category == .playAndRecord ? .playAndRecord : .playback
+      try session.setCategory(category, mode: session.mode, options: options)
+      try session.setActive(true)
+    } catch {}
+  }
+
+  private static func silentWav() -> Data {
+    let pcmSize = 3200
+    var data = Data()
+    func appendLE<T: FixedWidthInteger>(_ value: T) {
+      var v = value.littleEndian
+      withUnsafeBytes(of: &v) { data.append(contentsOf: $0) }
     }
-    stopWork = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + kStopGrace, execute: work)
+    data.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // RIFF
+    appendLE(UInt32(36 + pcmSize))
+    data.append(contentsOf: [0x57, 0x41, 0x56, 0x45]) // WAVE
+    data.append(contentsOf: [0x66, 0x6D, 0x74, 0x20]) // fmt
+    appendLE(UInt32(16))
+    appendLE(UInt16(1)) // PCM
+    appendLE(UInt16(1)) // mono
+    appendLE(UInt32(16_000))
+    appendLE(UInt32(32_000))
+    appendLE(UInt16(2))
+    appendLE(UInt16(16))
+    data.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // data
+    appendLE(UInt32(pcmSize))
+    data.append(Data(count: pcmSize))
+    return data
   }
 
   private func embedPicker(on controller: UIViewController) {
@@ -233,6 +294,7 @@ private final class DesktopAudioCapturePlugin: NSObject {
   private func onBroadcastStarted() {
     startTimeout?.cancel()
     startTimeout = nil
+    startKeepAlive()
     if let pending = pendingStart {
       pendingStart = nil
       pending(nil)
@@ -240,6 +302,7 @@ private final class DesktopAudioCapturePlugin: NSObject {
   }
 
   private func onBroadcastStopped() {
+    stopKeepAlive()
     failPending(
       code: "CANCELLED",
       message: "Broadcast ended before screen audio started"
