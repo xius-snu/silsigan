@@ -103,21 +103,12 @@ class PurchaseService {
     return _offerings?.current?.availablePackages ?? [];
   }
 
-  /// Restore purchases from the store. Returns true if the SDK call
-  /// succeeded (consumable hour packs typically have nothing to restore).
-  Future<bool> restore() async {
-    if (!_initialized) {
-      await init();
-    }
-    if (!_initialized) return false;
-    try {
-      await Purchases.restorePurchases();
-      return true;
-    } catch (e) {
-      debugPrint('Restore purchases error: $e');
-      return false;
-    }
-  }
+  // Deliberately no restore(): hour packs are consumables, so
+  // Purchases.restorePurchases() (StoreKit AppStore.sync) only prompts for the
+  // Apple ID and returns nothing — App Review rejects it (guideline 3.1.1).
+  // Minutes are a server-side ledger keyed by hardware ID / account, so they
+  // already survive reinstall; charged-but-uncredited purchases are recovered
+  // by _retryPendingPurchases() on launch.
 
   /// Purchase a package. Returns the number of minutes granted, or null on
   /// failure/cancellation.

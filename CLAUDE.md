@@ -243,6 +243,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - iOS only — Android shows mock UI with "not available" snackbar.
 - Successful purchase → POST to Render to credit minutes → refresh `_usedSeconds` / `_limitMinutes`.
 - Pending purchases (Apple credited but server failed) are persisted and retried on next launch.
+- **No "Restore Purchases" button, and never call `Purchases.restorePurchases()`.** Hour packs are consumables: StoreKit restore prompts for the Apple ID and returns nothing, and App Review rejected exactly that under guideline 3.1.1 (2026-09). Minutes already survive reinstall via the hardware-ID / account ledger; support cases go through the customer ID in the purchase sheet.
 
 ---
 

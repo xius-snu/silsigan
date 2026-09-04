@@ -216,7 +216,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Transient "copied" state for the customer-ID row in the purchase sheet.
   bool _idCopiedInSheet = false;
-  String? _restoreFeedbackInSheet;
 
   // Autosave: periodic timer + session start timestamp
   Timer? _autosaveTimer;
@@ -553,7 +552,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     if (!mounted) return;
     _idCopiedInSheet = false;
-    _restoreFeedbackInSheet = null;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -680,50 +678,19 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 else
                   ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
+                // No "Restore Purchases" button: hour packs are consumables,
+                // which StoreKit restore can't return (and App Review rejects
+                // the Apple-ID prompt it triggers — guideline 3.1.1). Minutes
+                // live on the server keyed by hardware ID / account, so they
+                // survive reinstall on their own; support goes via the ID above.
                 if (PurchaseService.isSupported) ...[
-                  const SizedBox(height: 24),
-
-                  // Restore purchases — snackbars land on the Scaffold behind
-                  // this sheet, so confirmation is inline (same as customer ID).
-                  StatefulBuilder(
-                    builder: (restoreCtx, setRestoreState) {
-                      return Column(
-                        children: [
-                          Center(
-                            child: GestureDetector(
-                              onTap: () async {
-                                final ok =
-                                    await PurchaseService.instance.restore();
-                                setRestoreState(() {
-                                  _restoreFeedbackInSheet = ok
-                                      ? 'Purchases restored'
-                                      : 'Nothing to restore';
-                                });
-                              },
-                              child: Text(
-                                'Restore Purchases',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: AppConstants.textMuted,
-                                  decoration: TextDecoration.underline,
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (_restoreFeedbackInSheet != null) ...[
-                            const SizedBox(height: 8),
-                            Text(
-                              _restoreFeedbackInSheet!,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppConstants.textMuted,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ],
-                      );
-                    },
+                  const SizedBox(height: 16),
+                  Text(
+                    'Purchased time is saved to your ID above, not to your '
+                    'store account.',
+                    style:
+                        TextStyle(fontSize: 12, color: AppConstants.textMuted),
+                    textAlign: TextAlign.center,
                   ),
                 ],
 
