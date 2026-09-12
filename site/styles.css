@@ -717,10 +717,19 @@ h1 {
 }
 
 .history-item {
-  text-align: left;
+  display: flex;
+  align-items: stretch;
   border: 1px solid var(--border);
   background: #fff;
   border-radius: 10px;
+}
+
+.history-item-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: none;
   padding: 12px 14px;
   cursor: pointer;
   font: inherit;
@@ -740,14 +749,28 @@ h1 {
   outline: 2px solid var(--accent);
 }
 
+.history-delete {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+.history-delete:hover,
+.history-delete:focus-visible {
+  color: #c10154;
+}
+
+.history-delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .muted {
   color: var(--muted);
   font-size: 14px;
-}
-
-.upload-footer {
-  max-width: 720px;
-  margin-top: 8px;
 }
 
 @media (max-width: 560px) {

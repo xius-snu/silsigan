@@ -182,9 +182,12 @@
       return;
     }
     for (const job of jobs) {
+      const row = document.createElement('div');
+      row.className = 'history-item' + (job.id === activeJobId ? ' is-active' : '');
+
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'history-item' + (job.id === activeJobId ? ' is-active' : '');
+      btn.className = 'history-item-main';
       const title = document.createElement('strong');
       title.textContent = job.filename || ('Job ' + job.id);
       const meta = document.createElement('span');
@@ -207,7 +210,38 @@
         }
         renderHistory(jobs);
       });
-      historyList.appendChild(btn);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'history-delete';
+      del.setAttribute('aria-label', 'Delete');
+      del.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>';
+      del.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        del.disabled = true;
+        try {
+          await api('/api/private/jobs/' + job.id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+          });
+          if (activeJobId === job.id) {
+            stopPolling();
+            setBusy(false);
+            activeJobId = null;
+            hide(resultCard);
+            resultBody.innerHTML = '';
+          }
+          await refreshSession();
+        } catch (err) {
+          del.disabled = false;
+          setError(uploadError, err.message);
+        }
+      });
+
+      row.appendChild(btn);
+      row.appendChild(del);
+      historyList.appendChild(row);
     }
   }
 

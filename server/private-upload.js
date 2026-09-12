@@ -61,25 +61,12 @@ function codeFromRequest(req) {
 function tokensToTranscript(tokens, { translationsOnly = false, sourcesOnly = false } = {}) {
     if (!Array.isArray(tokens) || tokens.length === 0) return '';
     const parts = [];
-    let currentSpeaker = null;
-    let started = false;
     for (const token of tokens) {
         const isTranslation = token.translation_status === 'translation';
         if (translationsOnly && !isTranslation) continue;
         if (sourcesOnly && isTranslation) continue;
         const text = token.text || '';
-        if (!text) continue;
-        const speaker = token.speaker == null ? null : String(token.speaker);
-        if (speaker !== null && speaker !== currentSpeaker) {
-            if (started) parts.push('\n\n');
-            currentSpeaker = speaker;
-            parts.push(`Speaker ${speaker}:\n`);
-            parts.push(text.replace(/^\s+/, ''));
-            started = true;
-        } else {
-            parts.push(text);
-            started = true;
-        }
+        if (text) parts.push(text);
     }
     return parts.join('').trim();
 }
@@ -555,6 +542,37 @@ async function registerPrivateUploadRoutes(fastify, { pool, getSonioxKey, public
         }
     });
 
+    fastify.delete('/api/private/jobs/:id', async (req, reply) => {
+        const code = codeFromRequest(req);
+        const id = parseInt(req.params.id, 10);
+        if (code.length < 6) return reply.code(400).send({ error: 'Missing private code' });
+        if (!id) return reply.code(400).send({ error: 'Invalid job' });
+        try {
+            const existing = await pool.query(
+                `SELECT soniox_file_id, soniox_transcription_id
+                 FROM private_code_jobs WHERE id = $1 AND code = $2`,
+                [id, code],
+            );
+            if (existing.rows.length === 0) return reply.code(404).send({ error: 'Job not found' });
+            await pool.query(
+                'DELETE FROM private_code_jobs WHERE id = $1 AND code = $2',
+                [id, code],
+            );
+            const apiKey = getSonioxKey();
+            const row = existing.rows[0];
+            if (apiKey && row.soniox_transcription_id) {
+                await sonioxDeleteQuiet(apiKey, `/v1/transcriptions/${row.soniox_transcription_id}`);
+            }
+            if (apiKey && row.soniox_file_id) {
+                await sonioxDeleteQuiet(apiKey, `/v1/files/${row.soniox_file_id}`);
+            }
+            return { ok: true };
+        } catch (err) {
+            fastify.log.error('private delete job: ' + err.message);
+            return reply.code(500).send({ error: 'Database error' });
+        }
+    });
+
     fastify.post('/api/private/soniox-webhook', async (req, reply) => {
         const body = req.body || {};
         const transcriptionId = body.id
@@ -681,7 +699,6 @@ async function registerPrivateUploadRoutes(fastify, { pool, getSonioxKey, public
                 model: SONIOX_ASYNC_MODEL,
                 file_id: fileId,
                 enable_language_identification: true,
-                enable_speaker_diarization: true,
                 client_reference_id: `private:${code}`.slice(0, 256),
             };
             if (sourceLanguage) config.language_hints = [sourceLanguage];

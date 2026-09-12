@@ -17,10 +17,9 @@ const tokens = [
 ];
 
 const source = tokensToTranscript(tokens, { sourcesOnly: true });
-assert.ok(source.includes('Speaker 1:'));
-assert.ok(source.includes('Hello world.'));
-assert.ok(source.includes('Speaker 2:'));
+assert.strictEqual(source, 'Hello world.Next.');
 assert.ok(!source.includes('안녕'));
+assert.ok(!source.includes('Speaker'));
 
 const split = splitTranscript(tokens);
 assert.ok(split.transcription.includes('Hello'));
