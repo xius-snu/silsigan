@@ -1,8 +1,9 @@
 require('dotenv').config();
-const fastify = require('fastify')({ logger: true, bodyLimit: 50 * 1024 * 1024 });
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { registerPrivateUploadRoutes, MAX_UPLOAD_BYTES } = require('./private-upload');
+const fastify = require('fastify')({ logger: true, bodyLimit: MAX_UPLOAD_BYTES + 1024 * 1024 });
 
 // ============================================
 // SONIOX PROXY CONFIG
@@ -246,10 +247,39 @@ const PUBLIC_ROUTES = new Set([
     'GET:/auth/google/callback',
 ]);
 
+function secretsEqual(provided, expected) {
+    if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) {
+        return false;
+    }
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) {
+        crypto.timingSafeEqual(b, b);
+        return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+}
+
 async function authenticateRequest(req, reply) {
     // Skip auth for WebSocket routes
     const path = req.url.split('?')[0];
     if (path.startsWith('/ws/')) return;
+
+    // Admin secret for remotely creating / crediting private upload codes.
+    if (path.startsWith('/api/admin/')) {
+        const expected = process.env.PRIVATE_CODE_ADMIN_SECRET || '';
+        if (!expected) {
+            return reply.code(503).send({ error: 'Admin API not configured' });
+        }
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : '';
+        if (!secretsEqual(token, expected)) {
+            return reply.code(401).send({ error: 'Invalid admin secret' });
+        }
+        return;
+    }
+    // Private-code upload feature authenticates with the code itself.
+    if (path.startsWith('/api/private/')) return;
 
     // Strip query params for route matching
     const urlPath = (req.routeOptions?.url || path);
@@ -279,9 +309,17 @@ async function start() {
     // Register plugins
     await fastify.register(require('@fastify/cors'), {
         origin: true,
-        methods: ['GET', 'POST']
+        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
     });
     await fastify.register(require('@fastify/websocket'));
+    await fastify.register(require('@fastify/multipart'), {
+        limits: {
+            fileSize: MAX_UPLOAD_BYTES,
+            files: 1,
+            fields: 12,
+        },
+    });
 
     // Initialize schema
     await pool.query(`
@@ -2474,6 +2512,16 @@ async function start() {
             billing.stop();
             sonioxWs = null;
         });
+    });
+
+    // ==================
+    // PRIVATE FILE UPLOAD (silsigan.xyz/upload)
+    // ==================
+
+    await registerPrivateUploadRoutes(fastify, {
+        pool,
+        getSonioxKey: () => SONIOX_PRIVATE_KEY || nextSonioxKey(),
+        publicBaseUrl: PUBLIC_BASE_URL,
     });
 
     // ==================

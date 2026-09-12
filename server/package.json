@@ -5,10 +5,11 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node test/jwt_verify.test.js"
+    "test": "node test/jwt_verify.test.js && node test/private-upload.test.js"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
+    "@fastify/multipart": "^10.1.1",
     "@fastify/websocket": "^11.2.0",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",

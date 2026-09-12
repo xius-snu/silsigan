@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Upload — Silsigan</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Private file transcription for Silsigan.">
+  <link rel="icon" href="favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page upload-page">
+    <header class="top upload-top">
+      <a class="brand-mark" href="/">Silsigan</a>
+      <button type="button" class="text-btn hidden" id="lock-btn">Lock</button>
+    </header>
+
+    <section class="panel upload-card" id="gate">
+      <p class="kicker">Private</p>
+      <h1>Upload</h1>
+      <p class="tagline">Enter a private code to transcribe or translate a recording.</p>
+      <form id="gate-form" class="gate-form" autocomplete="off">
+        <label class="field-label" for="code-input">Private code</label>
+        <input
+          id="code-input"
+          name="code"
+          class="code-input"
+          inputmode="text"
+          autocapitalize="characters"
+          autocomplete="off"
+          spellcheck="false"
+          maxlength="16"
+          placeholder="ABCDXXDF"
+          required
+        >
+        <p class="form-error hidden" id="gate-error"></p>
+        <button type="submit" class="btn upload-btn" id="gate-submit">Continue</button>
+      </form>
+    </section>
+
+    <div id="workspace" class="hidden">
+      <section class="panel upload-card">
+        <div class="credits-row">
+          <div>
+            <p class="kicker" id="code-label">Private</p>
+            <h1>Upload</h1>
+          </div>
+          <div class="credits" id="credits">
+            <span class="credits-value" id="credits-remaining">—</span>
+            <span class="credits-meta" id="credits-meta"></span>
+          </div>
+        </div>
+
+        <form id="upload-form">
+          <div class="dropzone" id="dropzone" tabindex="0" role="button">
+            <input
+              type="file"
+              id="file-input"
+              accept="audio/*,video/mp4,video/webm,.mp3,.wav,.m4a,.mp4,.aac,.flac,.ogg,.webm,.aiff,.aif"
+              hidden
+            >
+            <p class="dropzone-title" id="file-label">Drop a recording here, or choose a file</p>
+            <p class="dropzone-meta">mp3, wav, m4a, mp4, aac, flac, ogg, webm · max 200 MB</p>
+          </div>
+
+          <fieldset class="mode-picks">
+            <legend class="field-label">What do you need?</legend>
+            <label class="choice">
+              <input type="radio" name="mode" value="transcribe" checked>
+              <span>
+                <strong>Transcribe</strong>
+                <em>Speech to text only</em>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="mode" value="translate">
+              <span>
+                <strong>Transcribe + translate</strong>
+                <em>Original and translation</em>
+              </span>
+            </label>
+          </fieldset>
+
+          <div class="lang-row hidden" id="translate-options">
+            <label class="field">
+              <span class="field-label">Translate into</span>
+              <select id="target-language" class="select">
+                <option value="en">English</option>
+                <option value="ko">Korean</option>
+                <option value="vi">Vietnamese</option>
+                <option value="ja">Japanese</option>
+                <option value="zh">Chinese</option>
+                <option value="tr">Turkish</option>
+                <option value="th">Thai</option>
+                <option value="ms">Malay</option>
+                <option value="id">Indonesian</option>
+                <option value="ru">Russian</option>
+                <option value="ar">Arabic</option>
+                <option value="fa">Persian</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Spoken language</span>
+              <select id="source-language" class="select">
+                <option value="">Any (auto-detect)</option>
+                <option value="en">English</option>
+                <option value="ko">Korean</option>
+                <option value="vi">Vietnamese</option>
+                <option value="ja">Japanese</option>
+                <option value="zh">Chinese</option>
+                <option value="tr">Turkish</option>
+                <option value="th">Thai</option>
+                <option value="ms">Malay</option>
+                <option value="id">Indonesian</option>
+                <option value="ru">Russian</option>
+                <option value="ar">Arabic</option>
+                <option value="fa">Persian</option>
+              </select>
+            </label>
+          </div>
+
+          <p class="form-error hidden" id="upload-error"></p>
+          <button type="submit" class="btn upload-btn" id="upload-submit" disabled>Start</button>
+        </form>
+      </section>
+
+      <section class="panel upload-card hidden" id="result-card">
+        <div class="result-head">
+          <p class="kicker" id="result-kicker">Result</p>
+          <p class="result-file" id="result-file"></p>
+        </div>
+        <div class="loading hidden" id="loading">
+          <span class="spinner" aria-hidden="true"></span>
+          <p id="loading-text">Working…</p>
+        </div>
+        <div id="result-body"></div>
+      </section>
+
+      <section class="panel upload-card" id="history-card">
+        <p class="kicker">History</p>
+        <div id="history-list" class="history-list">
+          <p class="muted" id="history-empty">No files yet. Upload a recording to get started.</p>
+        </div>
+      </section>
+    </div>
+
+    <footer class="footer upload-footer">
+      <div>Unlisted · time is billed from the audio duration</div>
+    </footer>
+  </div>
+  <script src="upload.js"></script>
+</body>
+</html>
