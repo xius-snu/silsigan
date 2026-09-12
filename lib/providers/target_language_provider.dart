@@ -13,7 +13,8 @@ enum TargetLanguage {
   russian('Russian', 'ru'),
   indonesian('Indonesian', 'id'),
   arabic('Arabic', 'ar'),
-  persian('Persian', 'fa');
+  persian('Persian', 'fa'),
+  french('French', 'fr');
 
   const TargetLanguage(this.displayName, this.code);
   final String displayName;
