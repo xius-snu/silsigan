@@ -76,4 +76,9 @@ msix_config:
   output_name: Silsigan
 
 flutter:
+  # Codemagic's Flutter has SwiftPM on by default. Firebase's SPM graph
+  # pulls Analytics/Firestore/grpc zips from dl.google.com, which timed
+  # out on the iOS archive. CocoaPods only installs Core + Messaging.
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
