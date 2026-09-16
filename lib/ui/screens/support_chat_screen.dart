@@ -311,6 +311,19 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     );
   }
 
+  void _copyMyId() {
+    final id = UserService.instance.friendCode;
+    if (id == null || id.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: id));
+    HapticFeedback.selectionClick();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('ID copied'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
   bool _isMine(SupportMessage m) => m.fromAdmin == _isTeamView;
 
   @override
@@ -345,7 +358,8 @@ class _SupportChatScreenState extends State<SupportChatScreen>
               if (c.isAccount) 'account',
             ].join(' · ');
     } else {
-      title = 'Support';
+      final id = UserService.instance.friendCode;
+      title = id == null || id.isEmpty ? 'Support' : 'Support (My ID: $id)';
       subtitle = 'Silsigan team';
     }
     return Padding(
@@ -360,7 +374,7 @@ class _SupportChatScreenState extends State<SupportChatScreen>
           ),
           Expanded(
             child: GestureDetector(
-              onTap: _isTeamView ? _copyCustomerId : null,
+              onTap: _isTeamView ? _copyCustomerId : _copyMyId,
               behavior: HitTestBehavior.opaque,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -431,12 +445,17 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     if (_messages.isEmpty) {
       return _buildEmptyState();
     }
+    final showTicketNotice = !_isTeamView &&
+        _messages.any((m) => m.state != SupportSendState.failed);
     return SelectionArea(
       child: ListView.builder(
         reverse: true,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        itemCount: _messages.length,
+        itemCount: _messages.length + (showTicketNotice ? 1 : 0),
         itemBuilder: (context, i) {
+          if (showTicketNotice && i == _messages.length) {
+            return _buildTicketNotice();
+          }
           final index = _messages.length - 1 - i;
           final m = _messages[index];
           final prev = index > 0 ? _messages[index - 1] : null;
@@ -455,6 +474,22 @@ class _SupportChatScreenState extends State<SupportChatScreen>
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildTicketNotice() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      child: Text(
+        'Support ticket created. We\'ll notify you when we reply — '
+        'you can leave this screen.',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 12,
+          height: 1.4,
+          color: AppConstants.textFaint,
+        ),
       ),
     );
   }

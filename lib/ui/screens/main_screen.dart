@@ -722,17 +722,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 else
                   ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
-                if (PurchaseService.isSupported) ...[
-                  const SizedBox(height: 16),
-                  Text(
-                    'Purchased time is saved to your ID above, not to your '
-                    'store account.',
-                    style:
-                        TextStyle(fontSize: 12, color: AppConstants.textMuted),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-
                 const SizedBox(height: 20),
 
                 // Contact Support sits where Restore Purchases used to —
