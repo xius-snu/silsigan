@@ -103,12 +103,13 @@ class PurchaseService {
     return _offerings?.current?.availablePackages ?? [];
   }
 
-  // Deliberately no restore(): hour packs are consumables, so
-  // Purchases.restorePurchases() (StoreKit AppStore.sync) only prompts for the
-  // Apple ID and returns nothing — App Review rejects it (guideline 3.1.1).
-  // Minutes are a server-side ledger keyed by hardware ID / account, so they
-  // already survive reinstall; charged-but-uncredited purchases are recovered
-  // by _retryPendingPurchases() on launch.
+  /// Re-credit any store purchases that reached Apple/Google but never landed
+  /// on our server. The Add More Time footer's "Restore Purchases" link calls
+  /// this — it does **not** call `Purchases.restorePurchases()`, which for
+  /// consumable hour packs only prompts for the Apple ID and returns nothing
+  /// (App Review rejected that prompt under 3.1.1). Minutes live on the
+  /// hardware-ID / account ledger and already survive reinstall.
+  Future<void> retryPendingPurchases() => _retryPendingPurchases();
 
   /// Purchase a package. Returns the number of minutes granted, or null on
   /// failure/cancellation.

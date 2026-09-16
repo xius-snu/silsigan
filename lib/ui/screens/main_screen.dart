@@ -31,11 +31,9 @@ import '../widgets/status_bar.dart';
 import '../widgets/line_by_line_panel.dart';
 import '../widgets/split_view_tip_overlay.dart';
 import '../widgets/conversation_panel.dart';
-import '../widgets/quick_panel.dart';
 import '../widgets/source_language_selector.dart';
 import '../widgets/tts_control_button.dart';
 import '../../providers/conversation_provider.dart';
-import '../../providers/quick_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../providers/desktop_audio_source_provider.dart';
 import '../../services/user_service.dart';
@@ -45,8 +43,12 @@ import '../../services/sync_service.dart';
 import '../../services/background_service.dart';
 import '../../services/update_service.dart';
 import '../../services/purchase_service.dart';
+import '../../services/push_service.dart';
+import '../../services/support_service.dart';
 import '../../utils/desktop.dart';
 import '../widgets/desktop_audio_source_button.dart';
+import 'support_chat_screen.dart';
+import 'support_inbox_screen.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 
 /// Strip leading whitespace and leading punctuation (+ trailing space) so that
@@ -165,27 +167,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // for the whole session.
   bool _isStartingRecording = false;
 
-  // ── Quick Mode (press-and-hold) state ──────────────────────────────
-  // Confirmed (endpoint-completed) text accumulated during the current hold.
-  String _quickTranscriptConfirmed = '';
-  String _quickTranslationConfirmed = '';
-  // When true, the next transcribed word clears the previous hold's display.
-  bool _quickResetPending = false;
-  // True between mic press and release.
-  bool _quickHolding = false;
-  // True while the async start handler is still running its fast setup
-  // (permission/auth/mic) — the proxy handshake itself runs in the
-  // background (optimistic start).
-  bool _quickStarting = false;
-  // Resolves when the optimistic (unawaited) connect finishes its handshake
-  // attempt. The release path awaits it before finalizeAndWait — a fast
-  // press-release would otherwise finalize a not-yet-open socket and drop
-  // the speech buffered during the handshake.
-  Future<void>? _quickConnectFuture;
-  // Language swap state, shared by Quick Mode's swap button and the tappable
-  // arrow in line-by-line / split modes. When swapped, a second press restores
-  // these snapshots; otherwise it computes a fresh swap. Source/target live in
-  // global providers, so the swap is a single source of truth across modes.
+  // Language swap state for the tappable arrow in line-by-line / split modes.
+  // When swapped, a second press restores these snapshots; otherwise it
+  // computes a fresh swap. Source/target live in global providers, so the swap
+  // is a single source of truth across modes.
   bool _langSwapped = false;
   TargetLanguage? _preSwapSource;
   TargetLanguage _preSwapTarget = TargetLanguage.vietnamese;
@@ -216,6 +201,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   // Transient "copied" state for the customer-ID row in the purchase sheet.
   bool _idCopiedInSheet = false;
+
+  // Support-chat push subscriptions (see initState).
+  StreamSubscription<SupportPushEvent>? _pushForegroundSub;
+  StreamSubscription<SupportPushEvent>? _pushOpenedSub;
 
   // Autosave: periodic timer + session start timestamp
   Timer? _autosaveTimer;
@@ -275,6 +264,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // once-per-install restore probe lands a second or two after launch — so
     // the screen follows the service rather than only the sheet's buttons.
     AccountService.instance.stateListenable.addListener(_onAccountChanged);
+    // Support chat pushes. A message arriving while the app is open shows a
+    // small in-app notice (unless that thread is already on screen); a tap on
+    // a system notification opens the thread it belongs to.
+    _pushForegroundSub =
+        PushService.instance.onForegroundMessage.listen(_onSupportPush);
+    _pushOpenedSub = PushService.instance.onNotificationOpened.listen(
+      (event) => _openSupportFromPush(event),
+    );
     // Restore saved languages and autosaved draft
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoreSavedLanguages();
@@ -282,6 +279,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _checkForUpdate();
       _fetchUsage();
       PurchaseService.instance.init();
+      unawaited(SupportService.instance.refreshStatus());
+      // Launched from a notification tap — go straight to the thread.
+      final pending = PushService.instance.pendingOpen;
+      if (pending != null) {
+        PushService.instance.pendingOpen = null;
+        _openSupportFromPush(pending);
+      }
     });
   }
 
@@ -290,12 +294,53 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ref.read(accountProvider.notifier).state = AccountService.instance.state;
     _fetchUsage(force: true);
     ref.invalidate(sessionHistoryProvider);
+    // The support thread and push binding both key off the user id, which
+    // just changed: forget the cached role, move the token, refetch unread.
+    unawaited(SupportService.instance.resetForIdentityChange().then((_) {
+      PushService.instance.syncToken();
+      return SupportService.instance.refreshStatus();
+    }));
+  }
+
+  void _onSupportPush(SupportPushEvent event) {
+    if (!mounted) return;
+    // Already looking at it — the screen refreshes itself.
+    if (SupportChatScreen.isShowingThread(event.threadUserId)) return;
+    if (SupportInboxScreen.isOpen) return;
+    unawaited(SupportService.instance.refreshStatus());
+    final title = event.title?.trim();
+    final body = event.body?.trim();
+    final text = [
+      if (title != null && title.isNotEmpty) title,
+      if (body != null && body.isNotEmpty) body,
+    ].join(': ');
+    if (text.isEmpty) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(text, maxLines: 2, overflow: TextOverflow.ellipsis),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'Open',
+            onPressed: () => _openSupportFromPush(event),
+          ),
+        ),
+      );
+  }
+
+  void _openSupportFromPush(SupportPushEvent event) {
+    if (!mounted) return;
+    if (SupportChatScreen.isShowingThread(event.threadUserId)) return;
+    openSupport(context, threadUserId: event.threadUserId);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     AccountService.instance.stateListenable.removeListener(_onAccountChanged);
+    _pushForegroundSub?.cancel();
+    _pushOpenedSub?.cancel();
     _newLineTimer?.cancel();
     _newLineTimerTranslation?.cancel();
     _sentenceBreakTimer?.cancel();
@@ -429,8 +474,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final displayMode = ref.read(displayModeProvider);
       if (displayMode == DisplayMode.conversation) {
         await _stopConversationSession();
-      } else if (displayMode == DisplayMode.quick) {
-        await _stopQuickRecording();
       } else {
         await _stopRecording();
       }
@@ -492,8 +535,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final displayMode = ref.read(displayModeProvider);
       if (displayMode == DisplayMode.conversation) {
         await _stopConversationSession();
-      } else if (displayMode == DisplayMode.quick) {
-        await _stopQuickRecording();
       } else {
         await _stopRecording();
       }
@@ -552,6 +593,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     if (!mounted) return;
     _idCopiedInSheet = false;
+    // Refresh the support unread badge in the background; the button
+    // listens to the notifier so it updates in place if the call lands.
+    unawaited(SupportService.instance.refreshStatus());
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -678,11 +722,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 else
                   ...rcPackages.map((pkg) => _buildRcPackageCard(ctx, pkg)),
 
-                // No "Restore Purchases" button: hour packs are consumables,
-                // which StoreKit restore can't return (and App Review rejects
-                // the Apple-ID prompt it triggers — guideline 3.1.1). Minutes
-                // live on the server keyed by hardware ID / account, so they
-                // survive reinstall on their own; support goes via the ID above.
                 if (PurchaseService.isSupported) ...[
                   const SizedBox(height: 16),
                   Text(
@@ -694,36 +733,76 @@ class _MainScreenState extends ConsumerState<MainScreen>
                   ),
                 ],
 
-                const SizedBox(height: 12),
+                const SizedBox(height: 20),
 
-                // Privacy Policy & Terms of Service
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    GestureDetector(
-                      onTap: () => launchUrl(
-                        Uri.parse(AppConstants.privacyPolicyUrl),
-                        mode: LaunchMode.externalApplication,
-                      ),
-                      child: Text(
-                        'Privacy Policy',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: AppConstants.textFaint,
-                          decoration: TextDecoration.underline,
+                // Contact Support sits where Restore Purchases used to —
+                // the sheet closes first so Back from the chat lands on
+                // the main screen, not on this sheet.
+                Center(
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: SupportService.instance.unreadCount,
+                    builder: (_, unread, __) => GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        openSupport(context);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.chat_bubble_outline,
+                              size: 16,
+                              color: AppConstants.textSecondary,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Contact Support',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: AppConstants.textSecondary,
+                              ),
+                            ),
+                            if (unread > 0) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  color: AppConstants.micButtonColor,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Text(
-                        '|',
-                        style: TextStyle(
-                            fontSize: 12, color: AppConstants.textFaint),
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Privacy | Terms | Restore — three quiet text links.
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _purchaseFooterLink(
+                      'Privacy Policy',
+                      () => launchUrl(
+                        Uri.parse(AppConstants.privacyPolicyUrl),
+                        mode: LaunchMode.externalApplication,
                       ),
                     ),
-                    GestureDetector(
-                      onTap: () => launchUrl(
+                    _purchaseFooterSep(),
+                    _purchaseFooterLink(
+                      'Terms of Use',
+                      () => launchUrl(
                         Uri.parse(
                           Platform.isIOS
                               ? AppConstants.appleEulaUrl
@@ -731,15 +810,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
                         ),
                         mode: LaunchMode.externalApplication,
                       ),
-                      child: Text(
-                        'Terms of Use',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: AppConstants.textFaint,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
                     ),
+                    if (PurchaseService.isSupported) ...[
+                      _purchaseFooterSep(),
+                      _purchaseFooterLink(
+                        'Restore Purchases',
+                        () => _resyncPurchases(ctx),
+                      ),
+                    ],
                   ],
                 ),
               ],
@@ -747,6 +825,64 @@ class _MainScreenState extends ConsumerState<MainScreen>
           ),
         );
       },
+    );
+  }
+
+  Widget _purchaseFooterLink(String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 12,
+          color: AppConstants.textFaint,
+          decoration: TextDecoration.underline,
+        ),
+      ),
+    );
+  }
+
+  Widget _purchaseFooterSep() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Text(
+        '|',
+        style: TextStyle(fontSize: 12, color: AppConstants.textFaint),
+      ),
+    );
+  }
+
+  /// Footer "Restore Purchases". Re-credits pending store charges and
+  /// refreshes the server ledger. Does not call StoreKit restore — hour
+  /// packs are consumables, so that prompt returns nothing and App Review
+  /// rejected it. Feedback is a dialog because a SnackBar would render
+  /// behind this sheet.
+  Future<void> _resyncPurchases(BuildContext sheetCtx) async {
+    await PurchaseService.instance.retryPendingPurchases();
+    await _fetchUsage(force: true);
+    if (!sheetCtx.mounted) return;
+    final id = UserService.instance.friendCode ?? 'this ID';
+    await showDialog<void>(
+      context: sheetCtx,
+      builder: (dCtx) => AlertDialog(
+        backgroundColor: AppConstants.sheetColor,
+        title: Text(
+          'Restore Purchases',
+          style: TextStyle(color: AppConstants.textPrimary),
+        ),
+        content: Text(
+          'Purchased time is saved to $id, not to your store account. '
+          'It is already on this device. If a purchase is missing, contact '
+          'support with that ID.',
+          style: TextStyle(color: AppConstants.textSecondary, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx),
+            child: Text('OK', style: TextStyle(color: AppConstants.textPrimary)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1782,8 +1918,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
   /// Capture start is still blocked on the system picker (or mic start).
   /// Soniox idle timeouts in this window are not user-facing errors.
-  bool get _awaitingCaptureStart =>
-      _isStartingRecording || _convStarting || _quickStarting;
+  bool get _awaitingCaptureStart => _isStartingRecording || _convStarting;
 
   void _showSonioxError(String error) {
     if (!mounted) return;
@@ -1959,7 +2094,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
   bool get _sessionActiveOrStarting =>
       ref.read(recordingStateProvider) != RecordingState.idle ||
       _isStartingRecording ||
-      _quickStarting ||
       _convStarting;
 
   Future<void> _restoreAutosaveDraft() async {
@@ -2458,271 +2592,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     saveConversationLanguages(theirLang, myLang);
   }
 
-  // ── Quick Mode Recording (press-and-hold) ───────────────────────────
-
-  String _quickJoin(String a, String b) {
-    if (a.isEmpty) return b;
-    if (b.isEmpty) return a;
-    return '$a $b';
-  }
-
-  /// Clear the previous hold's display on the first word of a new hold, so the
-  /// old translation stays visible until fresh text actually arrives.
-  void _maybeQuickReset(String text) {
-    if (!_quickResetPending || text.trim().isEmpty) return;
-    _quickResetPending = false;
-    _quickTranscriptConfirmed = '';
-    _quickTranslationConfirmed = '';
-    ref.read(quickTranscriptProvider.notifier).state = '';
-    ref.read(quickTranslationProvider.notifier).state = '';
-  }
-
-  void _setupQuickCallbacks() {
-    _sonioxService.onLanguageDetected = (language) {
-      ref.read(detectedLanguageProvider.notifier).state = language;
-    };
-
-    _sonioxService.onTranscriptionDraft = (draft) {
-      _maybeQuickReset(draft);
-      _setIfChanged(quickTranscriptProvider,
-          _quickJoin(_quickTranscriptConfirmed, draft));
-    };
-
-    _sonioxService.onTranscriptionCompleted = (transcript) {
-      _maybeQuickReset(transcript);
-      final clean = _cleanLineStart(transcript.trim());
-      if (clean.isNotEmpty) {
-        _quickTranscriptConfirmed =
-            _quickJoin(_quickTranscriptConfirmed, clean);
-      }
-      ref.read(quickTranscriptProvider.notifier).state =
-          _quickTranscriptConfirmed;
-    };
-
-    _sonioxService.onTranslationDraft = (draft) {
-      _setIfChanged(quickTranslationProvider,
-          _quickJoin(_quickTranslationConfirmed, draft));
-    };
-
-    _sonioxService.onTranslationCompleted = (translation) {
-      final clean = _cleanLineStart(translation.trim());
-      if (clean.isNotEmpty) {
-        _quickTranslationConfirmed =
-            _quickJoin(_quickTranslationConfirmed, clean);
-      }
-      ref.read(quickTranslationProvider.notifier).state =
-          _quickTranslationConfirmed;
-    };
-
-    _sonioxService.onError = (error) {
-      _showSonioxError(error);
-    };
-  }
-
-  Future<void> _startQuickRecording() async {
-    if (_quickStarting) return;
-    final st = ref.read(recordingStateProvider);
-    if (st == RecordingState.recording || st == RecordingState.processing) {
-      return;
-    }
-
-    // Server-authoritative usage limit (shows paywall if exhausted).
-    if (_usageLimitReached) {
-      _forceStopForUsageLimit();
-      return;
-    }
-
-    _quickHolding = true;
-    _quickStarting = true;
-
-    final status = await _requestRecordingPermissions();
-    if (!status.isGranted) {
-      _quickHolding = false;
-      _quickStarting = false;
-      return;
-    }
-
-    // Cut off any translation still being spoken from the previous hold.
-    _ttsService.flush();
-
-    // Keep the previous text on screen until the first new word arrives.
-    _quickResetPending = true;
-    ref.read(detectedLanguageProvider.notifier).state = null;
-    _setupQuickCallbacks();
-    _audioService.onAudioChunk = (bytes) => _sonioxService.sendAudio(bytes);
-
-    final targetLanguage = ref.read(targetLanguageProvider);
-    _recordRecentTarget(targetLanguage);
-
-    try {
-      await BackgroundService.startRecordingService();
-      await UserService.instance.ensureAuthenticated();
-      _sonioxService.userId = UserService.instance.userId;
-      _sonioxService.authToken = UserService.instance.authToken;
-      _sonioxService.isPrivateUser = _isPrivateUser;
-      // Optimistic start (same pattern as _startRecording): the handshake is
-      // NOT awaited, so capture begins the moment the press lands and speech
-      // spoken while the proxy connects buffers in the service (30s cap) and
-      // flushes into a proven-live socket — this is what makes Quick Mode
-      // actually quick. connect() must be invoked before
-      // _audioService.start() (it synchronously clears the audio buffer
-      // before its first await).
-      // Screen-share picker: wait for consent so Soniox doesn't idle-timeout
-      // while the system sheet is still up.
-      Future<void> connectProxy() => _sonioxService.connect(
-            targetLanguageCode: targetLanguage.code,
-            forceTranslation: true,
-            languageHint: ref.read(sourceLanguageProvider)?.code ?? '',
-          );
-      if (_needsScreenSharePicker) {
-        try {
-          await _sonioxService.disconnect().timeout(const Duration(seconds: 2));
-        } catch (_) {}
-        await _startAudioCapture();
-        _quickConnectFuture = connectProxy();
-      } else {
-        _quickConnectFuture = connectProxy();
-        await _startAudioCapture();
-      }
-      _recordingStartedAt = DateTime.now();
-      ref.read(recordingStateProvider.notifier).state =
-          RecordingState.recording;
-      UserService.instance.reportActivity('recording_start', {'mode': 'quick'});
-    } catch (e) {
-      // The unawaited connect may already be live (or mid-handshake) — tear
-      // it down so a failed mic start can't leak a connected session with no
-      // audio source.
-      try {
-        await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
-      } catch (_) {}
-      _quickConnectFuture = null;
-      await BackgroundService.stopRecordingService();
-      _quickStarting = false;
-      _quickHolding = false;
-      if (mounted) {
-        ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(recordingStartErrorMessage(e))),
-        );
-      }
-      return;
-    }
-
-    _quickStarting = false;
-
-    // The user may have released before the setup finished — stop now.
-    if (!_quickHolding) {
-      await _stopQuickRecording();
-    }
-  }
-
-  Future<void> _stopQuickRecording() async {
-    _quickHolding = false;
-
-    // Start handler is still connecting; it will call us once it finishes.
-    if (_quickStarting) return;
-    // Nothing to stop unless we're actually recording.
-    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
-    if (_isStopping) return;
-    _isStopping = true;
-
-    ref.read(recordingStateProvider.notifier).state = RecordingState.processing;
-
-    // Stop audio input immediately — no more speech is captured.
-    try {
-      await _audioService.stop().timeout(const Duration(seconds: 5));
-    } catch (_) {}
-
-    // A fast press-release can beat the optimistic handshake. Wait for it so
-    // the speech buffered during the connect flushes into the live socket —
-    // finalizeAndWait is a silent no-op on an unconnected service, and
-    // disconnecting here would drop the whole utterance.
-    final quickWasStillConnecting = !_sonioxService.isConnected;
-    final quickConnect = _quickConnectFuture;
-    _quickConnectFuture = null;
-    if (quickConnect != null) {
-      try {
-        await quickConnect.timeout(const Duration(seconds: 8));
-      } catch (_) {}
-    }
-
-    // Finalize and WAIT for the trailing translation to actually finish
-    // streaming (even though the user already released), then disconnect —
-    // which flushes the settled translation into the providers. A fixed delay
-    // here would cut off translations that lag the source. When the release
-    // beat the handshake, the utterance was only just flushed into a cold
-    // session — extend the quiet window past model warm-up (~1-2s) so the
-    // settle can't expire before the first token even arrives.
-    try {
-      await _sonioxService.finalizeAndWait(
-        quiet: quickWasStillConnecting
-            ? const Duration(seconds: 2)
-            : const Duration(milliseconds: 500),
-      );
-    } catch (_) {}
-    try {
-      await _sonioxService.disconnect().timeout(const Duration(seconds: 3));
-    } catch (_) {}
-
-    try {
-      await BackgroundService.stopRecordingService()
-          .timeout(const Duration(seconds: 3));
-    } catch (_) {}
-
-    _audioService.clearRecording();
-    _isStopping = false;
-
-    // Usage reporting (Quick Mode is metered like the other modes).
-    if (_recordingStartedAt != null) {
-      final durationSecs =
-          DateTime.now().difference(_recordingStartedAt!).inSeconds;
-      UserService.instance.reportActivity('recording_stop', {
-        'duration_seconds': durationSecs,
-        'mode': 'quick',
-      });
-      _usedSeconds += durationSecs;
-      _recordingStartedAt = null;
-      _fetchUsage();
-    }
-
-    // Speak the full translation aloud, unless the user muted Quick Mode's
-    // speaker toggle.
-    final translation = ref.read(quickTranslationProvider).trim();
-    if (ref.read(quickTtsEnabledProvider) &&
-        translation.isNotEmpty &&
-        TtsService.supportsLanguage(ref.read(targetLanguageProvider).code)) {
-      _ttsService.speak(translation);
-    }
-
-    if (mounted) {
-      ref.read(recordingStateProvider.notifier).state = RecordingState.idle;
-    }
-  }
-
-  /// Clear Quick Mode's transcription + translation immediately (no confirm)
-  /// and stop any speech still playing.
-  void _clearQuick() {
-    _quickTranscriptConfirmed = '';
-    _quickTranslationConfirmed = '';
-    _quickResetPending = false;
-    ref.read(quickTranscriptProvider.notifier).state = '';
-    ref.read(quickTranslationProvider.notifier).state = '';
-    ref.read(detectedLanguageProvider.notifier).state = null;
-    // The current languages become the new baseline for the swap toggle.
-    if (_langSwapped) setState(() => _langSwapped = false);
-    _ttsService.flush();
-  }
-
-  /// Re-speak the current Quick Mode translation on demand. Uses speakOnce so
-  /// it plays even when the speaker toggle is muted (and a second tap stops it).
-  void _replayQuick() {
-    final translation = ref.read(quickTranslationProvider).trim();
-    if (translation.isEmpty) return;
-    if (!TtsService.supportsLanguage(ref.read(targetLanguageProvider).code)) {
-      return;
-    }
-    _ttsService.speakOnce(translation);
-  }
+  // ── Language swap (line-by-line / split) ────────────────────────────
 
   /// The [TargetLanguage] whose code matches [code], or null if [code] isn't
   /// one of the supported target languages (unlike [TargetLanguage.fromCode],
@@ -2758,21 +2628,16 @@ class _MainScreenState extends ConsumerState<MainScreen>
     saveRecentTargets(_recentTargets);
   }
 
-  /// Whether the current mode has any transcribed content yet — used by the
+  /// Whether the current session has any transcribed content yet — used by the
   /// language swap to decide whether it can infer the reply language from what
-  /// was just spoken. Quick Mode keeps a single transcript string; line-by-line
-  /// and split keep a history list.
-  bool get _hasTranscribedContent {
-    if (ref.read(displayModeProvider) == DisplayMode.quick) {
-      return ref.read(quickTranscriptProvider).trim().isNotEmpty;
-    }
-    return ref.read(koreanHistoryProvider).any((l) => l.trim().isNotEmpty);
-  }
+  /// was just spoken.
+  bool get _hasTranscribedContent =>
+      ref.read(koreanHistoryProvider).any((l) => l.trim().isNotEmpty);
 
-  /// Language swap. Used by Quick Mode's swap button and the tappable arrow in
-  /// line-by-line / split modes. Toggles the target language to the other side
-  /// of the conversation so the listener can reply, and restores the original on
-  /// a second press. Behavior depends on the current setup:
+  /// Language swap for the tappable arrow in line-by-line / split modes.
+  /// Toggles the target language to the other side of the conversation so the
+  /// listener can reply, and restores the original on a second press. Behavior
+  /// depends on the current setup:
   ///   • Source pinned (2-way): swap source ↔ target.
   ///   • Source "Any" + transcript: target → the detected transcript language.
   ///   • Source "Any" + empty (or undetectable): target → most-recently-used.
@@ -2854,7 +2719,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
   @override
   Widget build(BuildContext context) {
     // NOTE: the streaming providers (drafts, histories, speaker history,
-    // conversation/quick state) are deliberately NOT watched here — they
+    // conversation state) are deliberately NOT watched here — they
     // update several times per second while recording, and watching them at
     // this level rebuilt the entire screen per Soniox token. Each panel
     // below watches what it needs inside its own Consumer.
@@ -2876,15 +2741,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
     if (displayMode != DisplayMode.conversation) {
       _ttsService.setLanguageCode(targetLanguage.code);
     }
-    // Quick + Conversation always voice the translation on release; the other
-    // modes use the global toggle. Driving setEnabled from the active mode on
-    // every build also keeps rebuilds from cutting off in-progress playback.
-    final quickTtsEnabled = ref.watch(quickTtsEnabledProvider);
-    final bool ttsOn = displayMode == DisplayMode.quick
-        ? quickTtsEnabled
-        : displayMode == DisplayMode.conversation
-            ? ref.watch(conversationTtsEnabledProvider)
-            : ttsEnabled;
+    // Conversation has its own speaker toggle; the other modes use the global
+    // toggle. Driving setEnabled from the active mode on every build also
+    // keeps rebuilds from cutting off in-progress playback.
+    final bool ttsOn = displayMode == DisplayMode.conversation
+        ? ref.watch(conversationTtsEnabledProvider)
+        : ttsEnabled;
     _ttsService.setEnabled(ttsOn);
     _ttsService.setRate(ref.watch(ttsRateProvider));
 
@@ -3008,16 +2870,6 @@ class _MainScreenState extends ConsumerState<MainScreen>
                             children: [
                               const Expanded(child: Text('Conversation')),
                               if (current == DisplayMode.conversation)
-                                const Icon(Icons.check, size: 18),
-                            ],
-                          ),
-                        ),
-                        PopupMenuItem<DisplayMode>(
-                          value: DisplayMode.quick,
-                          child: Row(
-                            children: [
-                              const Expanded(child: Text('Quick Mode')),
-                              if (current == DisplayMode.quick)
                                 const Icon(Icons.check, size: 18),
                             ],
                           ),
@@ -3156,42 +3008,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
               ),
             ),
 
-            // Content area: Quick / Conversation / Split / Line-by-Line
-            if (displayMode == DisplayMode.quick) ...[
-              Expanded(
-                child: Consumer(builder: (context, ref, _) {
-                  return QuickPanel(
-                    transcript: ref.watch(quickTranscriptProvider),
-                    translation: ref.watch(quickTranslationProvider),
-                    recordingState: recordingState,
-                    targetLanguage: targetLanguage,
-                    sourceLanguage: sourceLanguage,
-                    detectedLanguage: detectedLanguage,
-                    onSourceChanged: (lang) {
-                      ref.read(sourceLanguageProvider.notifier).state = lang;
-                      saveSourceLanguage(lang);
-                      if (_langSwapped) setState(() => _langSwapped = false);
-                    },
-                    speakerEnabled: quickTtsEnabled,
-                    onSpeakerChanged: (v) {
-                      ref.read(quickTtsEnabledProvider.notifier).state = v;
-                    },
-                    onMicPressStart: _startQuickRecording,
-                    onMicPressEnd: _stopQuickRecording,
-                    onClear: _clearQuick,
-                    onReplay: _replayQuick,
-                    onTargetLanguageChanged: (lang) {
-                      ref.read(targetLanguageProvider.notifier).state = lang;
-                      saveTargetLanguage(lang);
-                      _recordRecentTarget(lang);
-                      if (_langSwapped) setState(() => _langSwapped = false);
-                    },
-                    swapActive: _langSwapped,
-                    onSwap: _swapLanguages,
-                  );
-                }),
-              ),
-            ] else if (displayMode == DisplayMode.conversation) ...[
+            // Content area: Conversation / Split / Line-by-Line
+            if (displayMode == DisplayMode.conversation) ...[
               Expanded(
                 child: Consumer(builder: (context, ref, _) {
                   return ConversationPanel(

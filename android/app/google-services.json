@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "508835371112",
+    "project_id": "silsigan-ebbee",
+    "storage_bucket": "silsigan-ebbee.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:508835371112:android:9d4a9e0c569c24daa043dd",
+        "android_client_info": {
+          "package_name": "com.silsigan.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAzTqbyNRJ_K6UZ5DlXW565YRgXzsFatog"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

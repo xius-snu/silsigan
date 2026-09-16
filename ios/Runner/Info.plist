@@ -58,6 +58,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>remote-notification</string>
 	</array>
 	<!-- Google Sign-In redirect. Replace the string below with the REVERSED
 	     iOS OAuth client ID from Google Cloud Console (it looks like

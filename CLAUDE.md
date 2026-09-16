@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Five display modes (line-by-line, split, conversation, transcription, quick), twelve target languages, a light/dark theme toggle, and optional Google/Apple account sync that pools time and saved recordings across a user's devices.
+Real-time speech translation app built with Flutter. User speaks in any language (auto-detected), sees live transcript, and gets streaming translations powered by Soniox (ASR + translation). Four display modes (line-by-line, split, conversation, transcription), twelve target languages, a light/dark theme toggle, and optional Google/Apple account sync that pools time and saved recordings across a user's devices.
 
 **Spec file:** `korean_vietnamese_live_translation_spec.md`
 
@@ -55,7 +55,7 @@ flutter run --dart-define=SONIOX_PRIVATE=true   # routes through full-quality ke
 flutter build apk                                # APKs build with no dart-defines
 ```
 
-Render env vars: `SONIOX_API_KEYS`, `LIMITED_SONIOX_API_KEYS`, `SONIOX_PRIVATE_KEY`, `DATABASE_URL`, `PUBLIC_ACCESS_DISABLED`, RevenueCat webhook secret.
+Render env vars: `SONIOX_API_KEYS`, `LIMITED_SONIOX_API_KEYS`, `SONIOX_PRIVATE_KEY`, `DATABASE_URL`, `PUBLIC_ACCESS_DISABLED`, RevenueCat webhook secret, `FIREBASE_SERVICE_ACCOUNT` (optional — support-chat push).
 
 ---
 
@@ -63,21 +63,21 @@ Render env vars: `SONIOX_API_KEYS`, `LIMITED_SONIOX_API_KEYS`, `SONIOX_PRIVATE_K
 
 ```
 lib/
-├── main.dart                              # Initializes BackgroundService + UserService
+├── main.dart                              # Initializes BackgroundService + UserService + PushService
 ├── app.dart
 ├── models/
 │   ├── transcript_session.dart            # +title, +timestampsJson, +audioPath
-│   └── word_timestamp.dart                # Per-word ms offsets for audio scrubbing
+│   ├── word_timestamp.dart                # Per-word ms offsets for audio scrubbing
+│   └── support_message.dart               # Support chat message / thread summary
 ├── providers/
 │   ├── recording_provider.dart            # idle/recording/processing/postRecording
-│   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription/quick
+│   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription
 │   ├── target_language_provider.dart      # 8 languages + sourceLanguageProvider (null = Any)
 │   ├── detected_language_provider.dart    # Soniox-detected source language
 │   ├── theme_provider.dart                # darkModeProvider (toggle-driven, persisted)
 │   ├── transcript_provider.dart           # koreanDraft + koreanHistory (legacy naming)
 │   ├── translation_provider.dart          # vietnameseDraft + vietnameseHistory (legacy naming)
 │   ├── conversation_provider.dart         # Conversation mode: myLanguage/theirLanguage/messages
-│   ├── quick_provider.dart                # Quick mode: quickTranscript + quickTranslation (strings)
 │   ├── tts_provider.dart                  # ttsEnabled, ttsRate (0.5–1.5×)
 │   ├── account_provider.dart              # AccountState mirror of AccountService
 │   └── session_history_provider.dart      # FutureProvider over SQLite
@@ -89,18 +89,21 @@ lib/
 │   ├── user_service.dart                  # Auth, customer ID (friend code), hardware ID, usage
 │   ├── sync_service.dart                  # Upload saved sessions to Render
 │   ├── purchase_service.dart              # RevenueCat init/purchase/pending retry
+│   ├── support_service.dart               # In-app 1:1 support chat HTTP client
+│   ├── push_service.dart                  # FCM wrapper (no-op until flutterfire configure)
 │   ├── update_service.dart                # Force-update check
 │   ├── account_service.dart               # Optional Google/Apple sign-in + merge
 │   └── background_service.dart            # Android foreground service (flutter_foreground_task)
 ├── ui/
 │   ├── screens/
 │   │   ├── main_screen.dart               # Primary screen — all display modes
-│   │   └── consent_screen.dart            # One-time data-sharing consent gate
+│   │   ├── consent_screen.dart            # One-time data-sharing consent gate
+│   │   ├── support_chat_screen.dart       # 1:1 support thread (customer or team reply)
+│   │   └── support_inbox_screen.dart      # Team inbox (service_admin only)
 │   └── widgets/
 │       ├── transcript_panel.dart          # Split-mode scrollable panel with copy button
 │       ├── line_by_line_panel.dart        # Aligned per-utterance pairs with audio scrubbing
 │       ├── conversation_panel.dart        # Chat-bubble UI; two-sided shared toggle mic (two-way)
-│       ├── quick_panel.dart               # Quick mode: big-text top/bottom + press-and-hold mic
 │       ├── source_language_selector.dart  # Left-side source picker (Any/auto-detect or pinned)
 │       ├── record_button.dart             # Animated mic/stop with haptics
 │       ├── save_discard_row.dart          # idle/postRecording side buttons
@@ -115,6 +118,7 @@ lib/
 
 server/
 ├── index.js                               # Render API (Fastify + Postgres)
+├── support-chat.js                        # Support threads + FCM push
 ├── proxy-standalone.js                    # Hetzner Soniox proxy
 ├── package.json
 └── .env.example
@@ -130,7 +134,8 @@ server/
 2. **`split`** — two scrollable panels (transcript/translation); paragraph breaks on 2s pause or 4 sentences; late translations re-attach to their paragraph.
 3. **`conversation`** — chat bubbles, two language slots (`myLanguageProvider` / `theirLanguageProvider`). Uses Soniox **two-way translation** (`{"type":"two_way","language_a","language_b"}`): a **single toggle** (tap either mic) starts one shared listening session and both people speak in turn — no button holding. Each utterance is auto-routed to the correct side by its Soniox-detected source language (original tokens carry `language`; translation tokens carry `source_language`), and each completed translation is spoken aloud in the *listener's* language. TTS **defaults off** (playing audio out loud on a shared two-way mic invites echo); enabling it via the speaker button in the header (`conversationTtsEnabledProvider`) first prompts the user to put on headphones. When on, it's cut when the other side takes the floor. `activeConversationSpeakerProvider` tracks the current detected speaker (drives the live draft bubble); `conversationConnectingProvider` shows a connecting affordance during the connect window.
 4. **`transcription`** — transcript only, no translation (skips Soniox `translation` config).
-5. **`quick`** — press-and-hold "walkie-talkie" translator (`QuickPanel`, self-contained). Big text, transcription top / translation bottom, no save/history. Hold the mic to record; the first transcribed word clears the previous result; release stops audio input, lets the trailing translation settle (~700ms), then speaks the full translation via TTS (always on, independent of the global toggle). State lives in `quick_provider.dart` (`quickTranscript` / `quickTranslation` — single growing strings, not history lists).
+
+(A press-and-hold `quick` mode existed until 2026-09 and was removed; `loadSavedDisplayMode` falls back to `lineByLine` for the stale persisted name.)
 
 ---
 
@@ -138,7 +143,7 @@ server/
 
 Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese, Korean, Japanese, Thai, Malay, Russian, Indonesian, Arabic, Persian**. Each has a `displayName` and ISO `code`. TTS support matches the locale map in `tts_service.dart`.
 
-**Source language** is also selectable (left side, `sourceLanguageProvider`; `null` = **Any**/auto-detect). A pinned source is sent to Soniox as a `language_hints` entry (`SourceLanguageSelector`), enabling e.g. English → Vietnamese. Applies to line-by-line, split, and quick modes; conversation has its own two-language slots. While recording with "Any", the box shows the detected language.
+**Source language** is also selectable (left side, `sourceLanguageProvider`; `null` = **Any**/auto-detect). A pinned source is sent to Soniox as a `language_hints` entry (`SourceLanguageSelector`), enabling e.g. English → Vietnamese. Applies to line-by-line and split modes; conversation has its own two-language slots. While recording with "Any", the box shows the detected language.
 
 ---
 
@@ -149,6 +154,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - History: modal bottom sheet (`HistorySheet`) — list + inline detail + audio player.
 - Save flow: save → open history sheet with the saved session pre-selected.
 - Purchase and TTS settings are modal sheets/dialogs.
+- Support chat is a pushed page (`SupportChatScreen` / `SupportInboxScreen`) so the keyboard and thread can take the whole screen. The Add More Time sheet is closed before it opens.
 
 ### 3-State Bottom Button Flow
 1. **Idle:** History, Mic, Check (unhighlighted)
@@ -167,7 +173,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - When target == source (e.g. Korean→Korean), transcription is copied into the translation panel.
 - **Rotation timer:** WS is rotated every 10 minutes to prevent translation model degradation in long sessions; `contextText` (last 10 history lines) is replayed to keep continuity.
 - **Reconnect:** up to 50 attempts; audio buffered (capped at 30s) during reconnection.
-- **Optimistic start (ALL modes):** `_startRecording`, `_startQuickRecording`, and `_startConversationSession` do NOT await `connect()` — the mic starts and the UI flips to recording immediately (~200ms); the proxy handshake completes in the background while speech buffers (30s cap) and flushes only into a proven-live socket. `connect()` must be *invoked* before `_audioService.start()` (it synchronously clears the audio buffer before its first await). Start-time connection failures fall into the same reconnect/backoff path as a mid-session drop. Quick/Conversation stops first await the stored connect future (8s cap) so a fast press-release/stop-tap can't finalize a not-yet-open socket and drop the buffered speech.
+- **Optimistic start (ALL modes):** `_startRecording` and `_startConversationSession` do NOT await `connect()` — the mic starts and the UI flips to recording immediately (~200ms); the proxy handshake completes in the background while speech buffers (30s cap) and flushes only into a proven-live socket. `connect()` must be *invoked* before `_audioService.start()` (it synchronously clears the audio buffer before its first await). Start-time connection failures fall into the same reconnect/backoff path as a mid-session drop. Conversation stop first awaits the stored connect future (8s cap) so a fast stop-tap can't finalize a not-yet-open socket and drop the buffered speech.
 - **Late translation flush:** translations arriving after the source endpoint are debounced 800ms so they don't merge with the next utterance.
 - **Server-authoritative usage limit:** when the proxy closes WS with **code 4005**, `onUsageLimitReached` fires → recording stops + paywall dialog. The client does NOT run its own timer; see [usage timer behavior](memory/feedback_apk_build.md).
 
@@ -243,7 +249,15 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - iOS only — Android shows mock UI with "not available" snackbar.
 - Successful purchase → POST to Render to credit minutes → refresh `_usedSeconds` / `_limitMinutes`.
 - Pending purchases (Apple credited but server failed) are persisted and retried on next launch.
-- **No "Restore Purchases" button, and never call `Purchases.restorePurchases()`.** Hour packs are consumables: StoreKit restore prompts for the Apple ID and returns nothing, and App Review rejected exactly that under guideline 3.1.1 (2026-09). Minutes already survive reinstall via the hardware-ID / account ledger; support cases go through the customer ID in the purchase sheet.
+- **Restore Purchases** is a quiet footer link next to Privacy Policy / Terms of Use. It re-credits pending store charges and refreshes the server ledger. **Never call `Purchases.restorePurchases()`.** Hour packs are consumables: StoreKit restore prompts for the Apple ID and returns nothing, and App Review rejected exactly that under guideline 3.1.1 (2026-09). Minutes already survive reinstall via the hardware-ID / account ledger.
+- **Contact Support** sits in the old Restore position on the same sheet. Tapping it closes the sheet and opens the 1:1 support chat, so Back from the chat returns to the main screen.
+
+### Support chat
+- One continuous thread per identity (`UserService.userId` — account row when signed in, device otherwise). Sending the first message creates it; there is no bot and no second thread.
+- `users.service_admin` (boolean, default false) marks team members. Set by hand: `UPDATE users SET service_admin = TRUE WHERE friend_code = '…';`. A signed-in account inherits the flag from an active member device. Team members land in an inbox of every thread and can reply as the team; customers only ever see their own.
+- REST in `server/support-chat.js` (`/api/support/status|thread|send|threads|push-token`), authenticated the same way as every other POST. The client polls every 3s while a thread is open.
+- Push is optional FCM (HTTP v1 via `FIREBASE_SERVICE_ACCOUNT` on Render + `flutterfire configure` on the client). Without it, chat still works. Full setup: [docs/support-chat-setup.md](docs/support-chat-setup.md).
+- A customer message notifies every admin device; a team reply notifies that customer. The OS permission prompt is deferred until the first sent message (customers) or opening the inbox (team).
 
 ---
 
@@ -269,7 +283,7 @@ Migrations are additive — see `_initDatabase` in `database_service.dart`.
 - **SQLite is local-only**; uploads happen via `SyncService` (fire-and-forget) and are best-effort.
 - **Riverpod `StateProvider`** for simple state, `FutureProvider` for async DB queries. WebSocket callbacks drive provider updates.
 - **PCM16 at 24kHz** — Soniox-compatible (`pcm_s16le`).
-- **No separate routes** — single screen + modal bottom sheets.
+- **No extra tab bar** — main screen + modal sheets; support chat is the one pushed page.
 
 ---
 

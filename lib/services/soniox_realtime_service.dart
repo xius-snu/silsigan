@@ -114,8 +114,8 @@ class SonioxRealtimeService {
   Timer? _lateTranslationTimer;
   static const _lateTranslationFlushMs = 800;
 
-  // Finalize settle — press-and-hold callers (Quick/Conversation) stop on user
-  // release and await finalizeAndWait(), which resolves once the provider has
+  // Finalize settle — Conversation mode stops on the user's stop-tap and
+  // awaits finalizeAndWait(), which resolves once the provider has
   // gone quiet (no new tokens for _settleQuiet) or acknowledges with
   // `finished: true`. Translation lags the source, so this lets trailing
   // translation tokens land BEFORE disconnect() tears the socket down.

@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const { registerPrivateUploadRoutes, MAX_UPLOAD_BYTES } = require('./private-upload');
+const { registerSupportChatRoutes } = require('./support-chat');
 const fastify = require('fastify')({ logger: true, bodyLimit: MAX_UPLOAD_BYTES + 1024 * 1024 });
 
 // ============================================
@@ -2523,6 +2524,12 @@ async function start() {
         getSonioxKey: () => SONIOX_PRIVATE_KEY || nextSonioxKey(),
         publicBaseUrl: PUBLIC_BASE_URL,
     });
+
+    // ==================
+    // SUPPORT CHAT (in-app 1:1 messaging with the team + FCM push)
+    // ==================
+
+    await registerSupportChatRoutes(fastify, { pool });
 
     // ==================
     // START SERVER

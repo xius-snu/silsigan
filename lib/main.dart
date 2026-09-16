@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,8 @@ import 'providers/desktop_audio_source_provider.dart';
 import 'services/user_service.dart';
 import 'services/account_service.dart';
 import 'services/background_service.dart';
+import 'services/push_service.dart';
+import 'services/support_service.dart';
 import 'utils/constants.dart';
 import 'utils/desktop.dart';
 
@@ -46,6 +49,11 @@ void main() async {
   // needs runs in the background so it can't delay the first frame.
   await AccountService.instance.restore();
   UserService.instance.reportActivity('app_open');
+  // Support chat: cached team/customer role (prefs read) and FCM push.
+  // PushService.init() is a no-op without Firebase config and never blocks
+  // the first frame on network — token registration runs in the background.
+  await SupportService.instance.loadCache();
+  unawaited(PushService.instance.init());
   final desktopAudio = isDesktopPlatform
       ? await loadSavedDesktopAudioSettings()
       : const DesktopAudioSettings();

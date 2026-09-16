@@ -12,8 +12,8 @@ Silsigan provides real-time speech transcription and translation. Usage is meter
 
 - Minute packs are **consumable** digital goods. They add time to your account and are not a subscription.
 - Payments are processed by **Apple App Store** or **Google Play**, depending on the platform. Their payment terms, taxes, and refund rules apply.
-- Minutes are credited to the account on this device after the store confirms the purchase. They are not transferable between Apple and Google accounts.
-- **Restore Purchases** re-syncs the store receipt with the App. Consumed minute packs cannot be restored a second time.
+- Minutes are credited to the Silsigan ID shown in the App after the store confirms the purchase. They are not transferable between Apple and Google store accounts.
+- **Restore Purchases** re-syncs this ID with the App. Consumed minute packs cannot be granted a second time.
 - Unused minutes have no cash value and expire only if we discontinue the service and give reasonable notice.
 
 ## Acceptable use

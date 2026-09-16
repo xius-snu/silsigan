@@ -1,7 +1,7 @@
 name: silsigan
-description: "Korean to Vietnamese live translation app"
+description: "Real-time speech transcription and translation"
 publish_to: 'none'
-version: 1.0.18+65
+version: 1.0.18+66
 
 environment:
   sdk: '>=3.4.3 <4.0.0'
@@ -33,6 +33,9 @@ dependencies:
   purchases_flutter: ^9.16.1
   google_sign_in: ^7.2.0
   sign_in_with_apple: ^8.2.0
+  # Support-chat push (iOS/Android/macOS). Windows has no FCM.
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
 
 dependency_overrides:
   record_linux: ^1.0.0
@@ -44,6 +47,7 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^4.0.0
   flutter_launcher_icons: ^0.14.3
+  msix: ^3.18.0
 
 flutter_launcher_icons:
   android: true
@@ -54,6 +58,22 @@ flutter_launcher_icons:
     icon_size: 256
   image_path: "silsigan_icon.png"
   remove_alpha_ios: true
+
+# Microsoft Store package (windows/installer/build-msix.ps1).
+# identity_name / publisher / publisher_display_name must match Partner
+# Center → Silsigan → Product management → Product identity exactly.
+# The Store re-signs the package, so no certificate is configured here.
+msix_config:
+  display_name: Silsigan
+  publisher_display_name: Xius Studio
+  identity_name: XiusStudio.Silsigan
+  publisher: CN=34A5A580-3B9D-4D81-B329-F9AEB7DDDCB0
+  logo_path: silsigan_icon.png
+  capabilities: internetClient, microphone
+  languages: en-us, ko-kr
+  store: true
+  output_path: dist
+  output_name: Silsigan
 
 flutter:
   uses-material-design: true

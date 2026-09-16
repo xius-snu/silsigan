@@ -154,8 +154,6 @@ class AppConstants {
   static const double titleFontSize = 24.0;
   static const double labelFontSize = 14.0;
   static const double contentFontSize = 15.0;
-  // Quick Mode uses larger text for at-a-glance reading.
-  static const double quickFontSize = 30.0;
   static const double langFontSize = 17.0;
   static const double panelBorderRadius = 10.0;
   static const double panelPaddingH = 26.0;

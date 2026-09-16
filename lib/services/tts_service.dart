@@ -216,8 +216,8 @@ class TtsService {
   }
 
   /// Stop any in-progress speech and clear the queue WITHOUT disabling TTS.
-  /// Used by Quick Mode to cut off a previous translation when a new
-  /// press-and-hold begins, while keeping TTS available for the next one.
+  /// Used to cut off a translation still being spoken when the other side of
+  /// a conversation takes the floor, while keeping TTS available for the next.
   Future<void> flush() async {
     _queue.clear();
     await _stopPlayback();

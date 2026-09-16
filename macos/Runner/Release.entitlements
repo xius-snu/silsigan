@@ -15,5 +15,9 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<!-- Support-chat push. Same App ID as iOS (com.silsigan.app); Push
+	     Notifications must be enabled on that identifier. -->
+	<key>aps-environment</key>
+	<string>development</string>
 </dict>
 </plist>

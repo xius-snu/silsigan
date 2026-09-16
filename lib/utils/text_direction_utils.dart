@@ -17,8 +17,8 @@ final RegExp _ltrChar = RegExp(
 /// Whether [text] should be laid out right-to-left.
 ///
 /// Content-based (not language-code based) on purpose: the source language is
-/// often auto-detected ("Any"), and conversation/quick modes show two languages
-/// at once — so each block must decide its own direction from what it contains.
+/// often auto-detected ("Any"), and conversation mode shows two languages at
+/// once — so each block must decide its own direction from what it contains.
 /// A block is RTL when it has RTL characters and they are at least as numerous
 /// as the LTR letters (so a stray Latin word inside an Arabic sentence, or a
 /// lone Arabic name inside an English sentence, resolves to the dominant side).

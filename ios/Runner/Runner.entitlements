@@ -14,5 +14,10 @@
 	<array>
 		<string>group.com.silsigan.app</string>
 	</array>
+	<!-- Support-chat push. Requires the "Push Notifications" capability on
+	     the com.silsigan.app App ID (see docs/support-chat-setup.md). Xcode
+	     / Codemagic swap development → production for App Store builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
 </dict>
 </plist>
