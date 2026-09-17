@@ -3,6 +3,34 @@ platform :osx, '13.0'
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
+# Firebase / GoogleSignIn podspecs still `git clone` GitHub (GoogleUtilities,
+# etc.). A GH100/503 there aborts `pod install` even when iOS succeeded from
+# a warm cache. Retry those clones before failing the Codemagic Mac job.
+require 'fileutils'
+if defined?(Pod::Downloader::Git)
+  class Pod::Downloader::Git
+    alias_method :silsigan_orig_download!, :download!
+    def download!
+      tries = 0
+      begin
+        silsigan_orig_download!
+      rescue StandardError => e
+        tries += 1
+        transient = e.message =~
+            /503|502|500|GH100|unable to access|timed out|Connection reset|RPC failed|SSL/i
+        raise if tries > 6 || !transient
+        wait = [tries * 8, 40].min
+        Pod::UI.puts "[Silsigan] git pod download failed " \
+                     "(#{e.message.lines.first.to_s.strip}), " \
+                     "retry #{tries}/6 in #{wait}s"
+        sleep wait
+        FileUtils.rm_rf(target_path) if target_path
+        retry
+      end
+    end
+  end
+end
+
 project 'Runner', {
   'Debug' => :debug,
   'Profile' => :release,
