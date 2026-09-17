@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/support_message.dart';
 import '../utils/constants.dart';
+import 'push_service.dart';
 import 'user_service.dart';
 
 /// Thrown when the server rejects a request with a user-facing reason.
@@ -61,6 +63,7 @@ class SupportService {
   Future<void> resetForIdentityChange() async {
     _isAdmin = null;
     unreadCount.value = 0;
+    unawaited(PushService.instance.setIconBadge(0));
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_isAdminPrefKey);
   }
@@ -123,6 +126,7 @@ class SupportService {
       await _rememberIsAdmin(data['isAdmin'] == true);
       unreadCount.value = (data['unread'] as num?)?.toInt() ?? 0;
       pushEnabledOnServer = data['pushEnabled'] == true;
+      unawaited(PushService.instance.setIconBadge(unreadCount.value));
     } catch (e) {
       debugPrint('Support status error: $e');
     }

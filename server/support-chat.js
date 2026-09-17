@@ -201,7 +201,7 @@ function createFcmClient(serviceAccount, log) {
                                 // Collapse to one banner per thread; a burst of
                                 // replies updates the notification in place.
                                 collapse_key: collapseId,
-                                notification: { tag: collapseId },
+                                notification: { tag: 'silsigan_support' },
                             },
                             apns: {
                                 headers: {

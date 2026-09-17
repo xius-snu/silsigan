@@ -1,5 +1,6 @@
 package com.silsigan.app
 
+import android.app.NotificationManager
 import android.content.Intent
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -35,7 +36,27 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.silsigan.app/push")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setBadge" -> {
+                        val n = call.arguments as? Int ?: 0
+                        if (n <= 0) clearSupportNotifications()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         DesktopAudioCapture.register(this, flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    private fun clearSupportNotifications() {
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        for (n in nm.activeNotifications) {
+            if (n.tag == "silsigan_support") {
+                nm.cancel(n.tag, n.id)
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import UserNotifications
 import Security
 
 @UIApplicationMain
@@ -24,6 +25,30 @@ import Security
         switch call.method {
         case "getKeychainId":
           result(self.getOrCreateKeychainId())
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      }
+      let push = FlutterMethodChannel(
+        name: "com.silsigan.app/push",
+        binaryMessenger: controller.binaryMessenger
+      )
+      push.setMethodCallHandler { (call, result) in
+        switch call.method {
+        case "setBadge":
+          let n: Int
+          if let i = call.arguments as? Int {
+            n = max(0, i)
+          } else if let num = call.arguments as? NSNumber {
+            n = max(0, num.intValue)
+          } else {
+            n = 0
+          }
+          UIApplication.shared.applicationIconBadgeNumber = n
+          if #available(iOS 16.0, *) {
+            UNUserNotificationCenter.current().setBadgeCount(n) { _ in }
+          }
+          result(nil)
         default:
           result(FlutterMethodNotImplemented)
         }

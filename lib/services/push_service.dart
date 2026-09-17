@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import '../firebase_options.dart';
 import 'support_service.dart';
 
@@ -68,7 +69,10 @@ class PushService {
       // reply while the iPhone is unlocked looks like "push is broken".
       await messaging.setForegroundNotificationPresentationOptions(
         alert: true,
-        badge: true,
+        // Icon badge is owned by [setIconBadge] from the unread count — if
+        // this is true, a foreground delivery would stamp "1" back on while
+        // the user is already reading the thread.
+        badge: false,
         sound: true,
       );
     } catch (_) {}
@@ -187,4 +191,18 @@ class PushService {
       settings.authorizationStatus == AuthorizationStatus.provisional;
 
   String? get token => _token;
+
+  static const _pushChannel = MethodChannel('com.silsigan.app/push');
+
+  /// Drive the OS app-icon badge from the support unread count. 0 removes
+  /// it so a read thread never leaves a stuck "(1)" on the icon.
+  Future<void> setIconBadge(int count) async {
+    if (kIsWeb) return;
+    if (!(Platform.isIOS || Platform.isAndroid || Platform.isMacOS)) return;
+    try {
+      await _pushChannel.invokeMethod('setBadge', count < 0 ? 0 : count);
+    } catch (e) {
+      debugPrint('PushService: setBadge failed: $e');
+    }
+  }
 }
