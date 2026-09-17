@@ -360,6 +360,43 @@ class DatabaseService {
     );
   }
 
+  /// Persist an in-place edit of the saved transcript and/or translation.
+  /// Only provided fields are written so a transcription save cannot clobber
+  /// an in-flight translation edit (and vice versa). Bumps [updated_at] so
+  /// last-write-wins sync will push this device's body instead of skipping
+  /// on a matching title.
+  Future<void> updateSessionText({
+    required int id,
+    String? koreanFull,
+    String? vietnameseFull,
+    String? koreanPreview,
+    String? vietnamesePreview,
+    String? updatedAt,
+  }) async {
+    final values = <String, dynamic>{
+      'updated_at': updatedAt ?? DateTime.now().toUtc().toIso8601String(),
+    };
+    if (koreanFull != null) {
+      values['korean_full'] = koreanFull;
+      if (koreanPreview != null) {
+        values['korean_preview'] = koreanPreview;
+      }
+    }
+    if (vietnameseFull != null) {
+      values['vietnamese_full'] = vietnameseFull;
+      if (vietnamesePreview != null) {
+        values['vietnamese_preview'] = vietnamesePreview;
+      }
+    }
+    final db = await database;
+    await db.update(
+      'sessions',
+      values,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   Future<String> exportAllSessionsAsJson() async {
     final sessions = await getAllSessions();
     final exportData = {

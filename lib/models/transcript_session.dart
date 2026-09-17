@@ -23,6 +23,32 @@ class TranscriptSession {
     this.updatedAt,
   });
 
+  TranscriptSession copyWith({
+    int? id,
+    String? createdAt,
+    String? koreanFull,
+    String? vietnameseFull,
+    String? koreanPreview,
+    String? vietnamesePreview,
+    String? audioPath,
+    String? timestampsJson,
+    String? title,
+    String? updatedAt,
+  }) {
+    return TranscriptSession(
+      id: id ?? this.id,
+      createdAt: createdAt ?? this.createdAt,
+      koreanFull: koreanFull ?? this.koreanFull,
+      vietnameseFull: vietnameseFull ?? this.vietnameseFull,
+      koreanPreview: koreanPreview ?? this.koreanPreview,
+      vietnamesePreview: vietnamesePreview ?? this.vietnamesePreview,
+      audioPath: audioPath ?? this.audioPath,
+      timestampsJson: timestampsJson ?? this.timestampsJson,
+      title: title ?? this.title,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,

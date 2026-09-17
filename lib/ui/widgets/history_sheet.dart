@@ -33,6 +33,15 @@ List<List<WordTimestamp>> _parseTimestampsJson(String json) {
       .toList();
 }
 
+enum _SessionTextField { transcription, translation }
+
+String _previewOf(String full) {
+  if (full.length > AppConstants.previewMaxLength) {
+    return full.substring(0, AppConstants.previewMaxLength);
+  }
+  return full;
+}
+
 class HistorySheet extends ConsumerStatefulWidget {
   final double maxFraction;
   final int? initialSessionId;
@@ -74,6 +83,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   bool _isEditingTitle = false;
   final TextEditingController _titleController = TextEditingController();
   final FocusNode _titleFocusNode = FocusNode();
+
+  // Inline transcription / translation editing (opt-in; default read-only)
+  _SessionTextField? _editingBox;
+  final TextEditingController _textEditController = TextEditingController();
+  final FocusNode _textEditFocusNode = FocusNode();
 
   // Monotonic guard for _selectSession: its timestamp parse is async, so a
   // second tap during the parse starts a second flight — only the latest
@@ -135,10 +149,16 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   @override
   void dispose() {
     _titleFocusNode.removeListener(_onTitleFocusChanged);
+    final pending = _captureTextEdit();
     _titleFocusNode.dispose();
     _titleController.dispose();
+    _textEditFocusNode.dispose();
+    _textEditController.dispose();
     _position.dispose();
     _duration.dispose();
+    if (pending != null) {
+      unawaited(_persistTextEdit(pending, updateUi: false));
+    }
     if (_playerInitialized) {
       _player.closePlayer();
     }
@@ -151,6 +171,13 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     if (_isPlaying) {
       await _player.stopPlayer();
     }
+    // Always re-read from SQLite so a just-saved edit (or a cloud pull
+    // that landed while the list was cached) is what we display.
+    if (session.id != null) {
+      final fresh = await DatabaseService.instance.getSession(session.id!);
+      if (fresh != null) session = fresh;
+    }
+    if (!mounted || epoch != _selectEpoch) return;
     // Parse word timestamps off the UI isolate if available
     List<List<WordTimestamp>>? timestamps;
     if (session.timestampsJson != null) {
@@ -164,6 +191,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _selectedSession = session;
       _parsedTimestamps = timestamps;
       _isPlaying = false;
+      _editingBox = null;
     });
     _position.value = Duration.zero;
     _duration.value = Duration.zero;
@@ -185,6 +213,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   void _goBackToList() async {
+    await _saveTextEdit();
     if (_isPlaying) {
       await _player.stopPlayer();
     }
@@ -194,6 +223,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _parsedTimestamps = null;
       _isPlaying = false;
       _isEditingTitle = false;
+      _editingBox = null;
     });
     _position.value = Duration.zero;
     _duration.value = Duration.zero;
@@ -238,6 +268,103 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     } else {
       setState(() => _isEditingTitle = false);
     }
+  }
+
+  void _startEditingText(_SessionTextField field) {
+    if (_selectedSession == null) return;
+    if (_editingBox == field) return;
+    _PendingTextEdit? pending;
+    if (_editingBox != null) {
+      pending = _captureTextEdit();
+    }
+    final session = _selectedSession!;
+    _textEditController.text = field == _SessionTextField.transcription
+        ? session.koreanFull
+        : session.vietnameseFull;
+    setState(() => _editingBox = field);
+    if (pending != null) {
+      unawaited(_persistTextEdit(pending, updateUi: true));
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _editingBox != field) return;
+      _textEditFocusNode.requestFocus();
+      _textEditController.selection = TextSelection.collapsed(
+        offset: _textEditController.text.length,
+      );
+    });
+  }
+
+  /// Snapshot the in-progress edit and clear [_editingBox]. Callers must
+  /// [setState] if the widget is still mounted. Returns null when there is
+  /// nothing to persist (not editing, or text unchanged).
+  _PendingTextEdit? _captureTextEdit() {
+    if (_editingBox == null || _selectedSession == null) return null;
+    final id = _selectedSession!.id;
+    final box = _editingBox!;
+    final newText = _textEditController.text;
+    final session = _selectedSession!;
+    _editingBox = null;
+    if (id == null) return null;
+
+    final unchanged = box == _SessionTextField.transcription
+        ? newText == session.koreanFull
+        : newText == session.vietnameseFull;
+    if (unchanged) return null;
+
+    // Keep the in-memory row current so a follow-up edit of the other
+    // box (or a concurrent persist) cannot read stale sibling text.
+    _selectedSession = box == _SessionTextField.transcription
+        ? session.copyWith(
+            koreanFull: newText,
+            koreanPreview: _previewOf(newText),
+          )
+        : session.copyWith(
+            vietnameseFull: newText,
+            vietnamesePreview: _previewOf(newText),
+          );
+
+    return _PendingTextEdit(id: id, field: box, text: newText);
+  }
+
+  Future<void> _saveTextEdit() async {
+    if (_editingBox == null) return;
+    final pending = _captureTextEdit();
+    if (mounted) setState(() {});
+    if (_textEditFocusNode.hasFocus) {
+      _textEditFocusNode.unfocus();
+    }
+    if (pending == null) return;
+    await _persistTextEdit(pending, updateUi: true);
+  }
+
+  Future<void> _persistTextEdit(
+    _PendingTextEdit pending, {
+    required bool updateUi,
+  }) async {
+    await DatabaseService.instance.updateSessionText(
+      id: pending.id,
+      koreanFull: pending.field == _SessionTextField.transcription
+          ? pending.text
+          : null,
+      vietnameseFull:
+          pending.field == _SessionTextField.translation ? pending.text : null,
+      koreanPreview: pending.field == _SessionTextField.transcription
+          ? _previewOf(pending.text)
+          : null,
+      vietnamesePreview: pending.field == _SessionTextField.translation
+          ? _previewOf(pending.text)
+          : null,
+    );
+    final updated = await DatabaseService.instance.getSession(pending.id);
+    if (updated == null) return;
+    unawaited(SyncService.instance.uploadSession(updated));
+    if (!updateUi || !mounted) return;
+    // Don't replace the in-memory row while the other box is being
+    // edited — capture already applied this field locally.
+    if (_editingBox == null) {
+      setState(() => _selectedSession = updated);
+    }
+    ref.invalidate(sessionHistoryProvider);
   }
 
   Future<void> _playPause() async {
@@ -466,27 +593,31 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
   @override
   Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: widget.maxFraction,
-      minChildSize: 0.4,
-      maxChildSize: widget.maxFraction,
-      expand: false,
-      builder: (context, scrollController) {
-        return PopScope(
-          canPop: _selectedSession == null,
-          onPopInvoked: (didPop) {
-            if (!didPop && _selectedSession != null) {
-              _goBackToList();
-            }
-          },
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: _selectedSession == null
-                ? _buildListView(scrollController)
-                : _buildDetailView(scrollController),
-          ),
-        );
-      },
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboardInset),
+      child: DraggableScrollableSheet(
+        initialChildSize: widget.maxFraction,
+        minChildSize: 0.4,
+        maxChildSize: widget.maxFraction,
+        expand: false,
+        builder: (context, scrollController) {
+          return PopScope(
+            canPop: _selectedSession == null,
+            onPopInvoked: (didPop) {
+              if (!didPop && _selectedSession != null) {
+                _goBackToList();
+              }
+            },
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: _selectedSession == null
+                  ? _buildListView(scrollController)
+                  : _buildDetailView(scrollController),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -515,6 +646,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         ),
         Expanded(
           child: sessionsAsync.when(
+            skipLoadingOnReload: true,
             loading: () => Center(
               child: CircularProgressIndicator(
                 valueColor: AlwaysStoppedAnimation(AppConstants.textPrimary),
@@ -656,8 +788,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           child: SelectionArea(
             child: CustomScrollView(
               controller: scrollController,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               slivers: [
                 ..._buildTextBoxSlivers(
+                  field: _SessionTextField.transcription,
                   label: 'TRANSCRIPTION',
                   lines: koreanLines,
                   fullText: session.koreanFull,
@@ -666,6 +800,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                 if (hasTranslation) ...[
                   const SliverToBoxAdapter(child: SizedBox(height: 5)),
                   ..._buildTextBoxSlivers(
+                    field: _SessionTextField.translation,
                     label: 'TRANSLATION',
                     lines: vietnameseLines,
                     fullText: session.vietnameseFull,
@@ -846,12 +981,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   /// rows, SliverPadding reproduces the box's inner padding, and each line
   /// keeps its old bottom-8 spacing.
   List<Widget> _buildTextBoxSlivers({
+    required _SessionTextField field,
     required String label,
     required List<String> lines,
     required String fullText,
     List<List<WordTimestamp>>? timestamps,
   }) {
     final hasText = fullText.trim().isNotEmpty;
+    final isEditing = _editingBox == field;
     return [
       SliverPadding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -863,35 +1000,52 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           sliver: SliverPadding(
             padding: const EdgeInsets.all(AppConstants.panelPaddingH),
             sliver: SliverList.builder(
-              // Row 0 is the label row, row 1 the gap below it, then lines.
-              itemCount: lines.length + 2,
+              // Row 0 is the label row, row 1 the gap below it, then lines
+              // (or a single TextField while editing).
+              itemCount: isEditing ? 3 : lines.length + 2,
               itemBuilder: (context, index) {
                 if (index == 0) {
-                  return Row(
-                    children: [
-                      Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: AppConstants.labelFontSize,
-                          fontWeight: FontWeight.w400,
-                          color: AppConstants.textSecondary,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      const Spacer(),
-                      if (hasText)
-                        GestureDetector(
-                          onTap: () => _copyText(fullText, label),
-                          child: Icon(
-                            Icons.copy,
-                            size: 18,
-                            color: AppConstants.textSecondary,
-                          ),
-                        ),
-                    ],
+                  return _buildTextBoxHeader(
+                    field: field,
+                    label: label,
+                    fullText: fullText,
+                    hasText: hasText,
+                    isEditing: isEditing,
                   );
                 }
                 if (index == 1) return const SizedBox(height: 12);
+
+                if (isEditing) {
+                  return TapRegion(
+                    groupId: EditableText,
+                    onTapOutside: (_) {
+                      if (_editingBox == field) _saveTextEdit();
+                    },
+                    child: SelectionContainer.disabled(
+                      child: TextField(
+                        controller: _textEditController,
+                        focusNode: _textEditFocusNode,
+                        maxLines: null,
+                        minLines: 1,
+                        scrollPhysics: const NeverScrollableScrollPhysics(),
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        textDirection: directionOf(_textEditController.text),
+                        style: TextStyle(
+                          fontSize: AppConstants.contentFontSize,
+                          color: AppConstants.textPrimary,
+                          height: 1.5,
+                        ),
+                        cursorColor: AppConstants.textPrimary,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ),
+                  );
+                }
 
                 final lineIdx = index - 2;
                 final line = lines[lineIdx];
@@ -933,6 +1087,87 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       ),
     ];
   }
+
+  Widget _buildTextBoxHeader({
+    required _SessionTextField field,
+    required String label,
+    required String fullText,
+    required bool hasText,
+    required bool isEditing,
+  }) {
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: () {
+            if (isEditing) {
+              _saveTextEdit();
+            } else {
+              _startEditingText(field);
+            }
+          },
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(
+              isEditing ? Icons.check : Icons.edit_outlined,
+              size: 18,
+              color: isEditing
+                  ? AppConstants.textPrimary
+                  : AppConstants.textSecondary,
+            ),
+          ),
+        ),
+        if (hasText || isEditing) ...[
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () {
+              final text = isEditing ? _textEditController.text : fullText;
+              if (text.trim().isEmpty) return;
+              _copyText(text, label);
+            },
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: Icon(
+                Icons.copy,
+                size: 18,
+                color: AppConstants.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+
+    return Row(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: AppConstants.labelFontSize,
+            fontWeight: FontWeight.w400,
+            color: AppConstants.textSecondary,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const Spacer(),
+        if (isEditing) TextFieldTapRegion(child: actions) else actions,
+      ],
+    );
+  }
+}
+
+class _PendingTextEdit {
+  const _PendingTextEdit({
+    required this.id,
+    required this.field,
+    required this.text,
+  });
+
+  final int id;
+  final _SessionTextField field;
+  final String text;
 }
 
 /// One saved-session line with per-word tap-to-seek spans.

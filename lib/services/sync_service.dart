@@ -78,7 +78,9 @@ class SyncService {
   }
 
   /// Sync: apply remote deletes, download new sessions, patch titles on
-  /// existing local rows, upload local-only sessions that are not tombstoned.
+  /// existing local rows, pull newer text edits (same title, newer
+  /// updated_at) via a full download, and upload local-only / locally-newer
+  /// sessions that are not tombstoned.
   /// Returns true if local history changed (so the UI can refresh).
   Future<bool> syncFromServer() {
     return _inFlight ??= _syncFromServerBody().whenComplete(() {
@@ -180,6 +182,8 @@ class SyncService {
             final id = asInt(serverSession['id']);
             if (id == null) continue;
             if (await db.isTombstoned(createdAt)) continue;
+            // Inserts when this device has no row; patches text + title
+            // in place when the server copy is newer (history edit).
             await _downloadAndSaveSession(
               userId,
               id,

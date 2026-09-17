@@ -53,6 +53,66 @@ void main() {
       expect(plan.action, SessionSyncAction.skip);
     });
 
+    test('matching titles with equal timestamps skip', () {
+      final t = DateTime.utc(2026, 9, 17, 12);
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localTitle: 'Q3 review',
+        serverTitle: 'Q3 review',
+        localUpdatedAt: t,
+        serverUpdatedAt: t,
+      );
+      expect(plan.action, SessionSyncAction.skip);
+    });
+
+    test('matching titles with newer local timestamp upload (text edit)', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localTitle: 'Q3 review',
+        serverTitle: 'Q3 review',
+        localUpdatedAt: DateTime.utc(2026, 9, 17, 12),
+        serverUpdatedAt: DateTime.utc(2026, 9, 17, 11),
+      );
+      expect(plan.action, SessionSyncAction.upload);
+    });
+
+    test('matching titles with newer server timestamp download (text edit)',
+        () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localTitle: 'Q3 review',
+        serverTitle: 'Q3 review',
+        localUpdatedAt: DateTime.utc(2026, 9, 17, 11),
+        serverUpdatedAt: DateTime.utc(2026, 9, 17, 12),
+      );
+      expect(plan.action, SessionSyncAction.download);
+    });
+
+    test('matching titles prefer local when server timestamp is missing', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localTitle: 'Q3 review',
+        serverTitle: 'Q3 review',
+        localUpdatedAt: DateTime.utc(2026, 9, 17, 12),
+      );
+      expect(plan.action, SessionSyncAction.upload);
+    });
+
+    test('matching titles pull server when local timestamp is missing', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localTitle: 'Q3 review',
+        serverTitle: 'Q3 review',
+        serverUpdatedAt: DateTime.utc(2026, 9, 17, 12),
+      );
+      expect(plan.action, SessionSyncAction.download);
+    });
+
     test('newer local rename is uploaded', () {
       final plan = planSessionSync(
         localExists: true,
@@ -96,6 +156,15 @@ void main() {
       expect(nonemptyTitle('  hi  '), 'hi');
       expect(nonemptyTitle('   '), isNull);
       expect(nonemptyTitle(null), isNull);
+    });
+
+    test('sameSyncTime treats both-null as equal', () {
+      expect(sameSyncTime(null, null), isTrue);
+      expect(sameSyncTime(DateTime.utc(2026, 9, 17), null), isFalse);
+      expect(sameSyncTime(null, DateTime.utc(2026, 9, 17)), isFalse);
+      final t = DateTime.utc(2026, 9, 17, 12);
+      expect(sameSyncTime(t, t), isTrue);
+      expect(sameSyncTime(t, t.add(const Duration(seconds: 1))), isFalse);
     });
   });
 }
