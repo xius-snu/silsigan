@@ -612,13 +612,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
             canPop: _selectedSession == null,
             onPopInvokedWithResult: (didPop, _) {
               if (didPop || _selectedSession == null) return;
-              // Android's first back while the IME is up only hides the
-              // keyboard — stay in edit mode. A second back (keyboard
-              // already gone) returns to the history list and saves.
-              if (_editingBox != null &&
-                  (_textEditFocusNode.hasFocus ||
-                      MediaQuery.viewInsetsOf(context).bottom > 0)) {
-                _textEditFocusNode.unfocus();
+              // Android Back while editing: save and leave edit mode.
+              // The next Back (no longer editing) returns to the list.
+              if (_editingBox != null) {
+                _saveTextEdit();
                 return;
               }
               _goBackToList();
