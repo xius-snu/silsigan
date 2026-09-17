@@ -94,6 +94,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   // tap's result may land (completion order isn't tap order).
   int _selectEpoch = 0;
 
+  /// Sheet scroll controller from [DraggableScrollableSheet]; used to jump
+  /// to the start of the transcript when edit mode opens.
+  ScrollController? _sheetScroll;
+
   @override
   void initState() {
     super.initState();
@@ -287,10 +291,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _editingBox != field) return;
+      if (_sheetScroll?.hasClients == true) {
+        _sheetScroll!.jumpTo(0);
+      }
+      _textEditController.selection = const TextSelection.collapsed(offset: 0);
       _textEditFocusNode.requestFocus();
-      _textEditController.selection = TextSelection.collapsed(
-        offset: _textEditController.text.length,
-      );
     });
   }
 
@@ -602,12 +607,21 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         maxChildSize: widget.maxFraction,
         expand: false,
         builder: (context, scrollController) {
+          _sheetScroll = scrollController;
           return PopScope(
             canPop: _selectedSession == null,
-            onPopInvoked: (didPop) {
-              if (!didPop && _selectedSession != null) {
-                _goBackToList();
+            onPopInvokedWithResult: (didPop, _) {
+              if (didPop || _selectedSession == null) return;
+              // Android's first back while the IME is up only hides the
+              // keyboard — stay in edit mode. A second back (keyboard
+              // already gone) returns to the history list and saves.
+              if (_editingBox != null &&
+                  (_textEditFocusNode.hasFocus ||
+                      MediaQuery.viewInsetsOf(context).bottom > 0)) {
+                _textEditFocusNode.unfocus();
+                return;
               }
+              _goBackToList();
             },
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),
@@ -724,57 +738,80 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     return Column(
       key: const ValueKey('history-detail'),
       children: [
-        _buildDragHandle(),
-        // Header with back, title, download, delete
-        Padding(
-          padding: const EdgeInsets.only(left: 4, right: 4, bottom: 4),
-          child: Row(
+        // Chrome above the transcript panel: tap here (or Back) to leave
+        // edit mode. Taps/scrolls inside the panel must not.
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (_editingBox != null) _saveTextEdit();
+          },
+          child: Column(
             children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back),
-                color: AppConstants.textPrimary,
-                onPressed: _goBackToList,
-              ),
-              Expanded(
-                child: _isEditingTitle
-                    ? TextField(
-                        controller: _titleController,
-                        focusNode: _titleFocusNode,
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: AppConstants.textPrimary,
-                        ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(vertical: 4),
-                          border: InputBorder.none,
-                        ),
-                        onSubmitted: (_) => _saveTitle(),
-                      )
-                    : GestureDetector(
-                        onTap: _startEditingTitle,
-                        child: Text(
-                          session.title ?? _formatDate(session.createdAt),
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: AppConstants.textPrimary,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.note_add_outlined),
-                color: AppConstants.textSecondary,
-                iconSize: 22,
-                onPressed: _sendToNotes,
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                onPressed: _deleteSession,
+              _buildDragHandle(),
+              Padding(
+                padding: const EdgeInsets.only(left: 4, right: 4, bottom: 4),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back),
+                      color: AppConstants.textPrimary,
+                      onPressed: _goBackToList,
+                    ),
+                    Expanded(
+                      child: _isEditingTitle
+                          ? TextField(
+                              controller: _titleController,
+                              focusNode: _titleFocusNode,
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: AppConstants.textPrimary,
+                              ),
+                              decoration: const InputDecoration(
+                                isDense: true,
+                                contentPadding:
+                                    EdgeInsets.symmetric(vertical: 4),
+                                border: InputBorder.none,
+                              ),
+                              onSubmitted: (_) => _saveTitle(),
+                            )
+                          : GestureDetector(
+                              onTap: () {
+                                if (_editingBox != null) {
+                                  unawaited(_saveTextEdit());
+                                }
+                                _startEditingTitle();
+                              },
+                              child: Text(
+                                session.title ?? _formatDate(session.createdAt),
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppConstants.textPrimary,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.note_add_outlined),
+                      color: AppConstants.textSecondary,
+                      iconSize: 22,
+                      onPressed: () {
+                        if (_editingBox != null) unawaited(_saveTextEdit());
+                        _sendToNotes();
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      onPressed: () {
+                        if (_editingBox != null) unawaited(_saveTextEdit());
+                        _deleteSession();
+                      },
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1016,32 +1053,26 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                 if (index == 1) return const SizedBox(height: 12);
 
                 if (isEditing) {
-                  return TapRegion(
-                    groupId: EditableText,
-                    onTapOutside: (_) {
-                      if (_editingBox == field) _saveTextEdit();
-                    },
-                    child: SelectionContainer.disabled(
-                      child: TextField(
-                        controller: _textEditController,
-                        focusNode: _textEditFocusNode,
-                        maxLines: null,
-                        minLines: 1,
-                        scrollPhysics: const NeverScrollableScrollPhysics(),
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        textDirection: directionOf(_textEditController.text),
-                        style: TextStyle(
-                          fontSize: AppConstants.contentFontSize,
-                          color: AppConstants.textPrimary,
-                          height: 1.5,
-                        ),
-                        cursorColor: AppConstants.textPrimary,
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.zero,
-                        ),
+                  return SelectionContainer.disabled(
+                    child: TextField(
+                      controller: _textEditController,
+                      focusNode: _textEditFocusNode,
+                      maxLines: null,
+                      minLines: 1,
+                      scrollPhysics: const NeverScrollableScrollPhysics(),
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      textDirection: directionOf(_textEditController.text),
+                      style: TextStyle(
+                        fontSize: AppConstants.contentFontSize,
+                        color: AppConstants.textPrimary,
+                        height: 1.5,
+                      ),
+                      cursorColor: AppConstants.textPrimary,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
                       ),
                     ),
                   );
