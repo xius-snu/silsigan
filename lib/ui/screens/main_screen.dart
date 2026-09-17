@@ -315,6 +315,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (body != null && body.isNotEmpty) body,
     ].join(': ');
     if (text.isEmpty) return;
+    // iOS now presents a system banner in the foreground; a snackbar on
+    // top of that would double up. Android keeps the in-app notice.
+    if (Platform.isIOS) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(

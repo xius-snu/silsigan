@@ -35,9 +35,7 @@ class PushService {
   final _foreground = StreamController<SupportPushEvent>.broadcast();
   final _opened = StreamController<SupportPushEvent>.broadcast();
 
-  /// A support message arrived while the app was in the foreground. The
-  /// system shows nothing for these (see the presentation options in [init]);
-  /// the UI decides whether to surface an in-app notice.
+  /// A support message arrived while the app is in the foreground.
   Stream<SupportPushEvent> get onForegroundMessage => _foreground.stream;
 
   /// The user tapped a support notification while the app was in the
@@ -65,13 +63,13 @@ class PushService {
 
     final messaging = FirebaseMessaging.instance;
     try {
-      // Foreground arrivals are handled in-app (a chat that is already open
-      // just refreshes; anywhere else shows a small in-app notice). A system
-      // banner on top of that would double up.
+      // Android already heads-up FCM `notification` payloads while the app
+      // is open. iOS only shows a banner when this is on — otherwise a
+      // reply while the iPhone is unlocked looks like "push is broken".
       await messaging.setForegroundNotificationPresentationOptions(
-        alert: false,
+        alert: true,
         badge: true,
-        sound: false,
+        sound: true,
       );
     } catch (_) {}
 

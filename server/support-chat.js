@@ -311,18 +311,39 @@ async function registerSupportChatRoutes(fastify, { pool }) {
         fastify.log.info('support-chat: FIREBASE_SERVICE_ACCOUNT not set — push disabled');
     }
 
-    // Fan a notification out to every token of the given user ids (minus the
-    // sender's own devices). Fire-and-forget: the HTTP reply never waits.
+    // Fan a notification out to every token of the given identities (minus
+    // the sender). Account ↔ device membership is included because a signed-in
+    // iPhone often registers its FCM token on the device row, while the
+    // support thread is keyed by the Apple/Google `acct_…` row.
     async function notifyUsers(userIds, senderUserId, payload) {
         if (!fcm || userIds.length === 0) return;
         try {
             const res = await pool.query(
-                `SELECT token FROM push_tokens
-                  WHERE user_id = ANY($1::text[]) AND user_id <> $2`,
+                `SELECT DISTINCT pt.token, pt.platform
+                   FROM push_tokens pt
+                  WHERE pt.user_id IN (
+                        SELECT unnest($1::text[])
+                        UNION
+                        SELECT m.device_user_id FROM account_members m
+                         WHERE m.active = TRUE AND m.account_id = ANY($1::text[])
+                        UNION
+                        SELECT m.account_id FROM account_members m
+                         WHERE m.active = TRUE AND m.device_user_id = ANY($1::text[])
+                  )
+                    AND pt.user_id IS DISTINCT FROM $2`,
                 [userIds, senderUserId],
             );
+            if (res.rows.length === 0) {
+                fastify.log.info(
+                    `support-chat: notify 0 tokens (ids=${userIds.length}, sender=${String(senderUserId).slice(0, 12)})`,
+                );
+                return;
+            }
             for (const row of res.rows) {
                 const outcome = await fcm.send(row.token, payload);
+                fastify.log.info(
+                    `support-chat: FCM ${outcome} platform=${row.platform || '?'} token=${String(row.token).slice(0, 12)}`,
+                );
                 if (outcome === 'unregistered') {
                     await pool.query('DELETE FROM push_tokens WHERE token = $1', [row.token]);
                 }
