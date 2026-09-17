@@ -3,6 +3,9 @@ package com.silsigan.app
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -42,6 +45,7 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
     fun unregister() {
         waitingForConsent = false
         notifyStartFinished(false, "Screen-audio permission was not granted")
+        CaptureAudioRoute.unregister()
         channel?.setMethodCallHandler(null)
         channel = null
         activity = null
@@ -51,6 +55,10 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "listDevices" -> result.success(listDevices())
+            "applyCaptureRoute" -> {
+                CaptureAudioRoute.apply(activity, call.arguments as? Map<*, *>)
+                result.success(null)
+            }
             "startLoopback" -> startLoopback(result)
             "stopLoopback" -> {
                 scheduleStop()
@@ -127,7 +135,7 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
             emptyList()
         }
         return mapOf(
-            "inputs" to emptyList<Any>(),
+            "inputs" to CaptureAudioRoute.listInputs(activity),
             "outputs" to outputs,
         )
     }
@@ -202,5 +210,161 @@ object DesktopAudioCapture : MethodChannel.MethodCallHandler {
             act.startService(intent)
         } catch (_: Exception) {
         }
+    }
+}
+
+/// Split audio route: capture stays on the selected (usually built-in) mic
+/// while media / TTS can play through Bluetooth A2DP headphones. SCO/HFP is
+/// only started when the user explicitly picks a Bluetooth microphone.
+private object CaptureAudioRoute {
+    private var preferredMicId: String? = null
+    private var wantBtMic = false
+    private var applied = false
+    private var applying = false
+    private var callback: AudioDeviceCallback? = null
+    private var registeredManager: AudioManager? = null
+    private var activityRef: java.lang.ref.WeakReference<Activity>? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun apply(activity: Activity?, args: Map<*, *>?) {
+        val act = activity ?: return
+        activityRef = java.lang.ref.WeakReference(act)
+        if (args != null) {
+            if (args.containsKey("micDeviceId")) {
+                val id = args["micDeviceId"] as? String
+                preferredMicId = if (id.isNullOrEmpty()) null else id
+            }
+            val bluetoothMic = args["bluetoothMic"]
+            if (bluetoothMic is Boolean) {
+                wantBtMic = bluetoothMic && !preferredMicId.isNullOrEmpty()
+            }
+        }
+        if (preferredMicId == null) wantBtMic = false
+        applied = true
+        applyNow(act)
+        register(act)
+    }
+
+    fun unregister() {
+        val am = registeredManager
+        val cb = callback
+        if (am != null && cb != null) {
+            try {
+                am.unregisterAudioDeviceCallback(cb)
+            } catch (_: Exception) {
+            }
+        }
+        registeredManager = null
+        callback = null
+        activityRef = null
+        applied = false
+    }
+
+    fun listInputs(activity: Activity?): List<Map<String, Any>> {
+        val act = activity ?: return emptyList()
+        val am = act.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var seenBuiltin = false
+        return am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .filter { keepInput(it) }
+            .map { info ->
+                val builtin = info.type == AudioDeviceInfo.TYPE_BUILTIN_MIC
+                val isDefault = builtin && !seenBuiltin
+                if (builtin) seenBuiltin = true
+                mapOf(
+                    "id" to info.id.toString(),
+                    "label" to inputLabel(info),
+                    "isDefault" to isDefault,
+                    "isBluetooth" to isBluetoothType(info.type),
+                )
+            }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyNow(activity: Activity) {
+        if (applying) return
+        applying = true
+        try {
+            val am = activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (wantBtMic) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val sco = am.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                    }
+                    if (sco != null) {
+                        am.setCommunicationDevice(sco)
+                    } else {
+                        am.mode = AudioManager.MODE_IN_COMMUNICATION
+                        am.startBluetoothSco()
+                        am.isBluetoothScoOn = true
+                    }
+                } else {
+                    am.mode = AudioManager.MODE_IN_COMMUNICATION
+                    am.startBluetoothSco()
+                    am.isBluetoothScoOn = true
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    am.clearCommunicationDevice()
+                }
+                if (am.isBluetoothScoOn) {
+                    am.stopBluetoothSco()
+                    am.isBluetoothScoOn = false
+                }
+                am.mode = AudioManager.MODE_NORMAL
+            }
+        } catch (_: Exception) {
+        } finally {
+            applying = false
+        }
+    }
+
+    private fun register(activity: Activity) {
+        if (callback != null) return
+        val am = activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                reapply()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                reapply()
+            }
+        }
+        am.registerAudioDeviceCallback(cb, mainHandler)
+        callback = cb
+        registeredManager = am
+    }
+
+    private fun reapply() {
+        if (!applied) return
+        val act = activityRef?.get() ?: return
+        mainHandler.post { applyNow(act) }
+    }
+
+    private fun keepInput(info: AudioDeviceInfo): Boolean {
+        if (!info.isSource) return false
+        return when (info.type) {
+            AudioDeviceInfo.TYPE_TELEPHONY,
+            AudioDeviceInfo.TYPE_REMOTE_SUBMIX,
+            28, // TYPE_ECHO_REFERENCE
+            -> false
+            else -> true
+        }
+    }
+
+    private fun isBluetoothType(type: Int): Boolean {
+        return type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+            type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+            type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+    }
+
+    private fun inputLabel(info: AudioDeviceInfo): String {
+        val name = info.productName?.toString()?.trim().orEmpty()
+        if (info.type == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+            return name.ifEmpty { "Phone microphone" }
+        }
+        if (name.isNotEmpty()) return name
+        return "Microphone ${info.id}"
     }
 }

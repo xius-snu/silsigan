@@ -199,8 +199,32 @@ class AudioService {
 
   Future<void> _startIosCapture(int gen) async {
     if (_wantMic) {
+      final bluetoothMic = await _isBluetoothMic(_desktop?.micDeviceId);
+      if (gen != _stopGen) return;
+      await DesktopAudioDevices.applyCaptureRoute(
+        micDeviceId: _desktop?.micDeviceId,
+        bluetoothMic: bluetoothMic,
+        updateMic: true,
+      );
+      if (gen != _stopGen) return;
       await _startWithFlutterSound(gen);
       if (gen != _stopGen) return;
+      // flutter_sound's startRecorder may reset the session to HFP.
+      await DesktopAudioDevices.applyCaptureRoute(
+        micDeviceId: _desktop?.micDeviceId,
+        bluetoothMic: bluetoothMic,
+        updateMic: true,
+      );
+      if (gen != _stopGen) return;
+      final micId = _desktop?.micDeviceId;
+      unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {
+        if (gen != _stopGen) return;
+        DesktopAudioDevices.applyCaptureRoute(
+          micDeviceId: micId,
+          bluetoothMic: bluetoothMic,
+          updateMic: true,
+        );
+      }));
     }
     if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
       await DesktopAudioDevices.startLoopback(
@@ -281,23 +305,41 @@ class AudioService {
     // swap _streamRecorder mid-flight, and the abort below must release the
     // recorder that actually went live.
     final recorder = _streamRecorder!;
-    final rec.InputDevice? device = (deviceId != null && deviceId.isNotEmpty)
-        ? rec.InputDevice(id: deviceId, label: deviceId)
-        : null;
+    final inputs = (Platform.isAndroid)
+        ? await DesktopAudioDevices.listInputs()
+        : const <DesktopAudioDevice>[];
+    if (gen != _stopGen) return;
+    final bluetoothMic = DesktopAudioDevices.isBluetoothInput(deviceId, inputs);
+    final resolvedId = bluetoothMic
+        ? deviceId
+        : DesktopAudioDevices.resolvedInputId(deviceId, inputs);
+    await DesktopAudioDevices.applyCaptureRoute(
+      micDeviceId: deviceId,
+      bluetoothMic: bluetoothMic,
+      updateMic: true,
+    );
+    if (gen != _stopGen) return;
+    final rec.InputDevice? device =
+        (resolvedId != null && resolvedId.isNotEmpty)
+            ? rec.InputDevice(id: resolvedId, label: resolvedId)
+            : null;
     final stream = await recorder.startStream(
       rec.RecordConfig(
         encoder: rec.AudioEncoder.pcm16bits,
         sampleRate: AppConstants.sampleRate,
         numChannels: AppConstants.numChannels,
         device: device,
-        // Match the capture behavior the app has always had on Android
-        // (raw default mic, no session effects): the record package would
-        // otherwise start a Bluetooth SCO link whenever a headset is
-        // connected, silently switching capture to the low-bandwidth
-        // headset mic.
-        androidConfig: const rec.AndroidRecordConfig(
-          manageBluetooth: false,
-          audioSource: rec.AndroidAudioSource.defaultSource,
+        // Default is the phone mic + A2DP headphones: do not start a
+        // Bluetooth SCO link unless the user picked a BT headset mic.
+        // SCO would silently switch capture to the low-bandwidth headset
+        // mic and keep TTS on the same HFP route.
+        androidConfig: rec.AndroidRecordConfig(
+          manageBluetooth: bluetoothMic,
+          audioSource: bluetoothMic || (deviceId != null && deviceId.isNotEmpty)
+              ? rec.AndroidAudioSource.defaultSource
+              : rec.AndroidAudioSource.mic,
+          speakerphone: false,
+          audioManagerMode: rec.AudioManagerMode.modeNormal,
         ),
       ),
     );
@@ -315,6 +357,18 @@ class AudioService {
           (_) {},
           onError: (Object e) => onCaptureError?.call(_captureErrorText(e)),
         );
+    await DesktopAudioDevices.applyCaptureRoute(
+      micDeviceId: deviceId,
+      bluetoothMic: bluetoothMic,
+      updateMic: true,
+    );
+  }
+
+  Future<bool> _isBluetoothMic(String? deviceId) async {
+    if (deviceId == null || deviceId.isEmpty) return false;
+    if (!(Platform.isIOS || Platform.isAndroid)) return false;
+    final inputs = await DesktopAudioDevices.listInputs();
+    return DesktopAudioDevices.isBluetoothInput(deviceId, inputs);
   }
 
   Future<void> _startWithFlutterSound(int gen) async {

@@ -67,7 +67,15 @@ private final class DesktopAudioCapturePlugin: NSObject {
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
     case "listDevices":
-      result(listDevices())
+      runOnMain {
+        result(self.listDevices())
+      }
+    case "applyCaptureRoute":
+      let args = call.arguments as? [String: Any]
+      runOnMain {
+        CaptureAudioRoute.apply(args: args)
+        result(nil)
+      }
     case "startLoopback":
       startLoopback(result)
     case "stopLoopback":
@@ -80,9 +88,17 @@ private final class DesktopAudioCapturePlugin: NSObject {
     }
   }
 
+  private func runOnMain(_ body: @escaping () -> Void) {
+    if Thread.isMainThread {
+      body()
+    } else {
+      DispatchQueue.main.async(execute: body)
+    }
+  }
+
   private func listDevices() -> [String: Any] {
     [
-      "inputs": [],
+      "inputs": CaptureAudioRoute.listInputs(),
       "outputs": [
         [
           "id": kSystemAudioId,
@@ -307,5 +323,115 @@ private final class DesktopAudioCapturePlugin: NSObject {
       code: "CANCELLED",
       message: "Broadcast ended before screen audio started"
     )
+  }
+}
+
+/// Split audio route: capture stays on the selected (usually built-in) mic
+/// while playback — TTS, history audio — can use Bluetooth A2DP headphones.
+/// `allowBluetooth` (HFP) is only enabled when the user picks a BT mic;
+/// otherwise HFP would steal input from the phone mic.
+private enum CaptureAudioRoute {
+  static var preferredMicId: String?
+  static var hasApplied = false
+  private static var wantHfp = false
+  private static var applying = false
+  private static var observer: NSObjectProtocol?
+
+  static func apply(args: [String: Any]?) {
+    if let args {
+      if args.keys.contains("micDeviceId") {
+        let id = args["micDeviceId"] as? String
+        preferredMicId = (id?.isEmpty ?? true) ? nil : id
+      }
+      if let bluetoothMic = args["bluetoothMic"] as? Bool {
+        wantHfp = bluetoothMic && !(preferredMicId?.isEmpty ?? true)
+      }
+    }
+    if preferredMicId == nil {
+      wantHfp = false
+    }
+    hasApplied = true
+    try? applyNow()
+    startObserving()
+  }
+
+  static func listInputs() -> [[String: Any]] {
+    let session = AVAudioSession.sharedInstance()
+    let prevCategory = session.category
+    let prevMode = session.mode
+    let prevOptions = session.categoryOptions
+    // HFP must be allowed briefly or AirPods never appear as inputs.
+    try? session.setCategory(
+      .playAndRecord,
+      mode: .default,
+      options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker, .mixWithOthers]
+    )
+    try? session.setActive(true)
+    let mapped = (session.availableInputs ?? []).map { port -> [String: Any] in
+      [
+        "id": port.uid,
+        "label": port.portName,
+        "isDefault": port.portType == .builtInMic,
+        "isBluetooth": isBluetooth(port.portType),
+      ]
+    }
+    if hasApplied {
+      try? applyNow()
+    } else {
+      try? session.setCategory(prevCategory, mode: prevMode, options: prevOptions)
+    }
+    return mapped
+  }
+
+  private static func applyNow() throws {
+    if applying { return }
+    applying = true
+    defer { applying = false }
+
+    let session = AVAudioSession.sharedInstance()
+    var options: AVAudioSession.CategoryOptions = [
+      .mixWithOthers,
+      .defaultToSpeaker,
+      .allowBluetoothA2DP,
+      .allowAirPlay,
+    ]
+    if wantHfp {
+      options.insert(.allowBluetooth)
+    }
+    try session.setCategory(.playAndRecord, mode: .default, options: options)
+    try session.setActive(true)
+    try pinInput(session)
+  }
+
+  private static func pinInput(_ session: AVAudioSession) throws {
+    let inputs = session.availableInputs ?? []
+    guard !inputs.isEmpty else { return }
+    let chosen: AVAudioSessionPortDescription?
+    if let id = preferredMicId, let match = inputs.first(where: { $0.uid == id }) {
+      chosen = match
+    } else {
+      chosen = inputs.first(where: { $0.portType == .builtInMic })
+        ?? inputs.first(where: { $0.portType == .headsetMic })
+        ?? inputs.first(where: { !isBluetooth($0.portType) })
+    }
+    if let chosen {
+      try session.setPreferredInput(chosen)
+    }
+  }
+
+  private static func isBluetooth(_ port: AVAudioSession.Port) -> Bool {
+    port == .bluetoothHFP || port == .bluetoothLE
+  }
+
+  private static func startObserving() {
+    guard observer == nil else { return }
+    observer = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.routeChangeNotification,
+      object: nil,
+      queue: .main
+    ) { _ in
+      guard hasApplied else { return }
+      try? applyNow()
+    }
   }
 }

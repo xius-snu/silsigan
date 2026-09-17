@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,7 +8,7 @@ import '../../utils/constants.dart';
 import '../../utils/desktop.dart';
 
 /// Header control for mic / speaker / both, plus device pickers. Shown on
-/// desktop, iPhone, iPad, and Android.
+/// Windows, Linux, macOS, and Android. Hidden on iPhone / iPad.
 class DesktopAudioSourceButton extends ConsumerStatefulWidget {
   const DesktopAudioSourceButton({
     super.key,
@@ -40,16 +41,10 @@ class _DesktopAudioSourceButtonState
   }
 
   String get _speakerHint {
-    if (!isMobileSpeakerCapture) {
-      return 'Speaker listens to what’s playing on that device. Use headphones if voice playback is on.';
-    }
-    if (isIOSPlatform) {
-      return 'You’ll be asked to Start Broadcast (red status bar). Screen audio only — the picker mic is off so it isn’t captured twice.';
-    }
     if (isAndroidPlatform) {
       return 'Android will ask to capture screen audio. DRM and call audio stay silent.';
     }
-    return 'Speaker listens to what’s playing. Use headphones if voice playback is on.';
+    return 'Speaker listens to what’s playing on that device. Use headphones if voice playback is on.';
   }
 
   IconData _iconFor(DesktopAudioSource source) {
@@ -209,7 +204,20 @@ class _DesktopAudioSourceButtonState
                             expanded: _expanded == _DeviceField.mic,
                             onToggle: () => _toggleExpanded(_DeviceField.mic),
                             onSelected: (id) => _setDevices(micId: id),
+                            defaultLabel: isMobileSpeakerCapture
+                                ? 'Phone microphone'
+                                : 'Default',
                           ),
+                          if (isMobileSpeakerCapture) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              'Voice playback uses headphones when connected. This microphone stays the input.',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: AppConstants.textMuted,
+                              ),
+                            ),
+                          ],
                         ],
                         if (settings.captureSpeaker &&
                             desktopSpeakerCaptureSupported) ...[
@@ -261,6 +269,7 @@ class _DesktopAudioSourceButtonState
         ref.read(desktopAudioSettingsProvider).copyWith(source: source);
     ref.read(desktopAudioSettingsProvider.notifier).state = next;
     saveDesktopAudioSettings(next);
+    _applyMicRoute(next);
     setState(() => _expanded = null);
     _overlay?.markNeedsBuild();
   }
@@ -275,8 +284,24 @@ class _DesktopAudioSourceButtonState
     );
     ref.read(desktopAudioSettingsProvider.notifier).state = next;
     saveDesktopAudioSettings(next);
+    _applyMicRoute(next);
     setState(() => _expanded = null);
     _overlay?.markNeedsBuild();
+  }
+
+  void _applyMicRoute(DesktopAudioSettings settings) {
+    if (!settings.captureMic) return;
+    if (!isIOSPlatform && !isAndroidPlatform) return;
+    final micId = settings.micDeviceId;
+    unawaited(() async {
+      final inputs = await DesktopAudioDevices.listInputs();
+      if (!mounted) return;
+      await DesktopAudioDevices.applyCaptureRoute(
+        micDeviceId: micId,
+        bluetoothMic: DesktopAudioDevices.isBluetoothInput(micId, inputs),
+        updateMic: true,
+      );
+    }());
   }
 
   void _onTap() {
@@ -379,6 +404,7 @@ class _DeviceRow extends StatelessWidget {
     required this.onToggle,
     required this.onSelected,
     this.emptyHint,
+    this.defaultLabel = 'Default',
   });
 
   final String label;
@@ -389,6 +415,7 @@ class _DeviceRow extends StatelessWidget {
   final VoidCallback onToggle;
   final ValueChanged<String> onSelected;
   final String? emptyHint;
+  final String defaultLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -400,7 +427,7 @@ class _DeviceRow extends StatelessWidget {
       }
     }
     final display = selectedId == null || selectedId!.isEmpty
-        ? 'Default'
+        ? defaultLabel
         : (selected?.label ?? selectedId!);
 
     return Column(
@@ -466,7 +493,7 @@ class _DeviceRow extends StatelessWidget {
             child: Column(
               children: [
                 _DeviceOption(
-                  label: 'Default',
+                  label: defaultLabel,
                   selected: selectedId == null || selectedId!.isEmpty,
                   onTap: () => onSelected(''),
                 ),

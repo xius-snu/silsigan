@@ -2,28 +2,27 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 /// Desktop shells (Windows / Linux / macOS). False on iOS, Android, and web.
-/// Used for desktop-only chrome (browser OAuth, etc.), not the audio-source
-/// selector — that also ships on iOS and Android.
+/// Used for desktop-only chrome (browser OAuth, etc.).
 bool get isDesktopPlatform {
   if (kIsWeb) return false;
   return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 }
 
-/// Header Mic / Speaker / Both control. True on desktop, iPhone, iPad, and
-/// Android. Hidden on web.
+/// Header Mic / Speaker / Both control. True on Windows, Linux, macOS, and
+/// Android. Hidden on iPhone / iPad (ReplayKit cannot capture YouTube /
+/// Safari / Music audio) and on web.
 bool get audioSourceSelectorSupported {
   if (kIsWeb) return false;
   return Platform.isWindows ||
       Platform.isLinux ||
       Platform.isMacOS ||
-      Platform.isIOS ||
       Platform.isAndroid;
 }
 
-/// iPhone / iPad / Android — used for first-run capture-sheet copy.
+/// Android — used for first-run MediaProjection capture-sheet copy.
 bool get isMobileSpeakerCapture {
   if (kIsWeb) return false;
-  return Platform.isIOS || Platform.isAndroid;
+  return Platform.isAndroid;
 }
 
 bool get isIOSPlatform {
@@ -38,13 +37,13 @@ bool get isAndroidPlatform {
 
 /// System-audio (speaker) loopback:
 /// Windows WASAPI, macOS ScreenCaptureKit, Linux Pulse/PipeWire monitors,
-/// Android 10+ MediaProjection AudioPlaybackCapture, iOS/iPadOS ReplayKit
-/// Broadcast (screen audio).
+/// Android 10+ MediaProjection AudioPlaybackCapture.
+/// iPhone / iPad ReplayKit cannot capture AVPlayer / YouTube audio, so
+/// speaker capture is not offered there.
 bool get desktopSpeakerCaptureSupported {
   if (kIsWeb) return false;
   return Platform.isWindows ||
       Platform.isLinux ||
       Platform.isMacOS ||
-      Platform.isIOS ||
       Platform.isAndroid;
 }

@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/desktop.dart';
 
 enum DesktopAudioSource { microphone, speaker, both }
 
@@ -43,10 +44,15 @@ const _speakerKey = 'desktop_audio_speaker_id';
 Future<DesktopAudioSettings> loadSavedDesktopAudioSettings() async {
   final prefs = await SharedPreferences.getInstance();
   final name = prefs.getString(_sourceKey);
-  final source = DesktopAudioSource.values.firstWhere(
+  var source = DesktopAudioSource.values.firstWhere(
     (s) => s.name == name,
     orElse: () => DesktopAudioSource.microphone,
   );
+  // iPhone / iPad no longer offer speaker capture — ignore a stale pref.
+  if (!desktopSpeakerCaptureSupported &&
+      source != DesktopAudioSource.microphone) {
+    source = DesktopAudioSource.microphone;
+  }
   return DesktopAudioSettings(
     source: source,
     micDeviceId: prefs.getString(_micKey),

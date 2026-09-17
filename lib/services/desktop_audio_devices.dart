@@ -9,11 +9,13 @@ class DesktopAudioDevice {
     required this.id,
     required this.label,
     this.isDefault = false,
+    this.isBluetooth = false,
   });
 
   final String id;
   final String label;
   final bool isDefault;
+  final bool isBluetooth;
 }
 
 /// Lists input/output devices and pulls native loopback PCM on Windows,
@@ -83,6 +85,52 @@ class DesktopAudioDevices {
     return bytes ?? Uint8List(0);
   }
 
+  /// Pin capture to [micDeviceId] (null / empty = phone built-in mic) and
+  /// route playback to A2DP headphones when connected. Pass [bluetoothMic]
+  /// when the chosen input is itself a Bluetooth headset mic — that path
+  /// has to use HFP/SCO, which also takes over output.
+  static Future<void> applyCaptureRoute({
+    String? micDeviceId,
+    bool? bluetoothMic,
+    bool updateMic = false,
+  }) async {
+    if (kIsWeb) return;
+    if (!(Platform.isIOS || Platform.isAndroid)) return;
+    try {
+      await _channel.invokeMethod<void>('applyCaptureRoute', {
+        if (updateMic) 'micDeviceId': micDeviceId ?? '',
+        if (bluetoothMic != null) 'bluetoothMic': bluetoothMic,
+      });
+    } catch (_) {}
+  }
+
+  static bool isBluetoothInput(
+    String? deviceId,
+    List<DesktopAudioDevice> inputs,
+  ) {
+    if (deviceId == null || deviceId.isEmpty) return false;
+    for (final d in inputs) {
+      if (d.id == deviceId) return d.isBluetooth;
+    }
+    return false;
+  }
+
+  /// Default / empty selection resolves to the built-in phone mic so a
+  /// connected headset cannot silently become the capture source.
+  static String? resolvedInputId(
+    String? deviceId,
+    List<DesktopAudioDevice> inputs,
+  ) {
+    if (deviceId != null && deviceId.isNotEmpty) return deviceId;
+    for (final d in inputs) {
+      if (d.isDefault) return d.id;
+    }
+    for (final d in inputs) {
+      if (!d.isBluetooth) return d.id;
+    }
+    return null;
+  }
+
   static Future<List<DesktopAudioDevice>> _listFromNative(String key) async {
     try {
       final raw = await _channel.invokeMethod<dynamic>('listDevices');
@@ -96,6 +144,7 @@ class DesktopAudioDevices {
               id: '${item['id'] ?? ''}',
               label: '${item['label'] ?? item['id'] ?? ''}',
               isDefault: item['isDefault'] == true,
+              isBluetooth: item['isBluetooth'] == true,
             ),
       ].where((d) => d.id.isNotEmpty).toList();
     } catch (_) {

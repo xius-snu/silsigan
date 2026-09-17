@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'desktop_audio_devices.dart';
 
 enum TtsLineStatus { idle, loading, playing }
 
@@ -79,24 +80,30 @@ class TtsService {
 
   /// One-time iOS audio session setup so TTS playback can coexist with the
   /// recorder. Uses playAndRecord (NOT playback) so the mic stays enabled
-  /// during speech, with defaultToSpeaker so audio routes to the loudspeaker
-  /// instead of the earpiece.
+  /// during speech. defaultToSpeaker covers the no-headphones case; A2DP
+  /// (not HFP) lets Bluetooth headphones take output without taking the mic.
   Future<void> _ensureInitialized() async {
     if (_isInitialized) return;
     _isInitialized = true;
     try {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         await _tts.setSharedInstance(true);
+        await _tts.autoStopSharedSession(false);
         await _tts.setIosAudioCategory(
           IosTextToSpeechAudioCategory.playAndRecord,
           [
             IosTextToSpeechAudioCategoryOptions.mixWithOthers,
             IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
-            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+            // A2DP is output-only — TTS plays on AirPods while the
+            // selected phone mic stays the input. allowBluetooth (HFP)
+            // would steal capture to the headset mic.
+            IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+            IosTextToSpeechAudioCategoryOptions.allowAirPlay,
           ],
           IosTextToSpeechAudioMode.defaultMode,
         );
       }
+      await DesktopAudioDevices.applyCaptureRoute();
       // Make _tts.speak() itself await playback completion. This is more
       // reliable than relying on setCompletionHandler — on iOS with
       // mixWithOthers + a shared mic session, the completion event sometimes
