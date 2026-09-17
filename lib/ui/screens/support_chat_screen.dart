@@ -286,7 +286,10 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   Future<void> _maybeAskForNotifications() async {
     final push = PushService.instance;
     if (!push.isAvailable) return;
-    if (await push.isPermissionGranted()) return;
+    if (await push.isPermissionGranted()) {
+      await push.syncToken();
+      return;
+    }
     await push.requestPermission();
   }
 

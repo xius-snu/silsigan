@@ -172,6 +172,17 @@ function createFcmClient(serviceAccount, log) {
     async function send(token, { title, body, data }) {
         try {
             const bearer = await accessToken();
+            // FCM data values must be strings. A custom aps payload *overrides*
+            // the top-level notification title/body on iOS — if aps has no
+            // `alert`, Apple delivers a silent payload and the banner never
+            // shows (Android still uses `notification` and looks fine).
+            const dataStr = {};
+            for (const [k, v] of Object.entries(data || {})) {
+                if (v == null) continue;
+                dataStr[k] = String(v);
+            }
+            const threadKey = String(dataStr.threadUserId || 'support').slice(0, 62);
+            const collapseId = `s${threadKey}`.slice(0, 64);
             const res = await fetch(
                 `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`,
                 {
@@ -184,20 +195,26 @@ function createFcmClient(serviceAccount, log) {
                         message: {
                             token,
                             notification: { title, body },
-                            data,
+                            data: dataStr,
                             android: {
                                 priority: 'high',
                                 // Collapse to one banner per thread; a burst of
                                 // replies updates the notification in place.
-                                collapse_key: `support_${data.threadUserId}`,
-                                notification: { tag: `support_${data.threadUserId}` },
+                                collapse_key: collapseId,
+                                notification: { tag: collapseId },
                             },
                             apns: {
-                                headers: { 'apns-collapse-id': `support_${data.threadUserId}` },
+                                headers: {
+                                    'apns-push-type': 'alert',
+                                    'apns-priority': '10',
+                                    'apns-collapse-id': collapseId,
+                                },
                                 payload: {
                                     aps: {
+                                        alert: { title, body },
                                         sound: 'default',
-                                        'thread-id': `support_${data.threadUserId}`,
+                                        badge: 1,
+                                        'thread-id': collapseId,
                                     },
                                 },
                             },
@@ -207,7 +224,13 @@ function createFcmClient(serviceAccount, log) {
             );
             if (res.ok) return 'ok';
             const text = await res.text();
-            if (res.status === 404 || /UNREGISTERED|NOT_FOUND|INVALID_ARGUMENT/.test(text)) {
+            // Only drop the row for a dead token. INVALID_ARGUMENT is often a
+            // payload mistake (and would wipe every iPhone token if we treated
+            // it as unregistered).
+            if (res.status === 404 || /UNREGISTERED|NOT_FOUND/.test(text)) {
+                return 'unregistered';
+            }
+            if (/INVALID_ARGUMENT/.test(text) && /registration token|not a valid FCM/i.test(text)) {
                 return 'unregistered';
             }
             log.warn(`support-chat: FCM send failed ${res.status}: ${text.slice(0, 300)}`);
@@ -480,15 +503,26 @@ async function registerSupportChatRoutes(fastify, { pool }) {
                 notifyUsers([ctx.threadUserId], ctx.userId, {
                     title: 'Silsigan Support',
                     body: preview,
-                    data: { type: 'support', threadUserId: ctx.threadUserId },
+                    data: {
+                        type: 'support',
+                        threadUserId: ctx.threadUserId,
+                        title: 'Silsigan Support',
+                        body: preview,
+                    },
                 });
             } else {
                 const info = await customerInfo(pool, ctx.threadUserId);
                 const label = info ? info.label : ctx.threadUserId.slice(0, 8);
+                const title = `Support · ${label}`;
                 adminUserIds().then((ids) => notifyUsers(ids, ctx.userId, {
-                    title: `Support · ${label}`,
+                    title,
                     body: preview,
-                    data: { type: 'support', threadUserId: ctx.threadUserId },
+                    data: {
+                        type: 'support',
+                        threadUserId: ctx.threadUserId,
+                        title,
+                        body: preview,
+                    },
                 }));
             }
 

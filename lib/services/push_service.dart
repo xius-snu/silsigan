@@ -102,8 +102,8 @@ class PushService {
     if (data['type'] != 'support') return null;
     return SupportPushEvent(
       threadUserId: data['threadUserId'] as String?,
-      title: message.notification?.title,
-      body: message.notification?.body,
+      title: message.notification?.title ?? data['title'],
+      body: message.notification?.body ?? data['body'],
     );
   }
 
@@ -111,12 +111,28 @@ class PushService {
   /// after sign-in / sign-out so the server moves the token to the new row.
   Future<void> syncToken() async {
     if (!_available) return;
-    // On iOS getToken() fails until the APNs token has been delivered, which
-    // can trail launch by a second or two — retry briefly rather than wait
-    // for the next token refresh.
+    final messaging = FirebaseMessaging.instance;
+    // iOS/macOS: getToken() throws until Apple has delivered an APNs token.
+    // Wait for that explicitly — a blind getToken retry often expires first.
+    if (Platform.isIOS || Platform.isMacOS) {
+      String? apns;
+      for (var attempt = 0; attempt < 6; attempt++) {
+        try {
+          apns = await messaging.getAPNSToken();
+        } catch (e) {
+          debugPrint('PushService: getAPNSToken attempt $attempt failed: $e');
+        }
+        if (apns != null) break;
+        await Future.delayed(Duration(milliseconds: 800 * (attempt + 1)));
+      }
+      if (apns == null) {
+        debugPrint('PushService: no APNs token — FCM token not registered');
+        return;
+      }
+    }
     for (var attempt = 0; attempt < 4; attempt++) {
       try {
-        final token = await FirebaseMessaging.instance.getToken();
+        final token = await messaging.getToken();
         if (token != null) {
           _token = token;
           await _registerToken(token);
@@ -160,7 +176,7 @@ class PushService {
         sound: true,
       );
       final ok = _granted(settings);
-      if (ok) unawaited(syncToken());
+      if (ok) await syncToken();
       return ok;
     } catch (e) {
       debugPrint('PushService: requestPermission failed: $e');

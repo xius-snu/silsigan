@@ -69,7 +69,10 @@ class _SupportInboxScreenState extends State<SupportInboxScreen>
   Future<void> _ensureNotifications() async {
     final push = PushService.instance;
     if (!push.isAvailable) return;
-    if (await push.isPermissionGranted()) return;
+    if (await push.isPermissionGranted()) {
+      await push.syncToken();
+      return;
+    }
     await push.requestPermission();
   }
 

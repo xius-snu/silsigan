@@ -34,7 +34,12 @@ import Security
       )
     }
 
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    let ok = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    // FCM needs an APNs device token. If we never register (e.g. the user
+    // enabled notifications in Settings without our in-app prompt), getToken
+    // on the Dart side fails and the phone never appears in push_tokens.
+    application.registerForRemoteNotifications()
+    return ok
   }
 
   /// Reads a UUID from keychain. If none exists, generates one and stores it.
