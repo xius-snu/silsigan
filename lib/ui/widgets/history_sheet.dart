@@ -98,6 +98,11 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   /// to the start of the transcript when edit mode opens.
   ScrollController? _sheetScroll;
 
+  /// True after the user has scrolled to the bottom of the saved session.
+  /// A jump-to-top control then stays up until they return to the top.
+  bool _reachedTranscriptBottom = false;
+  bool _showJumpToTop = false;
+
   @override
   void initState() {
     super.initState();
@@ -196,6 +201,8 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _parsedTimestamps = timestamps;
       _isPlaying = false;
       _editingBox = null;
+      _reachedTranscriptBottom = false;
+      _showJumpToTop = false;
     });
     _position.value = Duration.zero;
     _duration.value = Duration.zero;
@@ -228,6 +235,8 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       _isPlaying = false;
       _isEditingTitle = false;
       _editingBox = null;
+      _reachedTranscriptBottom = false;
+      _showJumpToTop = false;
     });
     _position.value = Duration.zero;
     _duration.value = Duration.zero;
@@ -296,6 +305,12 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       }
       _textEditController.selection = const TextSelection.collapsed(offset: 0);
       _textEditFocusNode.requestFocus();
+      if (_reachedTranscriptBottom || _showJumpToTop) {
+        setState(() {
+          _reachedTranscriptBottom = false;
+          _showJumpToTop = false;
+        });
+      }
     });
   }
 
@@ -329,6 +344,54 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           );
 
     return _PendingTextEdit(id: id, field: box, text: newText);
+  }
+
+  void _onTranscriptScroll(ScrollMetrics metrics) {
+    if (metrics.axis != Axis.vertical) return;
+    final extent = metrics.maxScrollExtent;
+    if (extent <= 80) {
+      if (_reachedTranscriptBottom || _showJumpToTop) {
+        setState(() {
+          _reachedTranscriptBottom = false;
+          _showJumpToTop = false;
+        });
+      }
+      return;
+    }
+    final atTop = metrics.pixels <= 48;
+    final atBottom = metrics.pixels >= extent - 48;
+    var reached = _reachedTranscriptBottom;
+    var show = _showJumpToTop;
+    if (atBottom) reached = true;
+    if (atTop) {
+      reached = false;
+      show = false;
+    } else if (reached) {
+      show = true;
+    }
+    if (reached != _reachedTranscriptBottom || show != _showJumpToTop) {
+      setState(() {
+        _reachedTranscriptBottom = reached;
+        _showJumpToTop = show;
+      });
+    }
+  }
+
+  void _jumpToTranscriptTop() {
+    final c = _sheetScroll;
+    if (c != null && c.hasClients) {
+      c.animateTo(
+        0,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    if (_reachedTranscriptBottom || _showJumpToTop) {
+      setState(() {
+        _reachedTranscriptBottom = false;
+        _showJumpToTop = false;
+      });
+    }
   }
 
   Future<void> _saveTextEdit() async {
@@ -819,34 +882,67 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         // scroll frame, which visibly janked on multi-thousand-word
         // transcripts.
         Expanded(
-          child: SelectionArea(
-            child: CustomScrollView(
-              controller: scrollController,
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              slivers: [
-                ..._buildTextBoxSlivers(
-                  field: _SessionTextField.transcription,
-                  label: 'TRANSCRIPTION',
-                  lines: koreanLines,
-                  fullText: session.koreanFull,
-                  timestamps: hasAudio ? _parsedTimestamps : null,
-                ),
-                if (hasTranslation) ...[
-                  const SliverToBoxAdapter(child: SizedBox(height: 5)),
-                  ..._buildTextBoxSlivers(
-                    field: _SessionTextField.translation,
-                    label: 'TRANSLATION',
-                    lines: vietnameseLines,
-                    fullText: session.vietnameseFull,
+          child: Stack(
+            children: [
+              NotificationListener<ScrollNotification>(
+                onNotification: (n) {
+                  _onTranscriptScroll(n.metrics);
+                  return false;
+                },
+                child: SelectionArea(
+                  child: CustomScrollView(
+                    controller: scrollController,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    slivers: [
+                      ..._buildTextBoxSlivers(
+                        field: _SessionTextField.transcription,
+                        label: 'TRANSCRIPTION',
+                        lines: koreanLines,
+                        fullText: session.koreanFull,
+                        timestamps: hasAudio ? _parsedTimestamps : null,
+                      ),
+                      if (hasTranslation) ...[
+                        const SliverToBoxAdapter(child: SizedBox(height: 5)),
+                        ..._buildTextBoxSlivers(
+                          field: _SessionTextField.translation,
+                          label: 'TRANSLATION',
+                          lines: vietnameseLines,
+                          fullText: session.vietnameseFull,
+                        ),
+                      ],
+                      SliverToBoxAdapter(
+                        child: SizedBox(
+                          height: 16 + (hasAudio ? 0 : _androidNavInset),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-                SliverToBoxAdapter(
-                  child: SizedBox(
-                    height: 16 + (hasAudio ? 0 : _androidNavInset),
+                ),
+              ),
+              if (_showJumpToTop)
+                Positioned(
+                  top: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Material(
+                      color: AppConstants.panelColor,
+                      elevation: 3,
+                      shadowColor: Colors.black26,
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        tooltip: 'Jump to top',
+                        icon: Icon(
+                          Icons.keyboard_arrow_up_rounded,
+                          color: AppConstants.textPrimary,
+                        ),
+                        onPressed: _jumpToTranscriptTop,
+                      ),
+                    ),
                   ),
                 ),
-              ],
-            ),
+            ],
           ),
         ),
         // Audio player
