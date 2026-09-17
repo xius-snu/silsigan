@@ -2,11 +2,14 @@
 
 Requires macOS 13 Ventura or later (ScreenCaptureKit system-audio capture), Xcode, and Flutter.
 
-From the repo root:
+From the repo root, on a Mac, at this `pubspec.yaml` version (`FLUTTER_BUILD_NAME` / `FLUTTER_BUILD_NUMBER`):
 
 ```
-flutter build macos --release --dart-define-from-file=.env.json
+flutter pub get
+flutter build macos --release
 ```
+
+Do **not** pass `--dart-define-from-file=.env.json` for store builds. The client talks to the proxy; production binaries must not set `SONIOX_PRIVATE`.
 
 The unsigned `.app` lands at:
 
@@ -14,7 +17,7 @@ The unsigned `.app` lands at:
 build/macos/Build/Products/Release/Silsigan.app
 ```
 
-Unsigned is OK (the Windows installer is unsigned too). Drag the `.app` to `/Applications` or run it in place.
+Version / build number come from `pubspec.yaml` (`FLUTTER_BUILD_NAME` / `FLUTTER_BUILD_NUMBER`). For the Mac App Store, archive and upload from Xcode or Codemagic using automatic signing on bundle `com.silsigan.app` — Sign in with Apple and Push Notifications must stay enabled on that App ID.
 
 ## First run — permissions
 
@@ -26,5 +29,3 @@ On first Speaker/Both start, grant:
 - **System Settings → Privacy & Security → Screen Recording** (or **Screen & System Audio Recording**)
 
 If capture is silent after granting, quit and reopen Silsigan — TCC sometimes applies only on the next launch.
-
-`.env.json` is local and must not be committed.
