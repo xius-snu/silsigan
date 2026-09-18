@@ -152,6 +152,26 @@ class DatabaseService {
     return maps.map((map) => TranscriptSession.fromMap(map)).toList();
   }
 
+  /// Identity + title + stamp for every live row — all the sync planner
+  /// needs. Full rows would drag every body and timestamps_json through the
+  /// platform channel onto the UI isolate on each app resume.
+  Future<List<SessionSyncEntry>> getSessionSyncIndex() async {
+    final db = await database;
+    final maps = await db.rawQuery('''
+      SELECT s.created_at, s.title, s.updated_at FROM sessions s
+      WHERE s.created_at NOT IN (SELECT created_at FROM session_tombstones)
+      ORDER BY s.created_at DESC
+    ''');
+    return [
+      for (final map in maps)
+        SessionSyncEntry(
+          createdAt: map['created_at'] as String,
+          title: map['title'] as String?,
+          updatedAt: map['updated_at'] as String?,
+        ),
+    ];
+  }
+
   Future<TranscriptSession?> getSession(int id) async {
     final db = await database;
     final maps = await db.query(
@@ -434,4 +454,18 @@ class DatabaseService {
     final db = await database;
     return db.delete('sessions', where: 'id = ?', whereArgs: [id]);
   }
+}
+
+/// Sync planner row: enough to decide upload / download / skip without
+/// paying for the body. See [DatabaseService.getSessionSyncIndex].
+class SessionSyncEntry {
+  const SessionSyncEntry({
+    required this.createdAt,
+    this.title,
+    this.updatedAt,
+  });
+
+  final String createdAt;
+  final String? title;
+  final String? updatedAt;
 }

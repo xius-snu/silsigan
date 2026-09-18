@@ -58,6 +58,7 @@ SessionSyncPlan planSessionSync({
   String? localTitle,
   String? serverTitle,
   DateTime? localUpdatedAt,
+  DateTime? localCreatedAt,
   DateTime? serverUpdatedAt,
 }) {
   if (tombstoned) {
@@ -67,17 +68,28 @@ SessionSyncPlan planSessionSync({
     return const SessionSyncPlan(action: SessionSyncAction.download);
   }
 
+  // Rows saved before updated_at existed (DB < v6) carry no stamp. Their
+  // body is exactly as old as the save, so created_at stands in for it.
+  final localStamped = localUpdatedAt != null;
+  final localRef = localUpdatedAt ?? localCreatedAt;
+
   final localT = nonemptyTitle(localTitle);
   final serverT = nonemptyTitle(serverTitle);
   if (localT == serverT) {
-    // Titles matching used to mean "nothing to do", which dropped text
-    // edits: the list endpoint has no body, only updated_at. Same title
-    // + newer local timestamp → upload; newer server → download.
-    if (sameSyncTime(localUpdatedAt, serverUpdatedAt)) {
+    // Same title: only a text edit can make the bodies differ, and the list
+    // endpoint has no body, only updated_at. An edit always stamps the
+    // device that made it, so a device with no stamp of its own has nothing
+    // to push whatever the server row looks like. Treating a missing server
+    // stamp as "local is newer" — the title branch's backfill rule — made the
+    // first sync after 1.1.2 re-upload every pre-stamp session's full body,
+    // bodies the server already had from save time.
+    if (sameSyncTime(localRef, serverUpdatedAt)) {
       return const SessionSyncPlan(action: SessionSyncAction.skip);
     }
-    if (localIsNewer(localUpdatedAt, serverUpdatedAt)) {
-      return const SessionSyncPlan(action: SessionSyncAction.upload);
+    if (localIsNewer(localRef, serverUpdatedAt)) {
+      return localStamped
+          ? const SessionSyncPlan(action: SessionSyncAction.upload)
+          : const SessionSyncPlan(action: SessionSyncAction.skip);
     }
     return const SessionSyncPlan(action: SessionSyncAction.download);
   }
@@ -92,7 +104,7 @@ SessionSyncPlan planSessionSync({
     );
   }
 
-  if (localIsNewer(localUpdatedAt, serverUpdatedAt)) {
+  if (localIsNewer(localRef, serverUpdatedAt)) {
     return const SessionSyncPlan(action: SessionSyncAction.upload);
   }
   return SessionSyncPlan(

@@ -113,6 +113,46 @@ void main() {
       expect(plan.action, SessionSyncAction.download);
     });
 
+    test('pre-stamp row with no server stamp skips (body went up at save)', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localCreatedAt: DateTime(2026, 8, 1, 14, 30),
+      );
+      expect(plan.action, SessionSyncAction.skip);
+    });
+
+    test('pre-stamp row skips when the server stamp echoes its created_at', () {
+      final created = DateTime(2026, 8, 1, 14, 30);
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localCreatedAt: created,
+        serverUpdatedAt: created,
+      );
+      expect(plan.action, SessionSyncAction.skip);
+    });
+
+    test('pre-stamp row downloads a later remote text edit', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localCreatedAt: DateTime(2026, 8, 1, 14, 30),
+        serverUpdatedAt: DateTime.utc(2026, 9, 17, 12),
+      );
+      expect(plan.action, SessionSyncAction.download);
+    });
+
+    test('pre-stamp row ignores a server stamp older than its own save', () {
+      final plan = planSessionSync(
+        localExists: true,
+        tombstoned: false,
+        localCreatedAt: DateTime(2026, 8, 1, 14, 30),
+        serverUpdatedAt: DateTime.utc(2026, 7, 1),
+      );
+      expect(plan.action, SessionSyncAction.skip);
+    });
+
     test('newer local rename is uploaded', () {
       final plan = planSessionSync(
         localExists: true,

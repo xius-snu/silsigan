@@ -199,31 +199,31 @@ class AudioService {
 
   Future<void> _startIosCapture(int gen) async {
     if (_wantMic) {
-      final bluetoothMic = await _isBluetoothMic(_desktop?.micDeviceId);
+      final micId = _desktop?.micDeviceId;
+      final bluetoothMic = await _isBluetoothMic(micId);
       if (gen != _stopGen) return;
+      void repin() => unawaited(DesktopAudioDevices.applyCaptureRoute(
+            micDeviceId: micId,
+            bluetoothMic: bluetoothMic,
+            updateMic: true,
+          ));
+      // Pinned before startRecorder so capture opens on the wanted mic.
       await DesktopAudioDevices.applyCaptureRoute(
-        micDeviceId: _desktop?.micDeviceId,
+        micDeviceId: micId,
         bluetoothMic: bluetoothMic,
         updateMic: true,
       );
       if (gen != _stopGen) return;
       await _startWithFlutterSound(gen);
       if (gen != _stopGen) return;
-      // flutter_sound's startRecorder may reset the session to HFP.
-      await DesktopAudioDevices.applyCaptureRoute(
-        micDeviceId: _desktop?.micDeviceId,
-        bluetoothMic: bluetoothMic,
-        updateMic: true,
-      );
-      if (gen != _stopGen) return;
-      final micId = _desktop?.micDeviceId;
+      // flutter_sound's startRecorder may reset the session to HFP, so the
+      // route is re-pinned after it — but never on the awaited path. Capture
+      // is already live here and the caller flips the button to Stop the
+      // moment this returns; an AVAudioSession call must not hold that open.
+      repin();
       unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {
         if (gen != _stopGen) return;
-        DesktopAudioDevices.applyCaptureRoute(
-          micDeviceId: micId,
-          bluetoothMic: bluetoothMic,
-          updateMic: true,
-        );
+        repin();
       }));
     }
     if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {

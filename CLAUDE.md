@@ -167,6 +167,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - On delete: audio file is removed from disk.
 - **Word timestamps** captured per utterance and saved per-line as JSON in `sessions.timestamps_json` for line-by-line audio scrubbing.
 - **Capture-failure recovery:** the record engine dies permanently on its first bad AudioRecord read (e.g. audioserver restart) and reports it async on its state stream. `onCaptureError` triggers an in-place restart (2s spurious-error grace, ≤2 attempts/min); if that fails the session is stopped through the normal per-mode path so the UI never claims to record silence. `AudioService.start()`/`stop()` are single-flight + stop-generation-guarded: an abandoned start (resume restart racing a Stop tap) can never bring capture live after the stop, and stop() skips the native call when capture already died (a dead recorder never answers, which would burn the 3s timeout).
+- **iOS audio route (`CaptureAudioRoute` in `ios/Runner/DesktopAudioCapture.swift`):** capture is pinned to the built-in mic while playback keeps `allowBluetoothA2DP`, so TTS can take AirPods without HFP stealing the input. **A route-change observer must never answer a route change by unconditionally reconfiguring the session.** `setCategory` / `setActive` / `setPreferredInput` each post `routeChangeNotification` themselves, so that is a self-feeding loop: it pegged the platform main thread, starved the `applyCaptureRoute` channel reply, and froze the record button mid-start with the mic already live (orange indicator on, button never flipping to Stop), while Android — whose `AudioDeviceCallback` only fires on real device add/remove — was unaffected. Three things keep it bounded and must stay: `.override` notifications are ignored (that reason is our own `defaultToSpeaker` / `setPreferredInput` echo), re-applies are debounced 300ms onto the main queue, and an observer-driven apply (`force: false`) is a true no-op when the session already holds the wanted category + preferred input. Explicit applies from Dart pass `force: true` and always re-activate/re-pin, because `flutter_sound`'s `startRecorder` can take the session to HFP behind our back. Every `applyCaptureRoute` call is also timeout-bounded on the Dart side, and the post-`startRecorder` re-pin is deliberately *not* awaited — nothing on the record-start path may block on an audio-session call.
 
 ### Soniox Translation & Reconnect
 - Translation via Soniox `translation` config: `{"type": "one_way", "target_language": "<code>"}`.
@@ -223,6 +224,15 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 - **Sync carries text + word timestamps + title, never audio** — raw PCM16 WAV is
   ~172 MB/hour against a 50 MB request cap. A synced session shows full text with
   no audio player on the device that didn't record it.
+- **Sync stays off the UI isolate and off the bodies.** `syncFromServer` runs
+  on every app resume, so it plans from `getSessionSyncIndex()` (created_at +
+  title + updated_at only) and reads a full row only for a session it actually
+  pushes; upload bodies are JSON+UTF-8 encoded and full-session downloads
+  decoded via `compute()`. `planSessionSync`'s same-title branch uploads only
+  when *this device* holds a real `updated_at` stamp (every edit/rename sets
+  one); a pre-v6 row with no stamp has nothing to push — treating a missing
+  server stamp as "local is newer" re-uploaded every legacy session's full
+  body on the first sync after 1.1.2.
 - Native sign-in on iOS/Android (`google_sign_in`, `sign_in_with_apple`);
   desktop has no native SDK and uses the server's browser OAuth broker
   (`/auth/google` → `/api/account/poll`). Apple's button is iOS/macOS only.

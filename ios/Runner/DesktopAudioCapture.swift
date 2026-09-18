@@ -336,6 +336,11 @@ private enum CaptureAudioRoute {
   private static var wantHfp = false
   private static var applying = false
   private static var observer: NSObjectProtocol?
+  private static var pendingReapply: DispatchWorkItem?
+
+  /// A headset connect posts several route changes in a row; collapse the
+  /// burst into one apply instead of reconfiguring the session per event.
+  private static let reapplyDebounce: TimeInterval = 0.3
 
   static func apply(args: [String: Any]?) {
     if let args {
@@ -351,7 +356,10 @@ private enum CaptureAudioRoute {
       wantHfp = false
     }
     hasApplied = true
-    try? applyNow()
+    // Explicit request from Dart (record start, TTS init): re-activate and
+    // re-pin unconditionally — flutter_sound's startRecorder may have taken
+    // the session to HFP behind our back, and the session may not be active.
+    try? applyNow(force: true)
     startObserving()
   }
 
@@ -376,14 +384,25 @@ private enum CaptureAudioRoute {
       ]
     }
     if hasApplied {
-      try? applyNow()
+      try? applyNow(force: true)
     } else {
       try? session.setCategory(prevCategory, mode: prevMode, options: prevOptions)
     }
     return mapped
   }
 
-  private static func applyNow() throws {
+  /// Configure the session for "capture on the pinned mic, playback free to
+  /// take A2DP headphones".
+  ///
+  /// setCategory, setActive and setPreferredInput each post
+  /// `routeChangeNotification` themselves. Answering those with another apply
+  /// is a self-feeding loop that pegs the main thread — which starved the
+  /// `applyCaptureRoute` channel reply and froze the record button mid-start
+  /// with the mic already live (orange indicator on, button never flipping to
+  /// Stop). So an observer-driven apply (`force: false`) MUST be a true no-op
+  /// when the session already holds what we want: it then touches nothing,
+  /// posts nothing, and the cycle terminates after one pass.
+  private static func applyNow(force: Bool) throws {
     if applying { return }
     applying = true
     defer { applying = false }
@@ -398,25 +417,41 @@ private enum CaptureAudioRoute {
     if wantHfp {
       options.insert(.allowBluetooth)
     }
-    try session.setCategory(.playAndRecord, mode: .default, options: options)
-    try session.setActive(true)
-    try pinInput(session)
+
+    let categoryMatches = session.category == .playAndRecord
+      && session.mode == .default
+      && session.categoryOptions == options
+    let wanted = desiredInput(session)
+    // Compared against our own preference, not currentRoute: when iOS
+    // declines the preference the live route never converges, and we would
+    // re-set it on every notification forever.
+    let inputMatches = wanted == nil || session.preferredInput?.uid == wanted?.uid
+    if !force && categoryMatches && inputMatches { return }
+
+    if !categoryMatches {
+      try session.setCategory(.playAndRecord, mode: .default, options: options)
+    }
+    if force || !categoryMatches {
+      try session.setActive(true)
+    }
+    if let wanted, force || !inputMatches {
+      try session.setPreferredInput(wanted)
+    }
   }
 
-  private static func pinInput(_ session: AVAudioSession) throws {
+  /// The port capture should open on: the user's pick while it is still
+  /// present, else the phone's own mic, else any non-Bluetooth input.
+  private static func desiredInput(
+    _ session: AVAudioSession
+  ) -> AVAudioSessionPortDescription? {
     let inputs = session.availableInputs ?? []
-    guard !inputs.isEmpty else { return }
-    let chosen: AVAudioSessionPortDescription?
+    guard !inputs.isEmpty else { return nil }
     if let id = preferredMicId, let match = inputs.first(where: { $0.uid == id }) {
-      chosen = match
-    } else {
-      chosen = inputs.first(where: { $0.portType == .builtInMic })
-        ?? inputs.first(where: { $0.portType == .headsetMic })
-        ?? inputs.first(where: { !isBluetooth($0.portType) })
+      return match
     }
-    if let chosen {
-      try session.setPreferredInput(chosen)
-    }
+    return inputs.first(where: { $0.portType == .builtInMic })
+      ?? inputs.first(where: { $0.portType == .headsetMic })
+      ?? inputs.first(where: { !isBluetooth($0.portType) })
   }
 
   private static func isBluetooth(_ port: AVAudioSession.Port) -> Bool {
@@ -429,9 +464,32 @@ private enum CaptureAudioRoute {
       forName: AVAudioSession.routeChangeNotification,
       object: nil,
       queue: .main
-    ) { _ in
+    ) { note in
       guard hasApplied else { return }
-      try? applyNow()
+      // `.override` is what our own defaultToSpeaker + setPreferredInput
+      // produce, so it is never news worth re-applying for: answering it is
+      // how this observer used to feed itself.
+      if let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+         raw == AVAudioSession.RouteChangeReason.override.rawValue {
+        return
+      }
+      scheduleReapply()
     }
+  }
+
+  /// Re-apply off the notification callback: a burst coalesces into one pass,
+  /// and a slow setActive never runs inside NotificationCenter's own dispatch.
+  private static func scheduleReapply() {
+    pendingReapply?.cancel()
+    let work = DispatchWorkItem {
+      pendingReapply = nil
+      guard hasApplied else { return }
+      try? applyNow(force: false)
+    }
+    pendingReapply = work
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + reapplyDebounce,
+      execute: work
+    )
   }
 }

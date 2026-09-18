@@ -27,6 +27,11 @@ class DesktopAudioDevices {
 
   static const _channel = MethodChannel('com.silsigan.app/desktop_audio');
 
+  /// Ceiling on one native audio-session reconfiguration. Generous enough for
+  /// a real setCategory + setActive + setPreferredInput round trip, short
+  /// enough that a wedged session cannot hold the record button hostage.
+  static const _applyRouteTimeout = Duration(seconds: 3);
+
   static bool get nativeLoopbackSupported {
     if (kIsWeb) return false;
     return Platform.isWindows ||
@@ -97,10 +102,15 @@ class DesktopAudioDevices {
     if (kIsWeb) return;
     if (!(Platform.isIOS || Platform.isAndroid)) return;
     try {
+      // Bounded: this reconfigures the native audio session on the platform
+      // main thread and sits on the record-start path. A session that stalls
+      // must degrade into a wrong route, never a record button that never
+      // flips to Stop. The timeout doesn't cancel the native call, it just
+      // stops the start path waiting on it.
       await _channel.invokeMethod<void>('applyCaptureRoute', {
         if (updateMic) 'micDeviceId': micDeviceId ?? '',
         if (bluetoothMic != null) 'bluetoothMic': bluetoothMic,
-      });
+      }).timeout(_applyRouteTimeout);
     } catch (_) {}
   }
 

@@ -40,7 +40,10 @@ class SyncService {
       // which neither the 50 MB request cap nor Postgres storage can absorb.
       // Word timestamps and the title are kilobytes and do sync, so a session
       // opened on another device keeps its name and line-by-line structure.
-      final body = json.encode({
+      // Encoded off the UI isolate: timestampsJson alone runs to several MB
+      // for an hour-long session, and escaping it inline dropped frames on
+      // every save and history edit.
+      final body = await compute(_encodeUploadBody, <String, Object?>{
         'userId': userId,
         'createdAt': session.createdAt,
         'transcription': session.koreanFull,
@@ -123,9 +126,12 @@ class SyncService {
       final deletedCreatedAts =
           ((data['deleted'] as List?) ?? []).map((e) => e.toString()).toSet();
 
-      final localSessions = await db.getAllSessions();
-      final localByCreatedAt = <String, TranscriptSession>{
-        for (final s in localSessions) s.createdAt: s,
+      // Identity + title + stamp only. Full rows pulled every body and
+      // timestamps_json through the platform channel onto the UI isolate on
+      // each resume, when the planner needs none of it.
+      final localEntries = await db.getSessionSyncIndex();
+      final localByCreatedAt = <String, SessionSyncEntry>{
+        for (final s in localEntries) s.createdAt: s,
       };
       final localTombstones = await db.getTombstoneCreatedAts();
 
@@ -157,7 +163,7 @@ class SyncService {
         }
       }
 
-      final toUpload = <TranscriptSession>[];
+      final toUpload = <String>[];
 
       for (final serverSession in serverSessions) {
         final createdAt = asString(serverSession['created_at']);
@@ -172,7 +178,8 @@ class SyncService {
           tombstoned: false,
           localTitle: local?.title,
           serverTitle: asString(serverSession['title']),
-          localUpdatedAt: parseSyncTime(local?.updatedAt ?? local?.createdAt),
+          localUpdatedAt: parseSyncTime(local?.updatedAt),
+          localCreatedAt: parseSyncTime(local?.createdAt),
           serverUpdatedAt: parseSyncTime(asString(serverSession['updated_at'])),
         );
         switch (plan.action) {
@@ -205,7 +212,7 @@ class SyncService {
             }
             break;
           case SessionSyncAction.upload:
-            if (local != null) toUpload.add(local);
+            if (local != null) toUpload.add(local.createdAt);
             break;
         }
       }
@@ -219,12 +226,15 @@ class SyncService {
         if (!serverTimestamps.contains(local.createdAt) &&
             !localTombstones.contains(local.createdAt) &&
             !deletedCreatedAts.contains(local.createdAt)) {
-          toUpload.add(local);
+          toUpload.add(local.createdAt);
         }
       }
 
-      for (final session in toUpload) {
-        if (await db.isTombstoned(session.createdAt)) continue;
+      for (final createdAt in toUpload) {
+        if (await db.isTombstoned(createdAt)) continue;
+        // The full row is read only for the few sessions actually pushed.
+        final session = await db.getSessionByCreatedAt(createdAt);
+        if (session == null) continue;
         await uploadSession(session);
       }
 
@@ -249,7 +259,10 @@ class SyncService {
       );
       if (response == null || response.statusCode != 200) return;
 
-      final data = json.decode(response.body);
+      // A full session body — decoded off the UI isolate like every other
+      // session-sized JSON payload.
+      final data = await compute(_decodeJsonBytes, response.bodyBytes);
+      if (data is! Map) return;
       final session = data['session'];
       if (session == null) return;
 
@@ -326,7 +339,7 @@ class SyncService {
 
   Future<http.Response?> _postWithRetry(
     String path,
-    String body, {
+    Object body, {
     required Duration timeout,
   }) async {
     var response = await http
@@ -352,3 +365,13 @@ class SyncService {
     return response;
   }
 }
+
+/// compute() entry point: JSON + UTF-8 in one pass, handed back as the bytes
+/// http sends as-is, so the UI isolate never walks the payload at all.
+Uint8List _encodeUploadBody(Map<String, Object?> body) {
+  final bytes = JsonUtf8Encoder().convert(body);
+  return bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+}
+
+/// compute() entry point for a full-session response body.
+Object? _decodeJsonBytes(Uint8List bytes) => json.decode(utf8.decode(bytes));
