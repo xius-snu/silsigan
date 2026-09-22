@@ -566,21 +566,30 @@ class AudioService {
     // Stream copy: write WAV header then copy PCM data in chunks
     final outRaf = await File(filePath).open(mode: FileMode.write);
 
-    // Write 44-byte WAV header
-    final header = _buildWavHeader(_pcmBytesWritten);
-    await outRaf.writeFrom(header);
+    // Placeholder, rewritten below from the bytes actually copied. A header
+    // whose data-size doesn't match the payload is rejected by desktop players.
+    await outRaf.writeFrom(_buildWavHeader(0));
 
     // Copy PCM data from temp file in chunks (avoids loading entire file)
+    var copied = 0;
     if (_tempFilePath != null && await File(_tempFilePath!).exists()) {
       final inStream = File(_tempFilePath!).openRead();
       await for (final chunk in inStream) {
         await outRaf.writeFrom(chunk);
+        copied += chunk.length;
       }
       // Clean up temp file
       try {
         await File(_tempFilePath!).delete();
       } catch (_) {}
     }
+    // PCM16 frames are 2 bytes. An odd tail makes the WAV invalid.
+    if (copied.isOdd) {
+      await outRaf.writeFrom(const [0]);
+      copied += 1;
+    }
+    await outRaf.setPosition(0);
+    await outRaf.writeFrom(_buildWavHeader(copied));
 
     await outRaf.close();
     _tempFilePath = null;
@@ -715,7 +724,7 @@ class AudioService {
     buffer.setUint8(offset++, 0x61); // a
     buffer.setUint32(offset, pcmDataSize, Endian.little);
 
-    return buffer.buffer.asUint8List();
+    return Uint8List.sublistView(buffer, 0, buffer.lengthInBytes);
   }
 
   Future<void> dispose() async {

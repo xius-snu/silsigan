@@ -440,17 +440,25 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     final audioPath = _selectedSession?.audioPath;
     if (audioPath == null) return;
 
-    if (_isPlaying) {
-      await _player.pausePlayer();
-      setState(() => _isPlaying = false);
-    } else {
-      if (_player.isPaused) {
+    try {
+      if (_isPlaying) {
+        await _player.pausePlayer();
+        if (mounted) setState(() => _isPlaying = false);
+      } else if (_player.isPaused) {
         await _player.resumePlayer();
-        setState(() => _isPlaying = true);
+        if (mounted) setState(() => _isPlaying = true);
       } else {
+        if (!await File(audioPath).exists()) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Audio file not found')),
+            );
+          }
+          return;
+        }
         final seekTarget =
             _position.value > Duration.zero ? _position.value : null;
-        setState(() => _isPlaying = true);
+        if (mounted) setState(() => _isPlaying = true);
         await _player.startPlayer(
           fromURI: audioPath,
           codec: Codec.pcm16WAV,
@@ -467,6 +475,15 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           await _player.seekToPlayer(seekTarget);
         }
       }
+    } catch (_) {
+      try {
+        await _player.stopPlayer();
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() => _isPlaying = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't play this recording")),
+      );
     }
   }
 

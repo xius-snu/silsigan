@@ -2,11 +2,18 @@ import 'dart:async';
 import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 
-/// History-sheet playback. flutter_sound has no Windows plugin, so desktop
-/// uses [audioplayers] (already a dependency) against the same WAV files.
+/// History-sheet playback.
+///
+/// flutter_sound ships no Windows or macOS plugin, so those builds cannot
+/// use it. macOS plays the WAV through audioplayers (AVPlayer). Windows
+/// Media Foundation — what audioplayers uses there — rejects these 24 kHz
+/// PCM recordings, so Windows streams them with waveOut instead.
 class SessionAudioPlayer {
+  static const _channel = MethodChannel('com.silsigan.app/desktop_audio');
+
   FlutterSoundPlayer? _fs;
   AudioPlayer? _ap;
   StreamSubscription<Duration>? _apPosSub;
@@ -16,14 +23,25 @@ class SessionAudioPlayer {
   bool _apPaused = false;
   VoidCallback? _whenFinished;
 
-  bool get _desktop => !kIsWeb && (Platform.isWindows || Platform.isLinux);
+  Timer? _wavePoll;
+  bool _wavePaused = false;
+  bool _suppressFinish = false;
+  void Function(Duration position, Duration duration)? _onProgress;
 
-  bool get isPaused => _desktop ? _apPaused : (_fs?.isPaused ?? false);
+  bool get _waveOut => !kIsWeb && Platform.isWindows;
+
+  bool get _audioPlayers => !kIsWeb && (Platform.isMacOS || Platform.isLinux);
+
+  bool get isPaused => _waveOut
+      ? _wavePaused
+      : (_audioPlayers ? _apPaused : (_fs?.isPaused ?? false));
 
   Future<void> openPlayer({
     required void Function(Duration position, Duration duration) onProgress,
   }) async {
-    if (_desktop) {
+    _onProgress = onProgress;
+    if (_waveOut) return;
+    if (_audioPlayers) {
       final ap = AudioPlayer();
       _ap = ap;
       _apDurSub = ap.onDurationChanged.listen((d) {
@@ -36,6 +54,9 @@ class SessionAudioPlayer {
         _apPaused = false;
         _whenFinished?.call();
       });
+      try {
+        await ap.setReleaseMode(ReleaseMode.stop);
+      } catch (_) {}
       return;
     }
     final fs = FlutterSoundPlayer();
@@ -48,7 +69,16 @@ class SessionAudioPlayer {
   }
 
   Future<void> closePlayer() async {
-    if (_desktop) {
+    _wavePoll?.cancel();
+    _wavePoll = null;
+    _suppressFinish = true;
+    if (_waveOut) {
+      try {
+        await _channel.invokeMethod<void>('stopWav');
+      } catch (_) {}
+      return;
+    }
+    if (_audioPlayers) {
       await _apPosSub?.cancel();
       await _apDurSub?.cancel();
       await _apCompleteSub?.cancel();
@@ -64,8 +94,16 @@ class SessionAudioPlayer {
   }
 
   Future<void> stopPlayer() async {
+    _wavePaused = false;
     _apPaused = false;
-    if (_desktop) {
+    _suppressFinish = true;
+    _wavePoll?.cancel();
+    _wavePoll = null;
+    if (_waveOut) {
+      await _channel.invokeMethod<void>('stopWav');
+      return;
+    }
+    if (_audioPlayers) {
       await _ap?.stop();
       return;
     }
@@ -73,7 +111,12 @@ class SessionAudioPlayer {
   }
 
   Future<void> pausePlayer() async {
-    if (_desktop) {
+    if (_waveOut) {
+      _wavePaused = true;
+      await _channel.invokeMethod<void>('pauseWav');
+      return;
+    }
+    if (_audioPlayers) {
       await _ap?.pause();
       _apPaused = true;
       return;
@@ -82,7 +125,14 @@ class SessionAudioPlayer {
   }
 
   Future<void> resumePlayer() async {
-    if (_desktop) {
+    if (_waveOut) {
+      _wavePaused = false;
+      _suppressFinish = false;
+      await _channel.invokeMethod<void>('resumeWav');
+      _startWavePoll();
+      return;
+    }
+    if (_audioPlayers) {
       _apPaused = false;
       await _ap?.resume();
       return;
@@ -96,9 +146,16 @@ class SessionAudioPlayer {
     VoidCallback? whenFinished,
   }) async {
     _whenFinished = whenFinished;
-    if (_desktop) {
+    if (_waveOut) {
+      _wavePaused = false;
+      _suppressFinish = false;
+      await _channel.invokeMethod<void>('playWav', {'path': fromURI});
+      _startWavePoll();
+      return;
+    }
+    if (_audioPlayers) {
       _apPaused = false;
-      await _ap!.play(DeviceFileSource(fromURI));
+      await _ap!.play(DeviceFileSource(fromURI, mimeType: 'audio/wav'));
       return;
     }
     await _fs!.startPlayer(
@@ -109,10 +166,50 @@ class SessionAudioPlayer {
   }
 
   Future<void> seekToPlayer(Duration position) async {
-    if (_desktop) {
+    if (_waveOut) {
+      await _channel.invokeMethod<void>('seekWav', {
+        'positionMs': position.inMilliseconds,
+      });
+      return;
+    }
+    if (_audioPlayers) {
       await _ap?.seek(position);
       return;
     }
     await _fs?.seekToPlayer(position);
+  }
+
+  void _startWavePoll() {
+    _wavePoll?.cancel();
+    _wavePoll = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      unawaited(_pollWave());
+    });
+  }
+
+  Future<void> _pollWave() async {
+    if (_suppressFinish) return;
+    final Map<Object?, Object?>? status;
+    try {
+      status = await _channel.invokeMapMethod<Object?, Object?>('wavStatus');
+    } catch (_) {
+      return;
+    }
+    if (status == null || _suppressFinish) return;
+    final position = Duration(milliseconds: _asInt(status['positionMs']));
+    final duration = Duration(milliseconds: _asInt(status['durationMs']));
+    _onProgress?.call(position, duration);
+    if (status['finished'] == true && !_suppressFinish) {
+      _suppressFinish = true;
+      _wavePaused = false;
+      _wavePoll?.cancel();
+      _wavePoll = null;
+      _whenFinished?.call();
+    }
+  }
+
+  static int _asInt(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return 0;
   }
 }
