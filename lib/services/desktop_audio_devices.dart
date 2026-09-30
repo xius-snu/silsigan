@@ -58,6 +58,18 @@ class DesktopAudioDevices {
   }
 
   static Future<List<DesktopAudioDevice>> listOutputs() async {
+    // iOS has exactly one speaker source, the ReplayKit broadcast. Asking the
+    // native side would also re-list inputs, which briefly reconfigures the
+    // audio session.
+    if (!kIsWeb && Platform.isIOS) {
+      return const [
+        DesktopAudioDevice(
+          id: 'system',
+          label: 'System / screen audio',
+          isDefault: true,
+        ),
+      ];
+    }
     if (nativeLoopbackSupported) {
       return _listFromNative('outputs');
     }
@@ -67,13 +79,20 @@ class DesktopAudioDevices {
     return const [];
   }
 
-  static Future<void> startLoopback({String? deviceId}) async {
+  /// [restart]: replacing a capture mid-session. iOS then never presents the
+  /// Start Broadcast sheet; a broadcast that's gone comes back as a
+  /// BROADCAST_ENDED PlatformException instead.
+  static Future<void> startLoopback({
+    String? deviceId,
+    bool restart = false,
+  }) async {
     if (!nativeLoopbackSupported) {
       throw UnsupportedError(
           'Native loopback is not available on this platform');
     }
     await _channel.invokeMethod<void>('startLoopback', {
       if (deviceId != null && deviceId.isNotEmpty) 'deviceId': deviceId,
+      if (restart && Platform.isIOS) 'restart': true,
     });
   }
 

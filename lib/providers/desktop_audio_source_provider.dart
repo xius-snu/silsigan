@@ -40,15 +40,26 @@ final desktopAudioSettingsProvider =
 const _sourceKey = 'desktop_audio_source';
 const _micKey = 'desktop_audio_mic_id';
 const _speakerKey = 'desktop_audio_speaker_id';
+const _iosResetKey = 'desktop_audio_ios_reset_v1';
 
 Future<DesktopAudioSettings> loadSavedDesktopAudioSettings() async {
   final prefs = await SharedPreferences.getInstance();
+  // The selector was hidden on iPhone / iPad from 1.1.1 until 1.1.4+79, and
+  // capture ran on the built-in mic whatever was saved. A Speaker / Both or
+  // headset-mic choice from 1.0.15–1.0.17 must not quietly come back (with a
+  // surprise Start Broadcast sheet) now that it's visible again.
+  if (isIOSPlatform && !(prefs.getBool(_iosResetKey) ?? false)) {
+    await prefs.remove(_sourceKey);
+    await prefs.remove(_micKey);
+    await prefs.remove(_speakerKey);
+    await prefs.setBool(_iosResetKey, true);
+  }
   final name = prefs.getString(_sourceKey);
   var source = DesktopAudioSource.values.firstWhere(
     (s) => s.name == name,
     orElse: () => DesktopAudioSource.microphone,
   );
-  // iPhone / iPad no longer offer speaker capture — ignore a stale pref.
+  // A platform without speaker capture ignores a stale Speaker / Both pref.
   if (!desktopSpeakerCaptureSupported &&
       source != DesktopAudioSource.microphone) {
     source = DesktopAudioSource.microphone;

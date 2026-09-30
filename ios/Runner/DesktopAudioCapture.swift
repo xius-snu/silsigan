@@ -8,6 +8,24 @@ private let kSystemAudioId = "system"
 private let kSystemAudioLabel = "System / screen audio"
 private let kExtensionBundleId = "com.silsigan.app.ScreenAudio"
 private let kStartTimeout: TimeInterval = 90
+/// A restart (resume, capture-failure recovery) stops and starts capture back
+/// to back. Holding the stop this long lets the restart reuse the live
+/// broadcast instead of ending it and putting the Start Broadcast sheet in
+/// front of the user again. Android's playback capture uses the same grace.
+private let kStopGrace: TimeInterval = 1.5
+/// After the picker sheet closes, Start Broadcast's countdown and the
+/// extension launch post `started` within a few seconds. A sheet that was
+/// cancelled never does.
+private let kPickerDismissGrace: TimeInterval = 8
+/// No producer beat for this long: the extension is gone (the red pill was
+/// tapped, or iOS killed it). One threshold for reuse and for
+/// BROADCAST_ENDED, so the two can never disagree about the same broadcast.
+private let kBroadcastStaleMs: UInt64 = 5000
+/// A broadcast that comes up this soon after its start already failed (the
+/// sheet was dismissed mid-countdown, or the timeout fired) has nobody
+/// waiting for it. Its extension cleared our stop flag on start, so stop it
+/// again rather than leave the red pill up until the orphan timeout.
+private let kLateStartWindow: TimeInterval = 30
 
 private var gPlugin: DesktopAudioCapturePlugin?
 
@@ -32,10 +50,29 @@ private final class DesktopAudioCapturePlugin: NSObject {
   private var picker: RPSystemBroadcastPickerView?
   private var pendingStart: FlutterResult?
   private var startTimeout: DispatchWorkItem?
+  private var pickerWatch: Timer?
+  // watchPicker state. Instance properties, not captured locals: the Timer
+  // block is @Sendable in recent SDKs, where mutating captured vars is
+  // diagnosed.
+  private var pickerSeen = false
+  private var pickerClosedAt: CFTimeInterval?
+  private var lastFailedStartAt: CFTimeInterval?
+  /// When the device was last unlocked (or the app became active), in
+  /// BroadcastIPC.nowMs(). Ends a paused broadcast's lock allowance.
+  private var unlockedAtMs: UInt64?
+  private var pendingStop: DispatchWorkItem?
   private var keepAlivePlayer: AVAudioPlayer?
+  /// A recording session is reading the broadcast: startLoopback succeeded
+  /// and no stopLoopback has come since.
+  private var loopbackWanted = false
   private var startedObserver: UnsafeRawPointer?
   private var stoppedObserver: UnsafeRawPointer?
+  private var sessionObservers: [NSObjectProtocol] = []
 
+  // A broadcast already live at launch is left alone: it may be one the user
+  // started from Control Center, and startLoopback will reuse it. A leftover
+  // whose app died is ended by the extension once nobody reads it for a
+  // minute, and a swipe-kill ends it at terminate (observeAudioSession).
   init(messenger: FlutterBinaryMessenger, controller: UIViewController) {
     super.init()
     self.controller = controller
@@ -46,17 +83,29 @@ private final class DesktopAudioCapturePlugin: NSObject {
     self.channel = channel
     _ = ring.open(create: true)
     installObservers()
+    observeAudioSession()
     embedPicker(on: controller)
   }
 
   func shutdown() {
     startTimeout?.cancel()
+    pickerWatch?.invalidate()
+    pickerWatch = nil
+    cancelPendingStop()
+    if loopbackWanted {
+      requestStopNow()
+    }
+    loopbackWanted = false
     stopKeepAlive()
     failPending(
       code: "CANCELLED",
       message: "Screen audio wasn’t started. Choose Silsigan in the broadcast picker and tap Start Broadcast."
     )
     removeObservers()
+    for observer in sessionObservers {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    sessionObservers.removeAll()
     picker?.removeFromSuperview()
     picker = nil
     channel?.setMethodCallHandler(nil)
@@ -77,12 +126,13 @@ private final class DesktopAudioCapturePlugin: NSObject {
         result(nil)
       }
     case "startLoopback":
-      startLoopback(result)
+      let args = call.arguments as? [String: Any]
+      startLoopback(restart: (args?["restart"] as? Bool) ?? false, result: result)
     case "stopLoopback":
-      requestStopNow()
+      scheduleStop()
       result(nil)
     case "readLoopback":
-      result(FlutterStandardTypedData(bytes: ring.take()))
+      readLoopback(result)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -109,20 +159,14 @@ private final class DesktopAudioCapturePlugin: NSObject {
     ]
   }
 
-  private func startLoopback(_ result: @escaping FlutterResult) {
-    // Reuse only a live broadcast that is not already stopping. Clearing
-    // the stop flag first would make a dying session look running.
-    if BroadcastIPC.isBroadcastRunning()
-      && !BroadcastIPC.stopRequested()
-      && !ring.isStopRequested()
-    {
-      startKeepAlive()
-      result(nil)
-      return
-    }
-    enableMixWithOthers()
-    BroadcastIPC.clearStop()
-    ring.setStopRequested(false)
+  /// `restart`: Dart is replacing a capture in the middle of a session
+  /// (resume, capture recovery). Those never put the Start Broadcast sheet
+  /// up: a broadcast that is gone by then is reported as BROADCAST_ENDED,
+  /// the same as if the chunk loop had found it.
+  private func startLoopback(restart: Bool, result: @escaping FlutterResult) {
+    // A restart inside the stop grace lands here with the broadcast still
+    // up: keep it instead of asking the user to start another.
+    cancelPendingStop()
     if pendingStart != nil {
       result(
         FlutterError(
@@ -133,7 +177,30 @@ private final class DesktopAudioCapturePlugin: NSObject {
       )
       return
     }
+    // Reuse a live broadcast that isn't being stopped (a restart, or one the
+    // user started from Control Center).
+    if broadcastLive() {
+      claimBroadcast()
+      result(nil)
+      return
+    }
+    if restart {
+      loopbackWanted = false
+      result(
+        FlutterError(
+          code: "BROADCAST_ENDED",
+          message: "Screen broadcast ended",
+          details: nil
+        )
+      )
+      return
+    }
+    // Keep the app alive through the sheet and its countdown too: a
+    // speaker-only user who switches away the moment it closes must not be
+    // suspended before `started` arrives.
+    startKeepAlive()
     ring.reset()
+    ring.consumerBeat()
     pendingStart = result
     let timeout = DispatchWorkItem { [weak self] in
       self?.failPending(
@@ -146,17 +213,122 @@ private final class DesktopAudioCapturePlugin: NSObject {
     startTimeout = timeout
     DispatchQueue.main.asyncAfter(deadline: .now() + kStartTimeout, execute: timeout)
     DispatchQueue.main.async { [weak self] in
-      self?.tapPicker()
+      guard let self, self.pendingStart != nil else { return }
+      if self.tapPicker() {
+        self.watchPicker()
+      } else {
+        self.failPending(
+          code: "CANCELLED",
+          message: "Screen audio couldn’t be started: the broadcast picker didn’t open."
+        )
+      }
     }
   }
 
-  /// Stop the ReplayKit extension immediately. The 1.5s UserDefaults grace
-  /// left the 화면방송 indicator up for ~3s after Stop; the mmap flag +
-  /// Darwin ping is visible to the extension on the next sample / 100ms poll.
+  /// A session is reading the broadcast from here on.
+  private func claimBroadcast() {
+    loopbackWanted = true
+    ring.consumerBeat()
+    startKeepAlive()
+  }
+
+  /// Stop after a short grace, so a restart that follows straight away can
+  /// cancel it and keep the broadcast (see kStopGrace).
+  private func scheduleStop() {
+    loopbackWanted = false
+    cancelPendingStop()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.pendingStop = nil
+      self.requestStopNow()
+    }
+    pendingStop = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + kStopGrace, execute: work)
+  }
+
+  private func cancelPendingStop() {
+    pendingStop?.cancel()
+    pendingStop = nil
+  }
+
+  /// The mmap flag is seen by the extension's next 100 ms tick; the Darwin
+  /// ping gets there sooner when it's awake.
   private func requestStopNow() {
     ring.setStopRequested(true)
-    BroadcastIPC.requestStop()
+    BroadcastIPC.post(BroadcastIPC.stopNotification)
     stopKeepAlive()
+  }
+
+  private func readLoopback(_ result: @escaping FlutterResult) {
+    let data = ring.take()
+    // The broadcast ended under a live session: the red status-bar pill was
+    // tapped, or iOS killed the extension. Tell Dart once so it can end the
+    // session (speaker only) or carry on with the mic (Both) instead of
+    // "recording" silence.
+    // The keep-alive stays up: a speaker-only session is about to wind down
+    // (finalize, disconnect, save) and must not be suspended halfway. The
+    // stopLoopback that follows ends it.
+    if data.isEmpty, loopbackWanted, pendingStart == nil, !broadcastLive() {
+      loopbackWanted = false
+      result(
+        FlutterError(
+          code: "BROADCAST_ENDED",
+          message: "Screen broadcast ended",
+          details: nil
+        )
+      )
+      return
+    }
+    result(FlutterStandardTypedData(bytes: data))
+  }
+
+  /// RPSystemBroadcastPickerView has no callbacks. Watch the sheet it
+  /// presents: once it has been seen and gone for kPickerDismissGrace with
+  /// no `started`, the user cancelled. Otherwise Dart would wait out the
+  /// whole 90 s timeout with the record button stuck on "starting". If the
+  /// sheet is never seen on this controller, the timeout still applies.
+  private func watchPicker() {
+    pickerWatch?.invalidate()
+    pickerSeen = false
+    pickerClosedAt = nil
+    let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] tick in
+      guard let self, self.pendingStart != nil else {
+        tick.invalidate()
+        return
+      }
+      self.checkPicker()
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    pickerWatch = timer
+  }
+
+  /// The one liveness question every path asks, with one threshold, so reuse
+  /// and BROADCAST_ENDED can never disagree about the same broadcast.
+  private func broadcastLive() -> Bool {
+    ring.isBroadcastLive(staleAfterMs: kBroadcastStaleMs, unlockedAtMs: unlockedAtMs)
+  }
+
+  private func checkPicker() {
+    // The broadcast is up even though `started` hasn't landed (the Darwin
+    // ping can trail the sheet): that's a start, not a cancel.
+    if broadcastLive() {
+      onBroadcastStarted()
+      return
+    }
+    if controller?.presentedViewController != nil {
+      pickerSeen = true
+      pickerClosedAt = nil
+      return
+    }
+    guard pickerSeen else { return }
+    let now = CACurrentMediaTime()
+    guard let closed = pickerClosedAt else {
+      pickerClosedAt = now
+      return
+    }
+    if now - closed > kPickerDismissGrace {
+      failPending(code: "CANCELLED", message: "Screen audio wasn’t started.")
+    }
   }
 
   /// Speaker-only never opens the mic, so iOS would suspend us a few seconds
@@ -166,12 +338,13 @@ private final class DesktopAudioCapturePlugin: NSObject {
   /// don't duck the video the user is trying to transcribe.
   private func startKeepAlive() {
     enableMixWithOthers()
-    if keepAlivePlayer != nil { return }
-    guard let player = try? AVAudioPlayer(data: Self.silentWav()) else { return }
-    player.numberOfLoops = -1
-    player.volume = 0.001
-    player.play()
-    keepAlivePlayer = player
+    if keepAlivePlayer == nil {
+      guard let player = try? AVAudioPlayer(data: Self.silentWav()) else { return }
+      player.numberOfLoops = -1
+      player.volume = 0.001
+      keepAlivePlayer = player
+    }
+    keepAlivePlayer?.play()
   }
 
   private func stopKeepAlive() {
@@ -179,16 +352,87 @@ private final class DesktopAudioCapturePlugin: NSObject {
     keepAlivePlayer = nil
   }
 
+  /// Only touches the category when mixWithOthers is missing. In Both mode
+  /// MicCapture's session already has it, and rewriting the category under
+  /// a live capture engine can change the hardware format and stop it.
   private func enableMixWithOthers() {
     let session = AVAudioSession.sharedInstance()
     do {
-      var options = session.categoryOptions
-      options.insert(.mixWithOthers)
-      let category: AVAudioSession.Category =
-        session.category == .playAndRecord ? .playAndRecord : .playback
-      try session.setCategory(category, mode: session.mode, options: options)
+      if !session.categoryOptions.contains(.mixWithOthers) {
+        var options = session.categoryOptions
+        options.insert(.mixWithOthers)
+        let category: AVAudioSession.Category =
+          session.category == .playAndRecord ? .playAndRecord : .playback
+        try session.setCategory(category, mode: session.mode, options: options)
+      }
       try session.setActive(true)
     } catch {}
+  }
+
+  /// A call or Siri stops the keep-alive player and it doesn't resume on its
+  /// own; without it a speaker-only session is suspended in the background.
+  /// Observers run on the posting thread and hop to main (see MicCapture).
+  private func observeAudioSession() {
+    let center = NotificationCenter.default
+    sessionObservers.append(center.addObserver(
+      forName: AVAudioSession.interruptionNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] note in
+      let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+      DispatchQueue.main.async {
+        guard let self, let raw,
+              AVAudioSession.InterruptionType(rawValue: raw) == .ended,
+              self.keepAlivePlayer != nil
+        else { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        self.keepAlivePlayer?.play()
+      }
+    })
+    sessionObservers.append(center.addObserver(
+      forName: AVAudioSession.mediaServicesWereResetNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      DispatchQueue.main.async {
+        // Every player is invalid after a media-services reset.
+        guard let self, self.keepAlivePlayer != nil else { return }
+        self.keepAlivePlayer = nil
+        self.startKeepAlive()
+      }
+    })
+    // Swipe-kill of a recording app (it runs in the background, so it gets
+    // this): end the broadcast now instead of leaving the red pill up until
+    // the extension's orphan timeout. Posted on main and handled inline,
+    // since an async hop would never run during termination.
+    sessionObservers.append(center.addObserver(
+      forName: UIApplication.willTerminateNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      // pendingStop: a session that just stopped is still inside the stop
+      // grace, and the broadcast is still up.
+      guard let self,
+            self.loopbackWanted || self.pendingStart != nil || self.pendingStop != nil
+      else { return }
+      self.ring.setStopRequested(true)
+      BroadcastIPC.post(BroadcastIPC.stopNotification)
+    })
+    // Unlock (or the app coming forward, which implies it) ends a paused
+    // broadcast's lock allowance: see AudioRingBuffer.isBroadcastLive. Both
+    // are posted on main, so they're handled inline.
+    for name in [
+      UIApplication.protectedDataDidBecomeAvailableNotification,
+      UIApplication.didBecomeActiveNotification,
+    ] {
+      sessionObservers.append(center.addObserver(
+        forName: name,
+        object: nil,
+        queue: nil
+      ) { [weak self] _ in
+        self?.unlockedAtMs = BroadcastIPC.nowMs()
+      })
+    }
   }
 
   private static func silentWav() -> Data {
@@ -225,26 +469,28 @@ private final class DesktopAudioCapturePlugin: NSObject {
     self.picker = picker
   }
 
-  private func tapPicker() {
+  /// Returns false when the picker's button couldn't be found.
+  private func tapPicker() -> Bool {
     if picker == nil, let controller {
       embedPicker(on: controller)
     }
-    guard let picker else { return }
+    guard let picker else { return false }
     // RPSystemBroadcastPickerView only presents from an internal UIButton.
     // Sending the control event is the supported-in-practice way to show
-    // Start Broadcast from Flutter (Zoom / Meet / Saydi do the same).
+    // Start Broadcast from Flutter (Zoom / Meet / LiveKit do the same).
     for sub in picker.subviews {
       if let button = sub as? UIButton {
         button.sendActions(for: .touchUpInside)
-        return
+        return true
       }
       for inner in sub.subviews {
         if let button = inner as? UIButton {
           button.sendActions(for: .touchUpInside)
-          return
+          return true
         }
       }
     }
+    return false
   }
 
   private func installObservers() {
@@ -296,8 +542,14 @@ private final class DesktopAudioCapturePlugin: NSObject {
   private func failPending(code: String, message: String) {
     startTimeout?.cancel()
     startTimeout = nil
+    pickerWatch?.invalidate()
+    pickerWatch = nil
     guard let pending = pendingStart else { return }
     pendingStart = nil
+    lastFailedStartAt = CACurrentMediaTime()
+    if !loopbackWanted {
+      stopKeepAlive()
+    }
     pending(
       FlutterError(
         code: code,
@@ -308,21 +560,36 @@ private final class DesktopAudioCapturePlugin: NSObject {
   }
 
   private func onBroadcastStarted() {
+    guard let pending = pendingStart else {
+      // Its start already failed (sheet dismissed mid-countdown, or the
+      // timeout): nobody is waiting, and the extension cleared our stop flag
+      // as it came up. End it now. A broadcast started from Control Center
+      // with no failed start behind it is left for the next startLoopback
+      // to reuse (the extension ends it if nobody reads it for a minute).
+      if !loopbackWanted, let failedAt = lastFailedStartAt,
+         CACurrentMediaTime() - failedAt < kLateStartWindow {
+        requestStopNow()
+      }
+      return
+    }
+    pendingStart = nil
+    lastFailedStartAt = nil
     startTimeout?.cancel()
     startTimeout = nil
-    startKeepAlive()
-    if let pending = pendingStart {
-      pendingStart = nil
-      pending(nil)
-    }
+    pickerWatch?.invalidate()
+    pickerWatch = nil
+    claimBroadcast()
+    pending(nil)
   }
 
   private func onBroadcastStopped() {
-    stopKeepAlive()
-    failPending(
-      code: "CANCELLED",
-      message: "Broadcast ended before screen audio started"
-    )
+    // Deliberately doesn't fail a pending start: a `stopped` trailing from
+    // the previous, still-dying broadcast would cancel the sheet that was
+    // just shown. The picker watcher and the timeout cover real cancels, and
+    // a session still reading hears about it from readLoopback.
+    if !loopbackWanted, pendingStart == nil {
+      stopKeepAlive()
+    }
   }
 }
 

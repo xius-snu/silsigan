@@ -119,11 +119,29 @@ class AudioService {
   final BytesBuilder _speakerPending = BytesBuilder(copy: false);
   bool _chunkBusy = false;
 
+  // The iOS broadcast ended under this capture (BROADCAST_ENDED): stop
+  // polling a ring nobody fills. Reset on every start.
+  bool _loopbackEnded = false;
+  // Whether any non-silent speaker audio has arrived since the capture
+  // started. Apps that block screen recording hand over silence.
+  bool _speakerAudioHeard = false;
+
   /// Native capture failure after start. record (Android / desktop) reports
   /// these asynchronously on its state stream; on iOS they come from
   /// MicCapture's MIC_LOST or from [_checkIosStall]. Unobserved, a failure
   /// would look like a silent recording that never produces audio.
   Function(String error)? onCaptureError;
+
+  /// The iOS screen broadcast ended while this capture still read it (the
+  /// red status-bar pill was tapped, or iOS killed the extension). Speaker
+  /// audio is over; the mic, if any, keeps going.
+  void Function()? onLoopbackEnded;
+
+  /// Speaker capture is on and nothing audible has come through it yet.
+  /// Used to explain an empty transcript when the playing app blocks screen
+  /// recording.
+  bool get speakerStillSilent =>
+      isRecording && _wantSpeaker && !_loopbackEnded && !_speakerAudioHeard;
 
   Timer? _chunkTimer;
   // Audio captured since the last chunk tick. BytesBuilder(copy: false) keeps
@@ -134,6 +152,9 @@ class AudioService {
 
   // When the recorder last delivered data — used by [isCapturingHealthy].
   DateTime? _lastDataAt;
+  // Same, microphone only. In Both mode screen audio keeps arriving while a
+  // dead mic doesn't, and must not vouch for it.
+  DateTime? _lastMicDataAt;
 
   // Disk-based recording instead of in-memory list
   RandomAccessFile? _tempRaf;
@@ -157,11 +178,15 @@ class AudioService {
   /// Whether capture is running AND the recorder delivered data recently.
   /// Used on app-resume to decide if the recorder survived the background
   /// stint (Android, where the foreground service keeps it alive) or must be
-  /// restarted (iOS suspension kills audio; some Android OEMs do too).
-  bool get isCapturingHealthy =>
-      isRecording &&
-      _lastDataAt != null &&
-      DateTime.now().difference(_lastDataAt!) < const Duration(seconds: 2);
+  /// restarted (iOS suspension kills audio; some Android OEMs do too). When
+  /// the mic is wanted it's the mic that must be alive: in Both mode, screen
+  /// audio flowing would otherwise hide a dead microphone for good.
+  bool get isCapturingHealthy {
+    if (!isRecording) return false;
+    final last = _wantMic ? _lastMicDataAt : _lastDataAt;
+    return last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 2);
+  }
 
   // In-flight start() — concurrent callers (e.g. two lifecycle resumes while
   // a restart is stuck behind a slow native call) share one future instead of
@@ -194,9 +219,13 @@ class AudioService {
     // the generation synchronously, so every checkpoint below sees it.
     final gen = _stopGen;
 
+    // A capture is live, so this start replaces it in the middle of a session
+    // (resume, capture recovery) rather than beginning one.
+    final restart = isRecording;
+
     // Stop any existing capture first. Raw teardown, not stop() — stop()
     // bumps the abort generation and awaits _starting, i.e. ourselves.
-    if (isRecording) await _teardown();
+    if (restart) await _teardown(restart: true);
     if (!_isInitialized) await init();
     _pending.clear();
     _speakerPending.clear();
@@ -204,6 +233,13 @@ class AudioService {
     // from before a restart must not vouch for a recorder that hasn't
     // delivered anything yet.
     _lastDataAt = null;
+    _lastMicDataAt = null;
+    if (!restart) {
+      // Per session, not per capture: a resume restart mustn't forget that
+      // screen audio was already heard.
+      _loopbackEnded = false;
+      _speakerAudioHeard = false;
+    }
 
     // Close any lingering file handle before (re)opening
     try {
@@ -229,7 +265,7 @@ class AudioService {
       if (_useRecord) {
         await _startNativeCapture(gen);
       } else {
-        await _startIosCapture(gen);
+        await _startIosCapture(gen, restart: restart);
       }
     } catch (e) {
       // Mic or loopback may already be live — release them so a failed
@@ -247,7 +283,32 @@ class AudioService {
     if (!_useRecord && _wantMic) _startIosStallWatch();
   }
 
-  Future<void> _startIosCapture(int gen) async {
+  Future<void> _startIosCapture(int gen, {required bool restart}) async {
+    // Screen audio first. On a restart it's an instant reuse of the running
+    // broadcast; on a fresh start the mic then goes live only once the user
+    // has started the broadcast, not for the whole time the sheet is up.
+    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
+      try {
+        await DesktopAudioDevices.startLoopback(
+          deviceId: _desktop?.speakerDeviceId,
+          restart: restart,
+        );
+        _loopbackEnded = false;
+      } on PlatformException catch (e) {
+        // Only a restart gets this: the broadcast died while the capture was
+        // being replaced. Same outcome as the chunk loop finding it: the
+        // session ends (speaker only) or carries on with the mic (Both).
+        if (e.code != 'BROADCAST_ENDED') rethrow;
+        if (!_loopbackEnded) {
+          _loopbackEnded = true;
+          onLoopbackEnded?.call();
+        }
+      }
+      if (gen != _stopGen) {
+        await DesktopAudioDevices.stopLoopback();
+        return;
+      }
+    }
     if (_wantMic) {
       final micId = _desktop?.micDeviceId;
       final bluetoothMic = await _isBluetoothMic(micId);
@@ -273,6 +334,7 @@ class AudioService {
           }
           if (data is! Uint8List || data.isEmpty) return;
           _lastDataAt = DateTime.now();
+          _lastMicDataAt = _lastDataAt;
           _iosLastSignalAt = _lastDataAt;
           _iosStallReported = false;
           _pending.add(data);
@@ -296,14 +358,6 @@ class AudioService {
         // A stop() intervened while the native start was in flight.
         await _stopIosMic();
         return;
-      }
-    }
-    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
-      await DesktopAudioDevices.startLoopback(
-        deviceId: _desktop?.speakerDeviceId,
-      );
-      if (gen != _stopGen) {
-        await DesktopAudioDevices.stopLoopback();
       }
     }
   }
@@ -423,6 +477,7 @@ class AudioService {
     }
     _streamSubscription = stream.listen((data) {
       _lastDataAt = DateTime.now();
+      _lastMicDataAt = _lastDataAt;
       _pending.add(data);
     });
     _stateErrorSub = recorder.onStateChanged().listen(
@@ -520,7 +575,9 @@ class AudioService {
   }
 
   void _sendChunk() {
-    if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
+    if (_wantSpeaker &&
+        DesktopAudioDevices.nativeLoopbackSupported &&
+        !_loopbackEnded) {
       if (_chunkBusy) return;
       _chunkBusy = true;
       unawaited(_sendChunkAsync().whenComplete(() => _chunkBusy = false));
@@ -534,12 +591,36 @@ class AudioService {
       final extra = await DesktopAudioDevices.readLoopback();
       if (extra.isNotEmpty) {
         _lastDataAt = DateTime.now();
+        if (!_speakerAudioHeard && _hasSound(extra)) _speakerAudioHeard = true;
         _speakerPending.add(extra);
+      }
+    } on PlatformException catch (e) {
+      if (e.code == 'BROADCAST_ENDED') {
+        // Not a capture fault to restart through: the user ended the
+        // broadcast (or iOS did). Restarting would put the Start Broadcast
+        // sheet straight back up.
+        if (!_loopbackEnded) {
+          _loopbackEnded = true;
+          onLoopbackEnded?.call();
+        }
+      } else {
+        onCaptureError?.call(_captureErrorText(e));
       }
     } catch (e) {
       onCaptureError?.call(_captureErrorText(e));
     }
     _flushPending();
+  }
+
+  /// Anything above -60 dBFS. A playing app that blocks screen recording
+  /// hands over exact silence; real content, even quiet, clears this.
+  static bool _hasSound(Uint8List pcm16) {
+    for (int i = 0; i + 1 < pcm16.length; i += 2) {
+      final u = pcm16[i] | (pcm16[i + 1] << 8);
+      final s = u >= 0x8000 ? u - 0x10000 : u;
+      if (s > 32 || s < -32) return true;
+    }
+    return false;
   }
 
   void _flushPending() {
@@ -578,7 +659,12 @@ class AudioService {
     await _teardown();
   }
 
-  Future<void> _teardown() async {
+  /// [restart]: the capture is being replaced mid-session. On iOS the screen
+  /// broadcast and its ring are then left alone (when the new settings still
+  /// want them) for the next start to claim. A mic restart can outlast the
+  /// native stop grace, and a stopped broadcast can only come back through
+  /// the Start Broadcast sheet.
+  Future<void> _teardown({bool restart = false}) async {
     _chunkTimer?.cancel();
     _chunkTimer = null;
     _iosStallTimer?.cancel();
@@ -594,7 +680,9 @@ class AudioService {
       } catch (_) {}
       unawaited(loopbackRecorder.dispose().catchError((_) {}));
     }
-    if (DesktopAudioDevices.nativeLoopbackSupported) {
+    final keepBroadcast =
+        restart && Platform.isIOS && _wantSpeaker && !_loopbackEnded;
+    if (DesktopAudioDevices.nativeLoopbackSupported && !keepBroadcast) {
       try {
         final extra = await DesktopAudioDevices.readLoopback();
         if (extra.isNotEmpty) {

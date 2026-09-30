@@ -8,7 +8,7 @@ import '../../utils/constants.dart';
 import '../../utils/desktop.dart';
 
 /// Header control for mic / speaker / both, plus device pickers. Shown on
-/// Windows, Linux, macOS, and Android. Hidden on iPhone / iPad.
+/// Windows, Linux, macOS, Android, iPhone and iPad.
 class DesktopAudioSourceButton extends ConsumerStatefulWidget {
   const DesktopAudioSourceButton({
     super.key,
@@ -43,6 +43,10 @@ class _DesktopAudioSourceButtonState
   String get _speakerHint {
     if (isAndroidPlatform) {
       return 'Android will ask to capture screen audio. DRM and call audio stay silent.';
+    }
+    if (isIOSPlatform) {
+      return 'You’ll be asked to Start Broadcast (red status bar). Start playback after it begins. '
+          'Apps that block screen recording stay silent, and voice playback is picked up too.';
     }
     return 'Speaker listens to what’s playing on that device. Use headphones if voice playback is on.';
   }
@@ -204,9 +208,11 @@ class _DesktopAudioSourceButtonState
                             expanded: _expanded == _DeviceField.mic,
                             onToggle: () => _toggleExpanded(_DeviceField.mic),
                             onSelected: (id) => _setDevices(micId: id),
-                            defaultLabel: isMobileSpeakerCapture
-                                ? 'Phone microphone'
-                                : 'Default',
+                            defaultLabel: isIOSPlatform
+                                ? 'Built-in microphone'
+                                : isMobileSpeakerCapture
+                                    ? 'Phone microphone'
+                                    : 'Default',
                           ),
                           if (isMobileSpeakerCapture) ...[
                             const SizedBox(height: 8),
@@ -219,8 +225,11 @@ class _DesktopAudioSourceButtonState
                             ),
                           ],
                         ],
+                        // iOS has exactly one speaker source (the ReplayKit
+                        // broadcast), so there's nothing to pick.
                         if (settings.captureSpeaker &&
-                            desktopSpeakerCaptureSupported) ...[
+                            desktopSpeakerCaptureSupported &&
+                            !isIOSPlatform) ...[
                           const SizedBox(height: 10),
                           _DeviceRow(
                             label: 'Speaker',

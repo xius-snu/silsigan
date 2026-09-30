@@ -221,6 +221,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
   // restart audio after a real suspension — not after Control Center, etc.
   bool _wasPaused = false;
 
+  // The iOS screen broadcast ended mid-session in Both mode. In-session
+  // restarts (resume, capture recovery) then stay on the mic instead of
+  // putting the Start Broadcast sheet back up. Cleared by the next
+  // user-initiated start.
+  bool _speakerEndedThisSession = false;
+  // At most one "screen audio is silent" hint per session (iOS speaker).
+  bool _silentSpeakerHintShown = false;
+  Timer? _silentSpeakerHintTimer;
+
   // Usage limit tracking — server-authoritative. The proxy bills audio bytes
   // and force-closes the WS with 4005 when the user crosses their limit;
   // the client trusts that signal rather than running its own timer.
@@ -254,6 +263,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       if (error == kScreenAudioDeniedMessage) return;
       _handleCaptureFailure();
     };
+    _audioService.onLoopbackEnded = _onLoopbackEnded;
     // Server-authoritative limit: the proxy closes the WS with 4005 when the
     // user crosses their billed limit. Stop the recording and surface it.
     _sonioxService.onUsageLimitReached = () {
@@ -349,6 +359,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sentenceBreakTimer?.cancel();
     _ttsDraftTimer?.cancel();
     _autosaveTimer?.cancel();
+    _silentSpeakerHintTimer?.cancel();
     _dismissSplitViewTip(markSeen: false);
     _audioService.dispose();
     _sonioxService.disconnect();
@@ -364,6 +375,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // Only restart audio after a real background suspension (paused),
         // not after Control Center, notification banner, etc. (inactive).
         _resumeRecording();
+      }
+      if (recordingState == RecordingState.recording) {
+        _maybeHintSilentSpeaker();
       }
       _wasPaused = false;
       unawaited(_syncCloudHistory());
@@ -489,6 +503,65 @@ class _MainScreenState extends ConsumerState<MainScreen>
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// The iOS screen broadcast ended under a live session: the red status-bar
+  /// pill was tapped, or iOS killed the extension. Speaker-only has nothing
+  /// left to record, so the session ends. Both carries on with the mic.
+  void _onLoopbackEnded() {
+    if (!mounted) return;
+    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
+    if (!ref.read(desktopAudioSettingsProvider).captureMic) {
+      unawaited(_endSessionAfterCaptureLoss(
+        'Screen broadcast ended — recording stopped',
+      ));
+      return;
+    }
+    _speakerEndedThisSession = true;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        content: Text(
+          'Screen audio stopped. Recording continues with the microphone.',
+        ),
+      ));
+  }
+
+  void _scheduleSilentSpeakerHint() {
+    _silentSpeakerHintTimer?.cancel();
+    if (!isIOSPlatform) return;
+    if (!ref.read(desktopAudioSettingsProvider).captureSpeaker) return;
+    _silentSpeakerHintTimer =
+        Timer(const Duration(seconds: 20), _maybeHintSilentSpeaker);
+  }
+
+  /// iOS screen audio has carried nothing but silence since the session
+  /// started. Usually the video was already playing when the broadcast began,
+  /// or the app blocks screen recording. Say so once rather than leave an
+  /// empty transcript unexplained. Runs on the 20s timer and on every return
+  /// to the app, since the user is usually in the other app meanwhile.
+  void _maybeHintSilentSpeaker() {
+    if (!mounted || _silentSpeakerHintShown || !isIOSPlatform) return;
+    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
+    if (!_audioService.speakerStillSilent) return;
+    final started = _recordingStartedAt;
+    if (started == null ||
+        DateTime.now().difference(started) < const Duration(seconds: 15)) {
+      return;
+    }
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    _silentSpeakerHintShown = true;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(
+        duration: Duration(seconds: 8),
+        content: Text(
+          'No screen audio yet. Start the video after the broadcast begins '
+          '(pause and play it again if it was already playing). Apps that '
+          'block screen recording stay silent.',
+        ),
+      ));
   }
 
   // ── Usage Limit ─────────────��──────────────────────────────────
@@ -1102,6 +1175,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // attempt whose DB insert failed — otherwise the next save could silently
     // attach that stale (shorter) audio to the continued session.
     await _cleanupPendingSaveAudio();
+    // A fresh tap honours the chosen source again, broadcast included.
+    _speakerEndedThisSession = false;
+    _silentSpeakerHintShown = false;
 
     final status = await _requestRecordingPermissions();
     if (!status.isGranted) {
@@ -1446,6 +1522,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _isStartingRecording = false;
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
+      _scheduleSilentSpeakerHint();
       // Start periodic autosave (every 15 seconds)
       _sessionCreatedAt ??= DateTime.now().toIso8601String();
       _autosaveTimer?.cancel();
@@ -1954,11 +2031,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   Future<void> _startAudioCapture() {
-    return _audioService.start(
-      desktop: audioSourceSelectorSupported
-          ? ref.read(desktopAudioSettingsProvider)
-          : null,
-    );
+    var desktop = audioSourceSelectorSupported
+        ? ref.read(desktopAudioSettingsProvider)
+        : null;
+    if (desktop != null && _speakerEndedThisSession && desktop.captureMic) {
+      desktop = desktop.copyWith(source: DesktopAudioSource.microphone);
+    }
+    return _audioService.start(desktop: desktop);
   }
 
   void _toggleDarkMode() {
@@ -2402,6 +2481,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
     _convWantActive = true;
     _convStarting = true;
+    // A fresh tap honours the chosen source again, broadcast included.
+    _speakerEndedThisSession = false;
+    _silentSpeakerHintShown = false;
 
     final status = await _requestRecordingPermissions();
     if (!status.isGranted) {
@@ -2456,6 +2538,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _recordingStartedAt = DateTime.now();
       ref.read(recordingStateProvider.notifier).state =
           RecordingState.recording;
+      _scheduleSilentSpeakerHint();
       UserService.instance.reportActivity('recording_start', {
         'mode': 'conversation',
       });

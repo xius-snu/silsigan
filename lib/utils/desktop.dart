@@ -8,21 +8,22 @@ bool get isDesktopPlatform {
   return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 }
 
-/// Header Mic / Speaker / Both control. True on Windows, Linux, macOS, and
-/// Android. Hidden on iPhone / iPad (ReplayKit cannot capture YouTube /
-/// Safari / Music audio) and on web.
+/// Header Mic / Speaker / Both control. True on Windows, Linux, macOS,
+/// Android, iPhone and iPad. Hidden on web.
 bool get audioSourceSelectorSupported {
   if (kIsWeb) return false;
   return Platform.isWindows ||
       Platform.isLinux ||
       Platform.isMacOS ||
-      Platform.isAndroid;
+      Platform.isAndroid ||
+      Platform.isIOS;
 }
 
-/// Android — used for first-run MediaProjection capture-sheet copy.
+/// Android and iPhone / iPad: speaker capture needs a system consent sheet
+/// (MediaProjection / ReplayKit Start Broadcast) before it can start.
 bool get isMobileSpeakerCapture {
   if (kIsWeb) return false;
-  return Platform.isAndroid;
+  return Platform.isAndroid || Platform.isIOS;
 }
 
 bool get isIOSPlatform {
@@ -37,13 +38,14 @@ bool get isAndroidPlatform {
 
 /// System-audio (speaker) loopback:
 /// Windows WASAPI, macOS ScreenCaptureKit, Linux Pulse/PipeWire monitors,
-/// Android 10+ MediaProjection AudioPlaybackCapture.
-/// iPhone / iPad ReplayKit cannot capture AVPlayer / YouTube audio, so
-/// speaker capture is not offered there.
+/// Android 10+ MediaProjection AudioPlaybackCapture, iPhone / iPad ReplayKit
+/// broadcast (ios/ScreenAudio). On every mobile platform, apps that block
+/// screen recording (DRM video, some music apps) stay silent.
 bool get desktopSpeakerCaptureSupported {
   if (kIsWeb) return false;
   return Platform.isWindows ||
       Platform.isLinux ||
       Platform.isMacOS ||
-      Platform.isAndroid;
+      Platform.isAndroid ||
+      Platform.isIOS;
 }
