@@ -406,19 +406,12 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // reporting a failure the user would see while audio is in fact live.
       Future.delayed(const Duration(seconds: 3), () {
         if (!mounted || _audioService.isCapturingHealthy) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to resume microphone')),
-        );
+        _endSessionAfterCaptureLoss(captureLostMessage(null));
       });
     } catch (e) {
-      if (mounted) {
-        final resumeMsg = isScreenAudioDenied(e)
-            ? kScreenAudioDeniedMessage
-            : "Couldn't resume microphone";
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(resumeMsg)),
-        );
-      }
+      // start() tore the dead capture down before failing, so nothing is
+      // recording any more. End the session rather than leave it on Stop.
+      await _endSessionAfterCaptureLoss(captureLostMessage(e));
     }
   }
 
@@ -448,6 +441,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _captureRestartAttempts = 0;
     }
 
+    Object? restartError;
     if (_captureRestartAttempts < 2) {
       _captureRestartAttempts++;
       _captureRestartInFlight = true;
@@ -462,34 +456,39 @@ class _MainScreenState extends ConsumerState<MainScreen>
         // recorder (which never answers a plain stop).
         await _startAudioCapture().timeout(_audioStartTimeout);
         return; // recovered — the session continues seamlessly
-      } catch (_) {
-        // fall through to stop + notify
+      } catch (e) {
+        // start() tears the dead capture down before failing, so
+        // isRecording is false from here on even though the session is
+        // still live. Fall through to the stop + notify below.
+        restartError = e;
       } finally {
         _captureRestartInFlight = false;
       }
     }
 
-    if (!mounted || !_audioService.isRecording) return;
-    // Recovery failed or attempts exhausted: end the session through the
-    // normal per-mode stop so the state machine reaches postRecording with
-    // everything captured so far, instead of claiming to record silence.
-    if (ref.read(recordingStateProvider) == RecordingState.recording) {
-      final displayMode = ref.read(displayModeProvider);
-      if (displayMode == DisplayMode.conversation) {
-        await _stopConversationSession();
-      } else {
-        await _stopRecording();
-      }
+    // Recovery failed or attempts exhausted.
+    await _endSessionAfterCaptureLoss(captureLostMessage(restartError));
+  }
+
+  /// Ends a session whose capture could not be kept alive, through the
+  /// normal per-mode stop, so the state machine reaches postRecording with
+  /// everything captured so far instead of claiming to record silence.
+  Future<void> _endSessionAfterCaptureLoss(String message) async {
+    if (!mounted) return;
+    if (ref.read(recordingStateProvider) != RecordingState.recording) return;
+    final displayMode = ref.read(displayModeProvider);
+    if (displayMode == DisplayMode.conversation) {
+      await _stopConversationSession();
+    } else {
+      await _stopRecording();
     }
     if (!mounted) return;
-    final shownAt = DateTime.now();
-    if (_lastErrorShown == null ||
-        shownAt.difference(_lastErrorShown!).inSeconds >= 10) {
-      _lastErrorShown = shownAt;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Microphone error — recording stopped')),
-      );
-    }
+    // Not throttled like the Soniox errors: this is the one message that
+    // explains why the session just ended.
+    _lastErrorShown = DateTime.now();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ── Usage Limit ─────────────��──────────────────────────────────

@@ -18,6 +18,7 @@
 
 		C0DEA001A1B2C3D4E5F60002 /* DesktopAudioCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F60001 /* DesktopAudioCapture.swift */; };
 		C0DEA001A1B2C3D4E5F60004 /* AudioRingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F60003 /* AudioRingBuffer.swift */; };
+		C0DEA001A1B2C3D4E5F60021 /* MicCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F60020 /* MicCapture.swift */; };
 		C0DEA001A1B2C3D4E5F60005 /* AudioRingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F60003 /* AudioRingBuffer.swift */; };
 		C0DEA001A1B2C3D4E5F60007 /* SampleHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F60006 /* SampleHandler.swift */; };
 		C0DEA001A1B2C3D4E5F6000B /* ScreenAudio.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C0DEA001A1B2C3D4E5F6000A /* ScreenAudio.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -87,6 +88,7 @@
 
 		C0DEA001A1B2C3D4E5F60001 /* DesktopAudioCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopAudioCapture.swift; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60003 /* AudioRingBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRingBuffer.swift; sourceTree = "<group>"; };
+		C0DEA001A1B2C3D4E5F60020 /* MicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicCapture.swift; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60006 /* SampleHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleHandler.swift; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C0DEA001A1B2C3D4E5F60009 /* ScreenAudio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ScreenAudio.entitlements; sourceTree = "<group>"; };
@@ -179,6 +181,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				C0DEA001A1B2C3D4E5F60001 /* DesktopAudioCapture.swift */,
 				C0DEA001A1B2C3D4E5F60003 /* AudioRingBuffer.swift */,
+				C0DEA001A1B2C3D4E5F60020 /* MicCapture.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -376,6 +379,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				C0DEA001A1B2C3D4E5F60002 /* DesktopAudioCapture.swift in Sources */,
 				C0DEA001A1B2C3D4E5F60004 /* AudioRingBuffer.swift in Sources */,
+				C0DEA001A1B2C3D4E5F60021 /* MicCapture.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

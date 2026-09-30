@@ -57,6 +57,7 @@ import Security
         messenger: controller.binaryMessenger,
         controller: controller
       )
+      RegisterMicCapture(messenger: controller.binaryMessenger)
     }
 
     let ok = super.application(application, didFinishLaunchingWithOptions: launchOptions)

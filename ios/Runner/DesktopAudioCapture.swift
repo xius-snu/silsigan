@@ -330,19 +330,47 @@ private final class DesktopAudioCapturePlugin: NSObject {
 /// while playback — TTS, history audio — can use Bluetooth A2DP headphones.
 /// `allowBluetooth` (HFP) is only enabled when the user picks a BT mic;
 /// otherwise HFP would steal input from the phone mic.
-private enum CaptureAudioRoute {
+///
+/// Also used by MicCapture (MicCapture.swift), which configures the session
+/// through `prepareForCapture` right before it builds each engine.
+enum CaptureAudioRoute {
   static var preferredMicId: String?
   static var hasApplied = false
   private static var wantHfp = false
   private static var applying = false
   private static var observer: NSObjectProtocol?
+  private static var resetObserver: NSObjectProtocol?
   private static var pendingReapply: DispatchWorkItem?
+  /// The options we last set and what the session reported right after.
+  /// iOS may hand back a normalized set, and comparing against the raw
+  /// request would then never match: every route change would rewrite the
+  /// category again under a live capture engine.
+  private static var lastOptions: (
+    requested: AVAudioSession.CategoryOptions,
+    reported: AVAudioSession.CategoryOptions
+  )?
+  /// The input we last pinned. An observer pass must not re-send a pin that
+  /// iOS already holds, or declined.
+  private static var pinnedInputId: String?
+  /// Observer passes that had to change something, for the circuit breaker
+  /// in `scheduleReapply`.
+  private static var reapplyTimes: [CFTimeInterval] = []
+  private static var reapplyPausedUntil: CFTimeInterval = 0
 
   /// A headset connect posts several route changes in a row; collapse the
   /// burst into one apply instead of reconfiguring the session per event.
   private static let reapplyDebounce: TimeInterval = 0.3
 
   static func apply(args: [String: Any]?) {
+    updatePreferences(args)
+    hasApplied = true
+    // Explicit request from Dart (TTS init, Android parity): make sure the
+    // session is active and capture sits on the wanted mic.
+    _ = try? configure(activate: true, checkRoute: true)
+    startObserving()
+  }
+
+  static func updatePreferences(_ args: [String: Any]?) {
     if let args {
       if args.keys.contains("micDeviceId") {
         let id = args["micDeviceId"] as? String
@@ -355,11 +383,17 @@ private enum CaptureAudioRoute {
     if preferredMicId == nil {
       wantHfp = false
     }
+  }
+
+  /// MicCapture calls this right before it builds an engine. It throws when
+  /// the session can't be put into playAndRecord or activated, because an
+  /// engine started on that session records nothing. `checkRoute` also
+  /// re-pins when the live input isn't the wanted mic. In-place rebuilds
+  /// skip that, since a re-pin can itself change the hardware format and
+  /// post the next configuration change.
+  static func prepareForCapture(checkRoute: Bool) throws {
     hasApplied = true
-    // Explicit request from Dart (record start, TTS init): re-activate and
-    // re-pin unconditionally — flutter_sound's startRecorder may have taken
-    // the session to HFP behind our back, and the session may not be active.
-    try? applyNow(force: true)
+    try configure(activate: true, checkRoute: checkRoute)
     startObserving()
   }
 
@@ -384,7 +418,7 @@ private enum CaptureAudioRoute {
       ]
     }
     if hasApplied {
-      try? applyNow(force: true)
+      _ = try? configure(activate: true, checkRoute: true)
     } else {
       try? session.setCategory(prevCategory, mode: prevMode, options: prevOptions)
     }
@@ -392,18 +426,23 @@ private enum CaptureAudioRoute {
   }
 
   /// Configure the session for "capture on the pinned mic, playback free to
-  /// take A2DP headphones".
+  /// take A2DP headphones". Returns whether anything had to change.
   ///
   /// setCategory, setActive and setPreferredInput each post
   /// `routeChangeNotification` themselves. Answering those with another apply
   /// is a self-feeding loop that pegs the main thread — which starved the
   /// `applyCaptureRoute` channel reply and froze the record button mid-start
   /// with the mic already live (orange indicator on, button never flipping to
-  /// Stop). So an observer-driven apply (`force: false`) MUST be a true no-op
-  /// when the session already holds what we want: it then touches nothing,
-  /// posts nothing, and the cycle terminates after one pass.
-  private static func applyNow(force: Bool) throws {
-    if applying { return }
+  /// Stop). So an observer pass (`activate: false`) MUST be a true no-op when
+  /// the session already holds what we want: it then touches nothing, posts
+  /// nothing, and the cycle terminates after one pass.
+  ///
+  /// Explicit calls also touch only what differs. Any call here can land
+  /// under a live capture engine, and a needless setCategory or re-pin can
+  /// change the hardware format underneath it, which stops the engine.
+  @discardableResult
+  private static func configure(activate: Bool, checkRoute: Bool) throws -> Bool {
+    if applying { return false }
     applying = true
     defer { applying = false }
 
@@ -418,25 +457,47 @@ private enum CaptureAudioRoute {
       options.insert(.allowBluetooth)
     }
 
-    let categoryMatches = session.category == .playAndRecord
-      && session.mode == .default
-      && session.categoryOptions == options
-    let wanted = desiredInput(session)
-    // Compared against our own preference, not currentRoute: when iOS
-    // declines the preference the live route never converges, and we would
-    // re-set it on every notification forever.
-    let inputMatches = wanted == nil || session.preferredInput?.uid == wanted?.uid
-    if !force && categoryMatches && inputMatches { return }
-
-    if !categoryMatches {
+    var changed = false
+    if !categoryMatches(session, options) {
       try session.setCategory(.playAndRecord, mode: .default, options: options)
+      lastOptions = (options, session.categoryOptions)
+      changed = true
     }
-    if force || !categoryMatches {
+    if activate || changed {
       try session.setActive(true)
     }
-    if let wanted, force || !inputMatches {
-      try session.setPreferredInput(wanted)
+    // Only after the category is playAndRecord: under .playback (which
+    // audioplayers sets at launch) there are no inputs to choose from.
+    if let wanted = desiredInput(session) {
+      // An observer pass compares against our own preference, not
+      // currentRoute: when iOS declines the preference the live route never
+      // converges, and it would re-set it on every notification forever.
+      let preferred = session.preferredInput?.uid == wanted.uid
+        || (!checkRoute && pinnedInputId == wanted.uid)
+      let live = session.currentRoute.inputs.contains { $0.uid == wanted.uid }
+      if !preferred || (checkRoute && !live) {
+        // Not fatal: capture still works on whatever input iOS chose.
+        try? session.setPreferredInput(wanted)
+        pinnedInputId = wanted.uid
+        changed = true
+      }
     }
+    return changed
+  }
+
+  private static func categoryMatches(
+    _ session: AVAudioSession,
+    _ options: AVAudioSession.CategoryOptions
+  ) -> Bool {
+    guard session.category == .playAndRecord, session.mode == .default else {
+      return false
+    }
+    let current = session.categoryOptions
+    if current == options { return true }
+    if let last = lastOptions, last.requested == options, last.reported == current {
+      return true
+    }
+    return false
   }
 
   /// The port capture should open on: the user's pick while it is still
@@ -458,14 +519,16 @@ private enum CaptureAudioRoute {
     port == .bluetoothHFP || port == .bluetoothLE
   }
 
+  /// Observers run on the posting thread (`queue: nil`) and hop to main
+  /// themselves: with `queue: .main` NotificationCenter would block the
+  /// session's notification thread until main got to the block.
   private static func startObserving() {
     guard observer == nil else { return }
     observer = NotificationCenter.default.addObserver(
       forName: AVAudioSession.routeChangeNotification,
       object: nil,
-      queue: .main
+      queue: nil
     ) { note in
-      guard hasApplied else { return }
       // `.override` is what our own defaultToSpeaker + setPreferredInput
       // produce, so it is never news worth re-applying for: answering it is
       // how this observer used to feed itself.
@@ -473,7 +536,22 @@ private enum CaptureAudioRoute {
          raw == AVAudioSession.RouteChangeReason.override.rawValue {
         return
       }
-      scheduleReapply()
+      DispatchQueue.main.async {
+        guard hasApplied else { return }
+        scheduleReapply()
+      }
+    }
+    // mediaserverd restarted and the session is back to its defaults, so
+    // what we remember about it is stale.
+    resetObserver = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.mediaServicesWereResetNotification,
+      object: nil,
+      queue: nil
+    ) { _ in
+      DispatchQueue.main.async {
+        lastOptions = nil
+        pinnedInputId = nil
+      }
     }
   }
 
@@ -484,7 +562,19 @@ private enum CaptureAudioRoute {
     let work = DispatchWorkItem {
       pendingReapply = nil
       guard hasApplied else { return }
-      try? applyNow(force: false)
+      let now = CACurrentMediaTime()
+      guard now >= reapplyPausedUntil else { return }
+      let changed = (try? configure(activate: false, checkRoute: false)) ?? false
+      guard changed else { return }
+      reapplyTimes = reapplyTimes.filter { now - $0 < 10 } + [now]
+      if reapplyTimes.count >= 4 {
+        // Still not settled after several passes: something keeps rewriting
+        // the session, or iOS keeps reporting it back differently. Stop
+        // answering for a while rather than reconfiguring under a live
+        // capture engine several times a second.
+        reapplyTimes.removeAll()
+        reapplyPausedUntil = now + 30
+      }
     }
     pendingReapply = work
     DispatchQueue.main.asyncAfter(

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
-import 'package:flutter_sound/flutter_sound.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
 import '../providers/desktop_audio_source_provider.dart';
@@ -36,7 +36,25 @@ bool isScreenAudioDenied(Object e) {
 
 String recordingStartErrorMessage(Object e) {
   if (isScreenAudioDenied(e)) return kScreenAudioDeniedMessage;
+  // iOS MicCapture: a call or another recorder holds the mic, or there is no
+  // usable input route at all.
+  if (e is PlatformException && e.code == 'MIC_BUSY') {
+    return 'Another app is using the microphone. Try again when it is free.';
+  }
+  if (e is PlatformException && e.code == 'MIC_UNAVAILABLE') {
+    return 'No microphone is available right now.';
+  }
   return "Couldn't start recording. You can try again.";
+}
+
+/// Snackbar copy when a live session had to end because capture could not
+/// be kept alive. [e] is the restart failure, if there was one.
+String captureLostMessage(Object? e) {
+  if (e != null && isScreenAudioDenied(e)) return kScreenAudioDeniedMessage;
+  if (e is PlatformException && e.code == 'MIC_BUSY') {
+    return 'Another app is using the microphone — recording stopped.';
+  }
+  return 'Microphone error — recording stopped';
 }
 
 String _captureErrorText(Object e) {
@@ -46,10 +64,40 @@ String _captureErrorText(Object e) {
 }
 
 class AudioService {
-  // flutter_sound (iOS only — its openRecorder also configures the
-  // playAndRecord audio session that TTS playback depends on)
-  FlutterSoundRecorder? _recorder;
-  StreamSubscription? _recorderSubscription;
+  // iOS / iPadOS: our own AVAudioEngine capture (ios/Runner/MicCapture.swift).
+  // flutter_sound's iOS stream recorder failed silently and left sessions on
+  // Stop with no audio (seen on iPad). It ignored engine-start errors and
+  // reported success, built its converter from a pre-start format snapshot,
+  // and never handled configuration changes or interruptions. MicCapture
+  // heals those in place, throws start failures, and reports MIC_LOST when
+  // it runs out of retries. [_checkIosStall] backs all of that up from Dart.
+  static const _iosMic = MethodChannel('com.silsigan.app/mic_capture');
+  static const _iosMicPcm = EventChannel('com.silsigan.app/mic_capture/pcm');
+  StreamSubscription<dynamic>? _iosMicSub;
+  // MicCapture gave up healing in place. Capture is gone until the next start.
+  bool _iosMicLost = false;
+  // A call / Siri / alarm holds the session. MicCapture resumes on its own
+  // when the interruption ends; a restart before that would only fail.
+  DateTime? _iosInterruptedSince;
+  Timer? _iosStallTimer;
+  bool _iosStallReported = false;
+  // Start of the current "waiting for audio" window: the capture start, the
+  // last buffer, the end of an interruption, or the app coming back.
+  DateTime? _iosLastSignalAt;
+  DateTime? _iosLastTickAt;
+
+  /// Longer than MicCapture's own recovery (2s stall detection, then a
+  /// rebuild), so a heal already under way is not cut short by a restart.
+  static const _iosStallTimeout = Duration(seconds: 6);
+
+  /// iOS doesn't promise an .ended for every interruption. Past this, a
+  /// silent "interrupted" capture is treated as stalled like any other.
+  static const _iosMaxInterruption = Duration(minutes: 10);
+
+  /// Bound on MicCapture's start, which reconfigures the audio session and
+  /// starts the engine on the platform main thread. A wedged session must
+  /// fail the start, not leave the button stuck on "starting".
+  static const _iosStartTimeout = Duration(seconds: 6);
 
   // record package (Android + desktop). Android deliberately does NOT use
   // flutter_sound: its streaming engine polls AudioRecord on the Android
@@ -71,10 +119,10 @@ class AudioService {
   final BytesBuilder _speakerPending = BytesBuilder(copy: false);
   bool _chunkBusy = false;
 
-  /// Native capture failure after start (record-package path). flutter_sound
-  /// surfaced these by throwing from startRecorder; record reports them
-  /// asynchronously on its state stream — unobserved, a failed start would
-  /// look like a silent recording that never produces audio.
+  /// Native capture failure after start. record (Android / desktop) reports
+  /// these asynchronously on its state stream; on iOS they come from
+  /// MicCapture's MIC_LOST or from [_checkIosStall]. Unobserved, a failure
+  /// would look like a silent recording that never produces audio.
   Function(String error)? onCaptureError;
 
   Timer? _chunkTimer;
@@ -100,9 +148,6 @@ class AudioService {
     if (_isInitialized) return;
     if (_useRecord) {
       _streamRecorder = rec.AudioRecorder();
-    } else {
-      _recorder = FlutterSoundRecorder();
-      await _recorder!.openRecorder();
     }
     _isInitialized = true;
   }
@@ -155,6 +200,10 @@ class AudioService {
     if (!_isInitialized) await init();
     _pending.clear();
     _speakerPending.clear();
+    // Health is judged on data from THIS capture only. A stale timestamp
+    // from before a restart must not vouch for a recorder that hasn't
+    // delivered anything yet.
+    _lastDataAt = null;
 
     // Close any lingering file handle before (re)opening
     try {
@@ -195,6 +244,7 @@ class AudioService {
       const Duration(milliseconds: AppConstants.chunkIntervalMs),
       (_) => _sendChunk(),
     );
+    if (!_useRecord && _wantMic) _startIosStallWatch();
   }
 
   Future<void> _startIosCapture(int gen) async {
@@ -202,29 +252,51 @@ class AudioService {
       final micId = _desktop?.micDeviceId;
       final bluetoothMic = await _isBluetoothMic(micId);
       if (gen != _stopGen) return;
-      void repin() => unawaited(DesktopAudioDevices.applyCaptureRoute(
-            micDeviceId: micId,
-            bluetoothMic: bluetoothMic,
-            updateMic: true,
-          ));
-      // Pinned before startRecorder so capture opens on the wanted mic.
-      await DesktopAudioDevices.applyCaptureRoute(
-        micDeviceId: micId,
-        bluetoothMic: bluetoothMic,
-        updateMic: true,
+      // Cancel before listening: a cancel nulls the channel's handler, so a
+      // late one would silence the new subscription.
+      _cancelIosMicStream();
+      _iosMicLost = false;
+      _iosInterruptedSince = null;
+      _iosMicSub = _iosMicPcm.receiveBroadcastStream().listen(
+        (dynamic data) {
+          if (data is Map) {
+            // {"interrupted": bool} status from MicCapture.
+            final interrupted = data['interrupted'] == true;
+            if (!interrupted) {
+              _iosInterruptedSince = null;
+              // MicCapture rebuilds now. Give it a fresh window.
+              _iosLastSignalAt = DateTime.now();
+            } else {
+              _iosInterruptedSince ??= DateTime.now();
+            }
+            return;
+          }
+          if (data is! Uint8List || data.isEmpty) return;
+          _lastDataAt = DateTime.now();
+          _iosLastSignalAt = _lastDataAt;
+          _iosStallReported = false;
+          _pending.add(data);
+        },
+        // MIC_LOST: MicCapture already retried in place. The stall check
+        // turns it into a restart (foreground only).
+        onError: (Object _) {
+          _iosMicLost = true;
+        },
       );
-      if (gen != _stopGen) return;
-      await _startWithFlutterSound(gen);
-      if (gen != _stopGen) return;
-      // flutter_sound's startRecorder may reset the session to HFP, so the
-      // route is re-pinned after it — but never on the awaited path. Capture
-      // is already live here and the caller flips the button to Stop the
-      // moment this returns; an AVAudioSession call must not hold that open.
-      repin();
-      unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {
-        if (gen != _stopGen) return;
-        repin();
-      }));
+      // One native pass: session category + activation, mic pin, engine
+      // start. A failure anywhere in it throws here, so a dead mic can never
+      // be reported as started.
+      await _iosMic.invokeMethod<void>('start', {
+        'sampleRate': AppConstants.sampleRate,
+        'channels': AppConstants.numChannels,
+        'micDeviceId': micId ?? '',
+        'bluetoothMic': bluetoothMic,
+      }).timeout(_iosStartTimeout);
+      if (gen != _stopGen) {
+        // A stop() intervened while the native start was in flight.
+        await _stopIosMic();
+        return;
+      }
     }
     if (_wantSpeaker && DesktopAudioDevices.nativeLoopbackSupported) {
       await DesktopAudioDevices.startLoopback(
@@ -371,25 +443,71 @@ class AudioService {
     return DesktopAudioDevices.isBluetoothInput(deviceId, inputs);
   }
 
-  Future<void> _startWithFlutterSound(int gen) async {
-    final controller = StreamController<Uint8List>();
-    _recorderSubscription = controller.stream.listen((data) {
-      _lastDataAt = DateTime.now();
-      _pending.add(data);
-    });
+  Future<void> _stopIosMic() async {
+    try {
+      await _iosMic
+          .invokeMethod<void>('stop')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    _cancelIosMicStream();
+  }
 
-    await _recorder!.startRecorder(
-      toStream: controller.sink,
-      codec: Codec.pcm16,
-      numChannels: AppConstants.numChannels,
-      sampleRate: AppConstants.sampleRate,
+  void _cancelIosMicStream() {
+    final sub = _iosMicSub;
+    _iosMicSub = null;
+    // cancel() detaches the channel handler synchronously. The platform's ack
+    // isn't worth holding a stop, or the restart behind it, for.
+    if (sub != null) unawaited(sub.cancel());
+  }
+
+  void _startIosStallWatch() {
+    _iosStallTimer?.cancel();
+    _iosStallReported = false;
+    _iosLastSignalAt = DateTime.now();
+    _iosLastTickAt = null;
+    _iosStallTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _checkIosStall(),
     );
-    if (gen != _stopGen) {
-      // A stop() intervened while the native start was in flight.
-      unawaited(_recorder!.stopRecorder().catchError((_) => null));
-      _recorderSubscription?.cancel();
-      _recorderSubscription = null;
+  }
+
+  /// Last line of defense on iOS: capture that delivers nothing, or that
+  /// MicCapture gave up on, goes to [onCaptureError], which restarts it or
+  /// ends the session with a message. The UI never keeps claiming to record
+  /// silence. Foreground only: iOS won't let a backgrounded app start
+  /// recording, so a restart from there would just end the session. The
+  /// lifecycle resume path restarts dead capture when the app comes back.
+  void _checkIosStall() {
+    if (!isRecording || _iosStallReported) return;
+    final now = DateTime.now();
+    final previousTick = _iosLastTickAt;
+    _iosLastTickAt = now;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final suspended = previousTick != null &&
+        now.difference(previousTick) > const Duration(seconds: 3);
+    if (suspended ||
+        (lifecycle != null && lifecycle != AppLifecycleState.resumed)) {
+      // Backgrounded, or the isolate was just thawed. The resume path
+      // restarts dead capture first; judge afresh after it's had a window,
+      // instead of racing it for one of the two restarts a minute.
+      _iosLastSignalAt = now;
+      return;
     }
+    // A call answered from the banner keeps the app in the foreground. The
+    // mic is the call's until it ends and MicCapture resumes by itself, so a
+    // restart now would only fail and end the session.
+    final interruptedSince = _iosInterruptedSince;
+    if (!_iosMicLost &&
+        interruptedSince != null &&
+        now.difference(interruptedSince) < _iosMaxInterruption) {
+      return;
+    }
+    final last = _iosLastSignalAt;
+    final stalled =
+        _iosMicLost || last == null || now.difference(last) > _iosStallTimeout;
+    if (!stalled) return;
+    _iosStallReported = true;
+    onCaptureError?.call('Microphone stopped delivering audio');
   }
 
   void _writeToDisk(List<int> data) {
@@ -463,6 +581,8 @@ class AudioService {
   Future<void> _teardown() async {
     _chunkTimer?.cancel();
     _chunkTimer = null;
+    _iosStallTimer?.cancel();
+    _iosStallTimer = null;
 
     _loopbackSubscription?.cancel();
     _loopbackSubscription = null;
@@ -495,7 +615,7 @@ class AudioService {
         // record_android never answers stop() once its record thread has
         // exited, so an unconditional stop would burn the full 3s timeout
         // below (stop button stuck in processing) and needlessly discard
-        // the instance. Mirrors the isRecording guard on the iOS branch.
+        // the instance.
         bool live = true;
         try {
           live =
@@ -520,11 +640,7 @@ class AudioService {
         }
       }
     } else {
-      _recorderSubscription?.cancel();
-      _recorderSubscription = null;
-      if (_recorder != null && _recorder!.isRecording) {
-        await _recorder!.stopRecorder();
-      }
+      await _stopIosMic();
     }
 
     // Write the tail captured since the last chunk tick so the saved WAV
@@ -734,9 +850,6 @@ class AudioService {
       if (_useRecord) {
         await _streamRecorder?.dispose();
         _streamRecorder = null;
-      } else {
-        await _recorder?.closeRecorder();
-        _recorder = null;
       }
       _isInitialized = false;
     }
