@@ -5,7 +5,10 @@ import '../../providers/recording_provider.dart';
 class StatusBar extends StatefulWidget {
   final RecordingState state;
 
-  const StatusBar({super.key, required this.state});
+  /// Recording continues, but the transcription link is being restored.
+  final bool reconnecting;
+
+  const StatusBar({super.key, required this.state, this.reconnecting = false});
 
   @override
   State<StatusBar> createState() => _StatusBarState();
@@ -61,8 +64,14 @@ class _StatusBarState extends State<StatusBar> {
     }
 
     final isRecording = widget.state == RecordingState.recording;
-    final label = isRecording ? 'Recording' : 'Saving...';
-    final color = isRecording ? Colors.red : Colors.amber.shade800;
+    final reconnecting = isRecording && widget.reconnecting;
+    final label = reconnecting
+        ? 'Reconnecting...'
+        : isRecording
+            ? 'Recording'
+            : 'Saving...';
+    final color =
+        isRecording && !reconnecting ? Colors.red : Colors.amber.shade800;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),

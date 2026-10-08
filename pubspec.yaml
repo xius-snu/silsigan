@@ -1,7 +1,7 @@
 name: silsigan
 description: "Real-time speech transcription and translation"
 publish_to: 'none'
-version: 1.1.4+79
+version: 1.1.5+80
 
 environment:
   sdk: '>=3.4.3 <4.0.0'

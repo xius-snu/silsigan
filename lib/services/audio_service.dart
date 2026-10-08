@@ -7,6 +7,7 @@ import 'package:record/record.dart' as rec;
 import 'package:path_provider/path_provider.dart';
 import '../providers/desktop_audio_source_provider.dart';
 import '../utils/constants.dart';
+import '../utils/desktop.dart';
 import '../utils/pcm_mixer.dart';
 import 'desktop_audio_devices.dart';
 
@@ -98,6 +99,27 @@ class AudioService {
   /// starts the engine on the platform main thread. A wedged session must
   /// fail the start, not leave the button stuck on "starting".
   static const _iosStartTimeout = Duration(seconds: 6);
+
+  // Desktop (record on Windows / macOS / Linux) has no capture-failure signal
+  // at all. record_windows answers a Media Foundation read error (device
+  // unplugged or invalidated, sleep/wake, driver reset) with a plain `stop`
+  // state, and record_macos never restarts its AVAudioEngine after a
+  // configuration change (another input device, AirPods connecting, a
+  // sample-rate switch). Either way the mic went quiet while the session
+  // still showed Stop, and Soniox, fed nothing, timed the stream out every
+  // 20s: "A transcription error occurred" on a loop, mid-session. A live
+  // input delivers buffers continuously, silence included, so a gap this long
+  // means the capture is gone, and [onCaptureError] restarts it.
+  static const _desktopStallTimeout = Duration(seconds: 4);
+
+  /// Before the first buffer: device warm-up, or waking from sleep.
+  static const _desktopFirstDataTimeout = Duration(seconds: 8);
+  Timer? _desktopStallTimer;
+  DateTime? _desktopWatchFrom;
+  DateTime? _desktopLastTickAt;
+  bool _desktopStallReported = false;
+  // When the record stream last delivered (mic, or a Linux monitor source).
+  DateTime? _lastRecordDataAt;
 
   // record package (Android + desktop). Android deliberately does NOT use
   // flutter_sound: its streaming engine polls AudioRecord on the Android
@@ -234,6 +256,7 @@ class AudioService {
     // delivered anything yet.
     _lastDataAt = null;
     _lastMicDataAt = null;
+    _lastRecordDataAt = null;
     if (!restart) {
       // Per session, not per capture: a resume restart mustn't forget that
       // screen audio was already heard.
@@ -281,7 +304,18 @@ class AudioService {
       (_) => _sendChunk(),
     );
     if (!_useRecord && _wantMic) _startIosStallWatch();
+    if (isDesktopPlatform && _capturesWithRecord) _startDesktopStallWatch();
+    // Idempotent, so a mid-session restart just re-asserts it.
+    unawaited(DesktopAudioDevices.setKeepAwake(true));
   }
+
+  /// The record package carries this capture's audio: the mic, or on Linux
+  /// a speaker monitor source. Windows / macOS speaker audio comes through
+  /// native loopback instead, which heals itself and legitimately delivers
+  /// nothing while no app plays sound.
+  bool get _capturesWithRecord =>
+      _wantMic ||
+      (_wantSpeaker && !DesktopAudioDevices.nativeLoopbackSupported);
 
   Future<void> _startIosCapture(int gen, {required bool restart}) async {
     // Screen audio first. On a restart it's an instant reuse of the running
@@ -478,6 +512,8 @@ class AudioService {
     _streamSubscription = stream.listen((data) {
       _lastDataAt = DateTime.now();
       _lastMicDataAt = _lastDataAt;
+      _lastRecordDataAt = _lastDataAt;
+      _desktopStallReported = false;
       _pending.add(data);
     });
     _stateErrorSub = recorder.onStateChanged().listen(
@@ -562,6 +598,44 @@ class AudioService {
         _iosMicLost || last == null || now.difference(last) > _iosStallTimeout;
     if (!stalled) return;
     _iosStallReported = true;
+    onCaptureError?.call('Microphone stopped delivering audio');
+  }
+
+  void _startDesktopStallWatch() {
+    _desktopStallTimer?.cancel();
+    _desktopStallReported = false;
+    _desktopWatchFrom = DateTime.now();
+    _desktopLastTickAt = null;
+    _desktopStallTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _checkDesktopStall(),
+    );
+  }
+
+  /// Desktop counterpart of [_checkIosStall]: a record-based capture that
+  /// stopped delivering goes to [onCaptureError], which restarts it or ends
+  /// the session with a message. Desktop apps keep running unfocused or
+  /// minimized, so unlike iOS this watches in every lifecycle state.
+  void _checkDesktopStall() {
+    if (!isRecording || _desktopStallReported) return;
+    final now = DateTime.now();
+    final previousTick = _desktopLastTickAt;
+    _desktopLastTickAt = now;
+    if (previousTick != null &&
+        now.difference(previousTick) > const Duration(seconds: 3)) {
+      // The machine slept, or the process was throttled. A device that
+      // survived resumes within moments; judge afresh from here.
+      _desktopWatchFrom = now;
+      return;
+    }
+    final from = _desktopWatchFrom ?? now;
+    final last = _lastRecordDataAt;
+    final heard = last != null && last.isAfter(from);
+    final stalled = heard
+        ? now.difference(last) > _desktopStallTimeout
+        : now.difference(from) > _desktopFirstDataTimeout;
+    if (!stalled) return;
+    _desktopStallReported = true;
     onCaptureError?.call('Microphone stopped delivering audio');
   }
 
@@ -657,6 +731,7 @@ class AudioService {
       } catch (_) {}
     }
     await _teardown();
+    unawaited(DesktopAudioDevices.setKeepAwake(false));
   }
 
   /// [restart]: the capture is being replaced mid-session. On iOS the screen
@@ -669,6 +744,8 @@ class AudioService {
     _chunkTimer = null;
     _iosStallTimer?.cancel();
     _iosStallTimer = null;
+    _desktopStallTimer?.cancel();
+    _desktopStallTimer = null;
 
     _loopbackSubscription?.cancel();
     _loopbackSubscription = null;

@@ -34,6 +34,11 @@ func UnregisterDesktopAudioCapture() {
 private final class DesktopAudioCapturePlugin: NSObject {
   private var channel: FlutterMethodChannel?
   private let session = LoopbackSession()
+  // Held while a recording runs. A hands-off session (a lecture, a meeting
+  // in another window) gives macOS no reason to keep the app awake, and App
+  // Nap then throttles its timers and sockets: audio reached the server in
+  // bursts with gaps long enough for the stream to time out.
+  private var keepAwake: NSObjectProtocol?
 
   init(messenger: FlutterBinaryMessenger) {
     super.init()
@@ -49,8 +54,22 @@ private final class DesktopAudioCapturePlugin: NSObject {
 
   func shutdown() {
     session.stop()
+    setKeepAwake(false)
     channel?.setMethodCallHandler(nil)
     channel = nil
+  }
+
+  private func setKeepAwake(_ on: Bool) {
+    if on {
+      guard keepAwake == nil else { return }
+      keepAwake = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiated, .idleSystemSleepDisabled],
+        reason: "Recording and translating audio"
+      )
+    } else if let activity = keepAwake {
+      ProcessInfo.processInfo.endActivity(activity)
+      keepAwake = nil
+    }
   }
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -66,6 +85,10 @@ private final class DesktopAudioCapturePlugin: NSObject {
       result(nil)
     case "readLoopback":
       result(FlutterStandardTypedData(bytes: session.takePending()))
+    case "setKeepAwake":
+      let args = call.arguments as? [String: Any]
+      setKeepAwake(args?["on"] as? Bool ?? false)
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -205,7 +228,19 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
   private var stream: SCStream?
   private var pending = Data()
   private var converter = LoopbackConverter()
+  // Main thread only, like start() and stop().
   private var startGeneration = 0
+  // Between start and stop the capture should be running. ScreenCaptureKit
+  // can stop a stream on its own (display reconfigured or asleep, capture
+  // service interrupted). That used to end system audio silently for the
+  // rest of the recording; the session now restarts it.
+  private var wantRunning = false
+  private var restartScheduled = false
+  private var restartDelay: TimeInterval = 1
+
+  /// SCStreamError.userStopped (macOS 14+): the user ended the capture from
+  /// the menu bar. That one is theirs to make, so it isn't undone.
+  private static let userStoppedCode = -3817
 
   func start(deviceId _: String?, result: @escaping FlutterResult) {
     if #unavailable(macOS 13.0) {
@@ -221,20 +256,23 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
     stop()
     startGeneration += 1
     let gen = startGeneration
+    wantRunning = true
+    restartDelay = 1
     Task {
       do {
-        try await self.beginCapture()
-        if gen != self.startGeneration {
-          DispatchQueue.main.async { result(nil) }
-          return
-        }
-        DispatchQueue.main.async { result(nil) }
-      } catch {
-        if gen != self.startGeneration {
-          DispatchQueue.main.async { result(nil) }
-          return
-        }
+        let started = try await self.beginCapture(requestAccess: true)
         DispatchQueue.main.async {
+          // Stopped while starting: don't leave this stream running.
+          if gen != self.startGeneration { self.discard(started) }
+          result(nil)
+        }
+      } catch {
+        DispatchQueue.main.async {
+          if gen != self.startGeneration {
+            result(nil)
+            return
+          }
+          self.wantRunning = false
           result(
             FlutterError(
               code: "loopback_start_failed",
@@ -249,6 +287,7 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
 
   func stop() {
     startGeneration += 1
+    wantRunning = false
     lock.lock()
     let existing = stream
     stream = nil
@@ -256,6 +295,47 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
     converter.reset()
     lock.unlock()
     existing?.stopCapture { _ in }
+  }
+
+  private func discard(_ stream: SCStream) {
+    lock.lock()
+    if self.stream === stream { self.stream = nil }
+    lock.unlock()
+    stream.stopCapture { _ in }
+  }
+
+  /// Main thread. Retries with a growing delay (1 s up to 10 s) until a
+  /// restart works or the session stops.
+  private func scheduleRestart() {
+    guard wantRunning, !restartScheduled else { return }
+    restartScheduled = true
+    let gen = startGeneration
+    let delay = restartDelay
+    restartDelay = min(restartDelay * 2, 10)
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+      guard let self else { return }
+      self.restartScheduled = false
+      guard self.wantRunning, gen == self.startGeneration else { return }
+      self.lock.lock()
+      let running = self.stream != nil
+      self.lock.unlock()
+      guard !running else { return }
+      Task {
+        do {
+          // No permission prompt from here: the user is mid-recording.
+          let started = try await self.beginCapture(requestAccess: false)
+          DispatchQueue.main.async {
+            if gen != self.startGeneration || !self.wantRunning {
+              self.discard(started)
+            } else {
+              self.restartDelay = 1
+            }
+          }
+        } catch {
+          DispatchQueue.main.async { self.scheduleRestart() }
+        }
+      }
+    }
   }
 
   func takePending() -> Data {
@@ -267,8 +347,8 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
   }
 
   @available(macOS 13.0, *)
-  private func beginCapture() async throws {
-    if !CGPreflightScreenCaptureAccess() {
+  private func beginCapture(requestAccess: Bool) async throws -> SCStream {
+    if requestAccess && !CGPreflightScreenCaptureAccess() {
       _ = CGRequestScreenCaptureAccess()
     }
 
@@ -319,7 +399,7 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
       }
     } catch {
       lock.lock()
-      self.stream = nil
+      if self.stream === stream { self.stream = nil }
       lock.unlock()
       stream.stopCapture { _ in }
       if !CGPreflightScreenCaptureAccess() {
@@ -327,6 +407,7 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
       }
       throw LoopbackError.failed(error.localizedDescription)
     }
+    return stream
   }
 
   func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -336,10 +417,11 @@ private final class LoopbackSession: NSObject, SCStreamOutput, SCStreamDelegate 
 
   func stream(_ stream: SCStream, didStopWithError error: Error) {
     lock.lock()
-    if self.stream === stream {
-      self.stream = nil
-    }
+    let current = self.stream === stream
+    if current { self.stream = nil }
     lock.unlock()
+    guard current, (error as NSError).code != Self.userStoppedCode else { return }
+    DispatchQueue.main.async { [weak self] in self?.scheduleRestart() }
   }
 
   private func append(sampleBuffer: CMSampleBuffer) {

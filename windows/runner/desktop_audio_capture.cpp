@@ -345,108 +345,225 @@ class LoopbackSession {
     }
   }
 
-  void Run() {
-    HRESULT hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool com_ok = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
-    if (!com_ok) {
-      SignalStarted(hr);
-      return;
-    }
-
-    IMMDeviceEnumerator* enumerator = nullptr;
-    hr = ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                            __uuidof(IMMDeviceEnumerator),
-                            reinterpret_cast<void**>(&enumerator));
+  // Everything held while one render endpoint is open for loopback.
+  struct Endpoint {
     IMMDevice* device = nullptr;
-    if (SUCCEEDED(hr)) {
-      if (device_id_.empty()) {
-        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-      } else {
-        const std::wstring wide = Utf16FromUtf8(device_id_);
-        hr = enumerator->GetDevice(wide.c_str(), &device);
-      }
-    }
     IAudioClient* client = nullptr;
-    WAVEFORMATEX* mix = nullptr;
-    if (SUCCEEDED(hr)) {
-      hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                            reinterpret_cast<void**>(&client));
-    }
-    if (SUCCEEDED(hr)) {
-      hr = client->GetMixFormat(&mix);
-    }
-    if (SUCCEEDED(hr)) {
-      hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                              AUDCLNT_STREAMFLAGS_LOOPBACK,
-                              10000000, 0, mix, nullptr);
-    }
     IAudioCaptureClient* capture = nullptr;
-    if (SUCCEEDED(hr)) {
-      hr = client->GetService(__uuidof(IAudioCaptureClient),
-                              reinterpret_cast<void**>(&capture));
-    }
-    if (SUCCEEDED(hr)) {
-      converter_.Configure(mix);
-      hr = client->Start();
-    }
-    SignalStarted(hr);
-    if (FAILED(hr)) {
+    WAVEFORMATEX* mix = nullptr;
+    std::wstring id;        // the endpoint actually opened
+    bool fallback = false;  // the selected device was gone; this is the default
+
+    void Release() {
+      if (client != nullptr) {
+        client->Stop();
+      }
       if (capture != nullptr) {
         capture->Release();
+        capture = nullptr;
       }
       if (mix != nullptr) {
         ::CoTaskMemFree(mix);
+        mix = nullptr;
       }
       if (client != nullptr) {
         client->Release();
+        client = nullptr;
       }
       if (device != nullptr) {
         device->Release();
+        device = nullptr;
       }
+      id.clear();
+      fallback = false;
+    }
+  };
+
+  static bool IsActive(IMMDevice* device) {
+    DWORD state = 0;
+    return SUCCEEDED(device->GetState(&state)) && state == DEVICE_STATE_ACTIVE;
+  }
+
+  // Opens the selected output (or the default one) and starts loopback
+  // capture on it. With [allow_fallback], a selected device that's gone is
+  // replaced by the default output rather than failing.
+  HRESULT Open(IMMDeviceEnumerator* enumerator, bool allow_fallback,
+               Endpoint* ep) {
+    HRESULT hr = E_FAIL;
+    if (!device_id_.empty()) {
+      const std::wstring wide = Utf16FromUtf8(device_id_);
+      hr = enumerator->GetDevice(wide.c_str(), &ep->device);
+      if (SUCCEEDED(hr) && allow_fallback && !IsActive(ep->device)) {
+        ep->device->Release();
+        ep->device = nullptr;
+        hr = HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED);
+      }
+      if (FAILED(hr) && allow_fallback) {
+        ep->fallback = true;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole,
+                                                 &ep->device);
+      }
+    } else {
+      hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &ep->device);
+    }
+    if (SUCCEEDED(hr)) {
+      LPWSTR id = nullptr;
+      if (SUCCEEDED(ep->device->GetId(&id)) && id != nullptr) {
+        ep->id = id;
+        ::CoTaskMemFree(id);
+      }
+      hr = ep->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(&ep->client));
+    }
+    if (SUCCEEDED(hr)) {
+      hr = ep->client->GetMixFormat(&ep->mix);
+    }
+    if (SUCCEEDED(hr)) {
+      hr = ep->client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                  AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0,
+                                  ep->mix, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+      hr = ep->client->GetService(__uuidof(IAudioCaptureClient),
+                                  reinterpret_cast<void**>(&ep->capture));
+    }
+    if (SUCCEEDED(hr)) {
+      converter_.Configure(ep->mix);
+      hr = ep->client->Start();
+    }
+    if (FAILED(hr)) {
+      ep->Release();
+    }
+    return hr;
+  }
+
+  // Moves every queued packet into pending_. False once the endpoint has
+  // failed (AUDCLNT_E_DEVICE_INVALIDATED and friends).
+  bool Drain(Endpoint* ep, std::vector<uint8_t>* converted) {
+    UINT32 packet = 0;
+    if (FAILED(ep->capture->GetNextPacketSize(&packet))) {
+      return false;
+    }
+    while (packet > 0) {
+      BYTE* data = nullptr;
+      UINT32 frames = 0;
+      DWORD flags = 0;
+      if (FAILED(ep->capture->GetBuffer(&data, &frames, &flags, nullptr,
+                                        nullptr))) {
+        return false;
+      }
+      converted->clear();
+      const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+      converter_.Convert(data, frames, silent, converted);
+      AppendBytes(*converted);
+      ep->capture->ReleaseBuffer(frames);
+      if (FAILED(ep->capture->GetNextPacketSize(&packet))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // True when the sound now plays somewhere other than [ep]: the default
+  // output moved while we follow it (nothing selected, or the selected
+  // device is gone), or a missing selected device came back.
+  bool EndpointMoved(IMMDeviceEnumerator* enumerator, const Endpoint& ep) {
+    if (!device_id_.empty()) {
+      if (!ep.fallback) {
+        return false;
+      }
+      IMMDevice* selected = nullptr;
+      const std::wstring wide = Utf16FromUtf8(device_id_);
+      if (SUCCEEDED(enumerator->GetDevice(wide.c_str(), &selected))) {
+        const bool back = IsActive(selected);
+        selected->Release();
+        if (back) {
+          return true;
+        }
+      }
+    }
+    IMMDevice* current = nullptr;
+    if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole,
+                                                   &current))) {
+      return false;
+    }
+    bool moved = false;
+    LPWSTR id = nullptr;
+    if (SUCCEEDED(current->GetId(&id)) && id != nullptr) {
+      moved = ep.id != id;
+      ::CoTaskMemFree(id);
+    }
+    current->Release();
+    return moved;
+  }
+
+  void Run() {
+    const HRESULT com_hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com_hr) && com_hr != RPC_E_CHANGED_MODE) {
+      SignalStarted(com_hr);
+      return;
+    }
+    const bool com_initialized = SUCCEEDED(com_hr);
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                    CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                    reinterpret_cast<void**>(&enumerator));
+    Endpoint ep;
+    if (SUCCEEDED(hr)) {
+      // No fallback on the first open: a device that can't be opened fails
+      // startLoopback instead of quietly capturing something else.
+      hr = Open(enumerator, false, &ep);
+    }
+    SignalStarted(hr);
+    if (FAILED(hr)) {
       if (enumerator != nullptr) {
         enumerator->Release();
       }
-      if (com_ok) {
+      if (com_initialized) {
         ::CoUninitialize();
       }
       return;
     }
 
+    // An endpoint can die under a live session: unplugged headphones, a
+    // Bluetooth device dropping out, a monitor's speakers going away when
+    // the display sleeps, a driver restart, the default output switching.
+    // This thread used to exit right there, silently, and speaker audio
+    // stopped for the rest of the recording. It now reopens, retrying every
+    // 500 ms until the session stops.
     std::vector<uint8_t> converted;
     converted.reserve(4096);
+    ULONGLONG last_check = ::GetTickCount64();
+    ULONGLONG last_attempt = 0;
     while (::WaitForSingleObject(stop_event_, 10) == WAIT_TIMEOUT) {
-      UINT32 packet = 0;
-      HRESULT packet_hr = capture->GetNextPacketSize(&packet);
-      if (FAILED(packet_hr)) {
-        break;
+      const ULONGLONG now = ::GetTickCount64();
+      if (ep.capture == nullptr) {
+        if (now - last_attempt < 500) {
+          continue;
+        }
+        last_attempt = now;
+        if (SUCCEEDED(Open(enumerator, true, &ep))) {
+          last_check = now;
+        }
+        continue;
       }
-      while (packet > 0) {
-        BYTE* data = nullptr;
-        UINT32 frames = 0;
-        DWORD flags = 0;
-        HRESULT buf_hr =
-            capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-        if (FAILED(buf_hr)) {
-          break;
-        }
-        converted.clear();
-        const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-        converter_.Convert(data, frames, silent, &converted);
-        AppendBytes(converted);
-        capture->ReleaseBuffer(frames);
-        if (FAILED(capture->GetNextPacketSize(&packet))) {
-          break;
-        }
+      bool reopen = !Drain(&ep, &converted);
+      if (!reopen && now - last_check >= 1000) {
+        last_check = now;
+        reopen = EndpointMoved(enumerator, ep);
+      }
+      if (reopen) {
+        ep.Release();
+        last_attempt = 0;
       }
     }
 
-    client->Stop();
-    capture->Release();
-    ::CoTaskMemFree(mix);
-    client->Release();
-    device->Release();
+    ep.Release();
     enumerator->Release();
-    ::CoUninitialize();
+    if (com_initialized) {
+      ::CoUninitialize();
+    }
   }
 
   std::string device_id_;
@@ -872,6 +989,7 @@ class DesktopAudioPlugin {
   }
 
   ~DesktopAudioPlugin() {
+    ::SetThreadExecutionState(ES_CONTINUOUS);
     wav_.Stop();
     loopback_.Stop();
     if (channel_) {
@@ -908,6 +1026,24 @@ class DesktopAudioPlugin {
     if (method == "readLoopback") {
       std::vector<uint8_t> bytes = loopback_.TakePending();
       result->Success(EncodableValue(std::move(bytes)));
+      return;
+    }
+    if (method == "setKeepAwake") {
+      bool on = false;
+      if (const auto* args = std::get_if<EncodableMap>(call.arguments())) {
+        const auto it = args->find(EncodableValue("on"));
+        if (it != args->end()) {
+          if (const auto* b = std::get_if<bool>(&it->second)) {
+            on = *b;
+          }
+        }
+      }
+      // No idle sleep while recording; the display may still turn off. The
+      // state belongs to the calling thread, and this handler always runs
+      // on the platform thread, which lives as long as the app.
+      ::SetThreadExecutionState(on ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+                                   : ES_CONTINUOUS);
+      result->Success();
       return;
     }
     if (method == "playWav") {

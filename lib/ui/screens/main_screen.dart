@@ -269,6 +269,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _sonioxService.onUsageLimitReached = () {
       _forceStopForUsageLimit();
     };
+    // Read again on every reconnect, so a token the app refreshed mid-session
+    // is the one the next rotation presents to the proxy.
+    _sonioxService.credentials = () => (
+          userId: UserService.instance.userId,
+          token: UserService.instance.authToken,
+        );
+    _sonioxService.onReconnectingChanged = _onTranscriptionReconnecting;
+    _sonioxService.onDiagnostic = _reportDiagnostic;
     // Signing in or out repoints usage, purchases and cloud history at a
     // different server row. The change can also arrive unprompted — the
     // once-per-install restore probe lands a second or two after launch — so
@@ -360,8 +368,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _ttsDraftTimer?.cancel();
     _autosaveTimer?.cancel();
     _silentSpeakerHintTimer?.cancel();
+    _reconnectingTimer?.cancel();
     _dismissSplitViewTip(markSeen: false);
     _audioService.dispose();
+    _sonioxService.onReconnectingChanged = null;
+    _sonioxService.onDiagnostic = null;
     _sonioxService.disconnect();
     _ttsService.dispose();
     super.dispose();
@@ -430,12 +441,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
   }
 
   // Capture-failure recovery: one restart in flight at a time, at most two
-  // attempts per minute so a hard-dead mic can't loop restarts forever.
+  // restarts per minute so a hard-dead mic can't loop restarts forever.
   bool _captureRestartInFlight = false;
   DateTime? _captureRestartWindowStart;
   int _captureRestartAttempts = 0;
 
-  /// A native capture error arrived on the recorder's state stream. The
+  /// A native capture error arrived on the recorder's state stream, or a
+  /// stall watchdog (iOS, desktop) saw the capture stop delivering. The
   /// record engine tears itself down permanently on the first bad read
   /// (e.g. ERROR_DEAD_OBJECT after an audioserver restart), so without
   /// intervention the session keeps looking live while recording silence
@@ -447,40 +459,56 @@ class _MainScreenState extends ConsumerState<MainScreen>
     // Errors after the session ended (or during teardown) are stale.
     if (!_audioService.isRecording) return;
 
-    final now = DateTime.now();
-    if (_captureRestartWindowStart == null ||
-        now.difference(_captureRestartWindowStart!) >
-            const Duration(seconds: 60)) {
-      _captureRestartWindowStart = now;
-      _captureRestartAttempts = 0;
-    }
-
     Object? restartError;
-    if (_captureRestartAttempts < 2) {
-      _captureRestartAttempts++;
-      _captureRestartInFlight = true;
-      try {
-        // Give a spurious error 2s to disprove itself — if data is still
-        // flowing, the recorder survived and a restart would only cut it.
-        await Future.delayed(const Duration(seconds: 2));
-        if (!mounted || !_audioService.isRecording) return;
-        if (_audioService.isCapturingHealthy) return;
-        // Same restart the resume path uses: appends to the existing temp
-        // PCM, and the bounded stop inside start() clears the dead native
-        // recorder (which never answers a plain stop).
-        await _startAudioCapture().timeout(_audioStartTimeout);
-        return; // recovered — the session continues seamlessly
-      } catch (e) {
-        // start() tears the dead capture down before failing, so
-        // isRecording is false from here on even though the session is
-        // still live. Fall through to the stop + notify below.
-        restartError = e;
-      } finally {
-        _captureRestartInFlight = false;
+    _captureRestartInFlight = true;
+    try {
+      // Give a spurious error 2s to disprove itself — if data is still
+      // flowing, the recorder survived and a restart would only cut it.
+      // Only a real restart counts toward the limit: a capture that came
+      // back by itself must never end the session.
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted || !_audioService.isRecording) return;
+      if (_audioService.isCapturingHealthy) {
+        _reportDiagnostic('capture_failure', {'outcome': 'self_healed'});
+        return;
       }
+
+      final now = DateTime.now();
+      if (_captureRestartWindowStart == null ||
+          now.difference(_captureRestartWindowStart!) >
+              const Duration(seconds: 60)) {
+        _captureRestartWindowStart = now;
+        _captureRestartAttempts = 0;
+      }
+      if (_captureRestartAttempts < 2) {
+        _captureRestartAttempts++;
+        try {
+          // Same restart the resume path uses: appends to the existing temp
+          // PCM, and the bounded stop inside start() clears the dead native
+          // recorder (which never answers a plain stop).
+          await _startAudioCapture().timeout(_audioStartTimeout);
+          _reportDiagnostic('capture_failure', {
+            'outcome': 'restarted',
+            'attempt': _captureRestartAttempts,
+          });
+          return; // recovered — the session continues seamlessly
+        } catch (e) {
+          // start() tears the dead capture down before failing, so
+          // isRecording is false from here on even though the session is
+          // still live. Fall through to the stop + notify below.
+          restartError = e;
+        }
+      }
+    } finally {
+      _captureRestartInFlight = false;
     }
 
     // Recovery failed or attempts exhausted.
+    final errorText = '${restartError ?? 'restart limit reached'}';
+    _reportDiagnostic('capture_failure', {
+      'outcome': 'ended',
+      'error': errorText.length > 200 ? errorText.substring(0, 200) : errorText,
+    });
     await _endSessionAfterCaptureLoss(captureLostMessage(restartError));
   }
 
@@ -785,10 +813,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     child: Text(
                       PurchaseService.isSupported
                           ? 'Unable to load packages. Please try again later.'
-                          : 'In-app purchases are not available on this '
-                              'platform. Use the iOS, Android, or Mac App Store '
-                              'app, or quote your ID above for help with your '
-                              'account.',
+                          // No other platforms named: the Microsoft Store
+                          // rejects that (policy 10.1.5).
+                          : "In-app purchases aren't available in this "
+                              'version. Quote your customer ID above to '
+                              'Contact Support for help with your account.',
                       style: TextStyle(
                           fontSize: 14, color: AppConstants.textMuted),
                       textAlign: TextAlign.center,
@@ -943,7 +972,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dCtx),
-            child: Text('OK', style: TextStyle(color: AppConstants.textPrimary)),
+            child:
+                Text('OK', style: TextStyle(color: AppConstants.textPrimary)),
           ),
         ],
       ),
@@ -2006,6 +2036,39 @@ class _MainScreenState extends ConsumerState<MainScreen>
     );
   }
 
+  // Shows "Reconnecting..." once a drop has lasted a moment, so a quick
+  // reconnect never flickers the status bar.
+  Timer? _reconnectingTimer;
+
+  void _onTranscriptionReconnecting(bool reconnecting) {
+    _reconnectingTimer?.cancel();
+    _reconnectingTimer = null;
+    if (!mounted) return;
+    if (!reconnecting) {
+      _setIfChanged(transcriptionReconnectingProvider, false);
+      return;
+    }
+    _reconnectingTimer = Timer(const Duration(seconds: 2), () {
+      _reconnectingTimer = null;
+      if (mounted) _setIfChanged(transcriptionReconnectingProvider, true);
+    });
+  }
+
+  /// Analytics for drops and capture failures the session heals on its own,
+  /// so a field failure shows up in activity_log without a customer report.
+  void _reportDiagnostic(String event, Map<String, dynamic> meta) {
+    if (!mounted) return;
+    final desktop = audioSourceSelectorSupported
+        ? ref.read(desktopAudioSettingsProvider)
+        : null;
+    UserService.instance.reportActivity(event, {
+      ...meta,
+      'platform': Platform.operatingSystem,
+      'mode': ref.read(displayModeProvider).name,
+      if (desktop != null) 'source': desktop.source.name,
+    });
+  }
+
   DateTime? _lastCloudSyncAt;
   bool _cloudSyncInFlight = false;
 
@@ -2858,7 +2921,15 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     ),
                   ),
                   const SizedBox(width: 12),
-                  StatusBar(state: recordingState),
+                  // Own Consumer: the reconnecting flag must not rebuild the
+                  // whole screen.
+                  Consumer(
+                    builder: (context, ref, _) => StatusBar(
+                      state: recordingState,
+                      reconnecting:
+                          ref.watch(transcriptionReconnectingProvider),
+                    ),
+                  ),
                   const Spacer(),
                   // Conversation TTS toggle — speak the translation on release.
                   if (displayMode == DisplayMode.conversation) ...[

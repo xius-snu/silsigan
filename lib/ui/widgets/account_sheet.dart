@@ -7,6 +7,7 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../providers/account_provider.dart';
 import '../../services/account_service.dart';
 import '../../utils/constants.dart';
+import '../../utils/desktop.dart';
 import 'google_g_icon.dart';
 
 /// Opens the optional account-sync sheet.
@@ -316,10 +317,16 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
         style: TextStyle(fontSize: 11, color: AppConstants.textFaint),
         textAlign: TextAlign.center,
       ),
-      const SizedBox(height: 8),
-      _desktopDownloadLink(),
+      if (_showDesktopDownloadLink) ...[
+        const SizedBox(height: 8),
+        _desktopDownloadLink(),
+      ],
     ];
   }
+
+  // A desktop build is already the desktop app, and the Microsoft Store
+  // rejects in-app references to other platforms (policy 10.1.5).
+  bool get _showDesktopDownloadLink => !isDesktopPlatform;
 
   Widget _desktopDownloadLink() {
     return Center(
@@ -504,8 +511,10 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
         ),
       ],
       const SizedBox(height: 20),
-      _desktopDownloadLink(),
-      const SizedBox(height: 8),
+      if (_showDesktopDownloadLink) ...[
+        _desktopDownloadLink(),
+        const SizedBox(height: 8),
+      ],
       if (_busy)
         Center(
           child: SizedBox(

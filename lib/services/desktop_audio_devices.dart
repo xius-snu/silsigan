@@ -109,6 +109,19 @@ class DesktopAudioDevices {
     return bytes ?? Uint8List(0);
   }
 
+  /// Holds the computer awake while a recording runs: no idle system sleep,
+  /// and on macOS no App Nap throttling of the app's timers and sockets. A
+  /// hands-off session (a lecture, a meeting in another window) has no input
+  /// to reset the idle timer, so Windows' idle sleep (commonly 15–30 min) or
+  /// a napping Mac app cut it off mid-recording. The display may still turn
+  /// off. Windows and macOS only.
+  static Future<void> setKeepAwake(bool on) async {
+    if (kIsWeb || !(Platform.isWindows || Platform.isMacOS)) return;
+    try {
+      await _channel.invokeMethod<void>('setKeepAwake', {'on': on});
+    } catch (_) {}
+  }
+
   /// Pin capture to [micDeviceId] (null / empty = phone built-in mic) and
   /// route playback to A2DP headphones when connected. Pass [bluetoothMic]
   /// when the chosen input is itself a Bluetooth headset mic — that path

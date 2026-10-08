@@ -26,9 +26,60 @@ class SonioxRealtimeService {
   bool _connecting = false;
   static final Random _rand = Random();
 
+  /// First retry delay; doubles per failed attempt up to 30x. Only tests
+  /// change it.
+  @visibleForTesting
+  Duration reconnectBaseDelay = const Duration(seconds: 1);
+
+  // ─── Session health ───
+  // A (re)connected session counts as working once Soniox answers without an
+  // error, or once it has stayed up [healthyAfter] without one (a stream fed
+  // only silence or keepalives gets no answers). Until then a drop is a
+  // failed attempt: the retry counter keeps climbing and the backoff grows.
+  // The counter used to reset on the WebSocket upgrade alone, so a config
+  // Soniox refused on sight, or credentials the proxy turned away right after
+  // the upgrade, retried about once a second for as long as the session ran.
+  @visibleForTesting
+  Duration healthyAfter = const Duration(seconds: 5);
+  bool _sessionHealthy = false;
+  bool _sessionFailed = false;
+  Timer? _healthTimer;
+
+  /// Consecutive failed attempts before the user is told (once per outage).
+  /// Before that the drop is healed quietly; the status bar shows it.
+  static const _announceFailureAfter = 3;
+
+  /// Whether the caller has been told the link is down (see
+  /// [onReconnectingChanged]).
+  bool _reportedReconnecting = false;
+
+  // ─── Keepalive ───
+  // Soniox closes a stream that gets neither audio nor a keepalive for 20s
+  // (408 request_timeout). Capture can go quiet for longer than that: Windows
+  // loopback delivers nothing while no app plays sound, a dead mic is being
+  // restarted, the machine is waking up. Each such gap ended in "A
+  // transcription error occurred", and the reconnect that followed timed out
+  // the same way 20s later, on a loop, until audio came back.
+  @visibleForTesting
+  Duration keepaliveIdle = const Duration(seconds: 5);
+  Timer? _keepaliveTimer;
+  DateTime _lastSentAt = DateTime.now();
+  static final _keepaliveMessage = jsonEncode({'type': 'keepalive'});
+
   // Auth credentials for proxy — set before calling connect()
   String? userId;
   String? authToken;
+
+  /// Current proxy credentials, read again on every (re)connect. The app can
+  /// replace its token mid-session (another request got a 401 and
+  /// re-registered, which retires the old token). A session that kept the
+  /// token it started with was turned away (4001) at its next rotation and
+  /// retried the dead token for good. Unset, [userId] / [authToken] are used.
+  ({String? userId, String? token}) Function()? credentials;
+
+  /// Points the service at a local server. Tests only.
+  @visibleForTesting
+  String? proxyUrlOverride;
 
   // Private Soniox key mode — compile-time or server-side flag
   static const _isPrivateBuild = String.fromEnvironment('SONIOX_PRIVATE');
@@ -98,6 +149,21 @@ class SonioxRealtimeService {
   // Context — set by the caller to improve accuracy on rotations
   String? contextText;
 
+  /// Most characters of [contextText] sent to Soniox. It refuses the whole
+  /// session config (400 invalid_request, "Context is too long") over 8,000
+  /// context tokens, and over roughly 19,000 characters before it even
+  /// counts. Measured 2026-10: Chinese is ~1 token per character, Japanese
+  /// ~0.8, Korean ~0.66, the rest under 0.53. The caller replays recent
+  /// transcript lines on every rotation and reconnect, and one unbroken split
+  /// paragraph can hold an hour of speech, so once a session crossed the
+  /// limit every reconnect was refused the same way. Only the tail matters
+  /// for continuity.
+  static const maxContextChars = 3000;
+
+  // Set when Soniox refuses this session's config. Retries then go out
+  // without the transcript context, the only part of the config that grows.
+  bool _omitContext = false;
+
   // Audio buffer during reconnection — capped at 30s of audio to avoid OOM
   static const _maxBufferBytes = 24000 * 2 * 30;
   final Queue<Uint8List> _audioBuffer = Queue<Uint8List>();
@@ -133,6 +199,15 @@ class SonioxRealtimeService {
   Function(String language)? onLanguageDetected;
   Function(int speaker)? onSpeakerChanged;
   Function()? onUsageLimitReached;
+
+  /// The link dropped and is being re-established (true), or a fresh session
+  /// has proved itself working (false). The planned rotation hand-over
+  /// doesn't count.
+  void Function(bool reconnecting)? onReconnectingChanged;
+
+  /// Errors and drops the session heals by itself, for analytics. The user
+  /// isn't shown these one by one.
+  void Function(String event, Map<String, dynamic> meta)? onDiagnostic;
 
   bool _forceTranslation = false;
   String? _languageHint;
@@ -181,6 +256,10 @@ class SonioxRealtimeService {
         endpointSensitivity ?? AppConstants.endpointSensitivity;
     _endpointLatencyAdjustmentLevel = endpointLatencyAdjustmentLevel ??
         AppConstants.endpointLatencyAdjustmentLevel;
+    _omitContext = false;
+    _sessionStartedAt = DateTime.now();
+    _diagnosticsSent.clear();
+    _setReconnecting(false);
     _resetTokenState();
     _clearAudioBuffer();
     await _doConnect();
@@ -188,7 +267,7 @@ class SonioxRealtimeService {
     // disconnect() while the handshake is still in flight — that teardown
     // already stopped the rotation timer, so don't restart it on a session
     // that has been intentionally closed.
-    if (!_intentionallyClosed) _startRotationTimer();
+    if (!_intentionallyClosed) _startSessionTimers();
   }
 
   Future<void> _doConnect() async {
@@ -211,11 +290,18 @@ class SonioxRealtimeService {
       currentSpeaker = null;
       _pendingSpeakerCounts.clear();
 
+      final creds = credentials?.call();
+      if (creds != null) {
+        userId = creds.userId ?? userId;
+        authToken = creds.token ?? authToken;
+      }
+
       final WebSocketChannel channel;
       try {
-        final wsPath = _usePrivate
-            ? AppConstants.sonioxProxyUrl
-            : AppConstants.sonioxLimitedProxyUrl;
+        final wsPath = proxyUrlOverride ??
+            (_usePrivate
+                ? AppConstants.sonioxProxyUrl
+                : AppConstants.sonioxLimitedProxyUrl);
         final proxyUrl = Uri.parse(wsPath).replace(
           queryParameters: {
             if (userId != null) 'userId': userId!,
@@ -236,8 +322,8 @@ class SonioxRealtimeService {
       // IOWebSocketChannel.connect is LAZY: it returns before the handshake
       // completes and never throws synchronously on a failed connection — the
       // failure only surfaces via `ready` (or the stream). Await it so we never
-      // declare the connection live, reset the retry counter, flush buffered
-      // audio, or fire onConnected for a socket that never actually opened.
+      // declare the connection live, flush buffered audio, or fire
+      // onConnected for a socket that never actually opened.
       try {
         // Bound the handshake so a black-hole connection (associated to a
         // network but silently dropping packets) fails fast into the backoff
@@ -284,16 +370,20 @@ class SonioxRealtimeService {
         cancelOnError: true,
       );
 
+      _armHealthCheck(channel);
+
       try {
         channel.sink.add(jsonEncode(_buildConfig()));
+        _lastSentAt = DateTime.now();
       } catch (e) {
         _handleDisconnect('config send failed: $e');
         return;
       }
 
-      // The connection is proven live — only NOW is it safe to reset retry
-      // state, flush buffered audio, and notify the caller.
-      _reconnectAttempts = 0;
+      // The socket is open — only NOW is it safe to flush buffered audio and
+      // notify the caller. The retry counter waits for Soniox to accept the
+      // session (_markSessionHealthy): the proxy upgrades the socket before
+      // it checks credentials, and Soniox reads the config after that.
       _isReconnecting = false;
       _isRotating = false;
       _flushAudioBuffer();
@@ -353,11 +443,28 @@ class SonioxRealtimeService {
         },
       ],
     };
-    if (contextText != null && contextText!.isNotEmpty) {
-      context['text'] = contextText;
+    final text = _omitContext ? null : boundedContext(contextText);
+    if (text != null && text.isNotEmpty) {
+      context['text'] = text;
     }
     config['context'] = context;
     return config;
+  }
+
+  /// The last [maxContextChars] characters of [text], starting on a word
+  /// boundary when the script has spaces.
+  @visibleForTesting
+  static String? boundedContext(String? text) {
+    if (text == null) return null;
+    var t = text.trim();
+    if (t.length <= maxContextChars) return t;
+    t = t.substring(t.length - maxContextChars);
+    // Never open on the second half of a surrogate pair.
+    final first = t.codeUnitAt(0);
+    if (first >= 0xDC00 && first <= 0xDFFF) t = t.substring(1);
+    final space = t.indexOf(RegExp(r'\s'));
+    if (space >= 0 && space < 40) t = t.substring(space + 1);
+    return t;
   }
 
   void _handleDisconnect(String reason) {
@@ -366,18 +473,38 @@ class SonioxRealtimeService {
     // Proxy signals usage limit with WS close code 4005. Capture before
     // nulling _channel so we don't race with reconnect logic.
     final closeCode = _channel?.closeCode;
+    final closeReason = _channel?.closeReason;
+    final wasHealthy = _sessionHealthy;
 
     _subscription?.cancel();
     _subscription = null;
     _channel = null;
+    _resetSessionHealth();
 
     if (closeCode == 4005) {
       _intentionallyClosed = true;
-      _stopRotationTimer();
+      _stopSessionTimers();
       _clearAudioBuffer();
+      _setReconnecting(false);
       onUsageLimitReached?.call();
       return;
     }
+
+    _diagnose(
+      'transcription_dropped',
+      {
+        'reason': _clip(reason),
+        if (closeCode != null) 'closeCode': closeCode,
+        if (closeReason != null && closeReason.isNotEmpty)
+          'closeReason': _clip(closeReason),
+        'wasHealthy': wasHealthy,
+      },
+      key: 'dropped:$closeCode',
+    );
+
+    // A session that worked gets a prompt retry. One that never did keeps
+    // climbing the backoff.
+    if (wasHealthy) _reconnectAttempts = 0;
 
     if (!_isRotating) {
       _tryReconnect();
@@ -387,19 +514,38 @@ class SonioxRealtimeService {
     // _doConnect fails synchronously during rotation.
   }
 
-  // ─── Session rotation ───
+  // ─── Session rotation + keepalive ───
 
-  void _startRotationTimer() {
+  void _startSessionTimers() {
     _rotationTimer?.cancel();
     _rotationTimer = Timer.periodic(
       const Duration(minutes: _rotationIntervalMinutes),
       (_) => _rotateSession(),
     );
+    // Ticking at half the idle threshold keeps the longest silent stretch
+    // Soniox sees at 1.5x it, well inside its 20s limit.
+    _keepaliveTimer?.cancel();
+    _keepaliveTimer = Timer.periodic(
+      keepaliveIdle ~/ 2,
+      (_) => _sendKeepaliveIfIdle(),
+    );
   }
 
-  void _stopRotationTimer() {
+  void _stopSessionTimers() {
     _rotationTimer?.cancel();
     _rotationTimer = null;
+    _keepaliveTimer?.cancel();
+    _keepaliveTimer = null;
+  }
+
+  void _sendKeepaliveIfIdle() {
+    final channel = _channel;
+    if (channel == null || _isReconnecting || _isRotating) return;
+    if (DateTime.now().difference(_lastSentAt) < keepaliveIdle) return;
+    try {
+      channel.sink.add(_keepaliveMessage);
+      _lastSentAt = DateTime.now();
+    } catch (_) {}
   }
 
   /// Transparently close and reopen the Soniox session to reset the
@@ -414,10 +560,16 @@ class SonioxRealtimeService {
     // Finalize current session
     finalize();
     await Future.delayed(const Duration(milliseconds: 300));
+    // Stopped during the grace: disconnect() has already torn down.
+    if (_intentionallyClosed) {
+      _isRotating = false;
+      return;
+    }
 
     // Tear down current connection
     _subscription?.cancel();
     _subscription = null;
+    _resetSessionHealth();
 
     // Flush any pending tokens to callbacks BEFORE resetting state
     _flushPendingTokens();
@@ -513,7 +665,7 @@ class SonioxRealtimeService {
     lastCompletedSpeaker = _dominantPendingSpeaker();
     _pendingSpeakerCounts.clear();
     final cb = onTranscriptionCompleted;
-    if (cb != null) cb(text);
+    if (cb != null) _runCallback('transcriptionCompleted', () => cb(text));
   }
 
   /// The speaker with the most final tokens in the in-progress utterance,
@@ -543,24 +695,59 @@ class SonioxRealtimeService {
     lastTranslationWasLate = isLate;
     lastCompletedTranslationSourceLanguage = currentTranslationSourceLanguage;
     final cb = onTranslationCompleted;
-    if (cb != null) cb(text);
+    if (cb != null) _runCallback('translationCompleted', () => cb(text));
+  }
+
+  void _emitTranscriptionDraft(String draft) {
+    final cb = onTranscriptionDraft;
+    if (cb != null) _runCallback('transcriptionDraft', () => cb(draft));
+  }
+
+  void _emitTranslationDraft(String draft) {
+    final cb = onTranslationDraft;
+    if (cb != null) _runCallback('translationDraft', () => cb(draft));
+  }
+
+  /// Runs a caller callback so an exception in it can't leave the token state
+  /// half updated. The next message would trip over the leftovers and fail
+  /// the same way, message after message.
+  void _runCallback(String name, void Function() call) {
+    try {
+      call();
+    } catch (e, st) {
+      debugPrint('Transcription callback $name failed: $e\n$st');
+      _diagnose(
+        'transcription_callback_error',
+        {'callback': name, 'error': _clip('$e')},
+        key: 'callback:$name',
+      );
+    }
   }
 
   // ─── Token processing ───
 
   void _handleMessage(dynamic message) {
+    final Map<String, dynamic> data;
     try {
-      final data = jsonDecode(message as String) as Map<String, dynamic>;
+      data = jsonDecode(message as String) as Map<String, dynamic>;
+    } catch (e) {
+      // Not a Soniox response. Nothing the user can act on, and the stream
+      // carries on.
+      debugPrint('Failed to parse transcription message: $e');
+      // The type only: a FormatException quotes the frame, i.e. speech.
+      _diagnose('transcription_bad_message', {'error': '${e.runtimeType}'});
+      return;
+    }
 
-      if (data['error_code'] != null) {
-        // Log the provider's raw error for diagnostics, but surface only a
-        // generic message so vendor-identifying text never reaches the UI.
-        final rawError = data['error_message'] as String? ?? 'unknown error';
-        debugPrint('Transcription service error: $rawError');
-        onError?.call('A transcription error occurred. Please try again.');
-        return;
-      }
+    if (data['error_code'] != null) {
+      _handleServerError(data);
+      return;
+    }
 
+    // Any well-formed answer means Soniox accepted the session.
+    if (!_sessionHealthy) _markSessionHealthy();
+
+    try {
       if (data['finished'] == true) {
         _completeSettle();
         return;
@@ -592,10 +779,44 @@ class SonioxRealtimeService {
       if (translationTokens.isNotEmpty) {
         _processTranslationTokens(translationTokens);
       }
-    } catch (e) {
-      debugPrint('Failed to parse transcription message: $e');
+    } catch (e, st) {
+      debugPrint('Failed to process transcription message: $e\n$st');
+      _diagnose('transcription_processing_error', {'error': _clip('$e')});
       onError?.call('A transcription error occurred. Please try again.');
     }
+  }
+
+  /// Soniox sends one error and then closes the stream, and the reconnect
+  /// path takes over from there. Retrying is the remedy for every class it
+  /// sends mid-session (408 idle timeout, 413 max duration, 429, 500, 503),
+  /// and for a refused config (400) once the context is dropped. The user
+  /// hears about it only if the retries keep failing (see [_tryReconnect]).
+  /// Showing each error as it came turned one stuck condition into an
+  /// endless run of "A transcription error occurred".
+  void _handleServerError(Map<String, dynamic> data) {
+    final code = data['error_code'];
+    final type = data['error_type'];
+    final message = '${data['error_message'] ?? ''}';
+    // Logged raw for diagnostics; vendor text never reaches the UI.
+    debugPrint('Transcription service error: $code $type $message');
+    _sessionFailed = true;
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    final refused = code == 400 || type == 'invalid_request';
+    final hadContext =
+        !_omitContext && (boundedContext(contextText)?.isNotEmpty ?? false);
+    if (refused) _omitContext = true;
+    _diagnose(
+      'transcription_error',
+      {
+        'code': code,
+        'type': type,
+        'message': _clip(message),
+        'contextChars': contextText?.length ?? 0,
+        if (refused) 'droppedContext': hadContext,
+      },
+      key: 'error:$code',
+    );
   }
 
   /// Flushes any lingering translation buffer as a completion. Called when
@@ -685,7 +906,7 @@ class SonioxRealtimeService {
       return;
     }
 
-    onTranscriptionDraft?.call(_pendingUtterance + _provisionalText);
+    _emitTranscriptionDraft(_pendingUtterance + _provisionalText);
 
     if (hadProvisional &&
         _provisionalText.isEmpty &&
@@ -700,7 +921,7 @@ class SonioxRealtimeService {
         _provisionalTranslation = '';
         _pendingUtterance = '';
         _pendingWords.clear();
-        onTranslationDraft?.call('');
+        _emitTranslationDraft('');
         _rotateSession();
         return;
       }
@@ -763,7 +984,7 @@ class SonioxRealtimeService {
         _hasRepetitionLoop(_pendingTranslation)) {
       _pendingTranslation = '';
       _provisionalTranslation = '';
-      onTranslationDraft?.call('');
+      _emitTranslationDraft('');
       _rotateSession();
       return;
     }
@@ -782,7 +1003,7 @@ class SonioxRealtimeService {
       return;
     }
 
-    onTranslationDraft?.call(_pendingTranslation + _provisionalTranslation);
+    _emitTranslationDraft(_pendingTranslation + _provisionalTranslation);
 
     // Late-translation debounce: if these tokens arrived while we're between
     // utterances (source buffers empty because the last endpoint already
@@ -816,19 +1037,23 @@ class SonioxRealtimeService {
 
     try {
       _channel!.sink.add(audioBytes);
+      _lastSentAt = DateTime.now();
     } catch (_) {}
   }
 
   void _flushAudioBuffer() {
     if (_channel == null) return;
+    var sent = false;
     while (_audioBuffer.isNotEmpty) {
       try {
         _channel!.sink.add(_audioBuffer.removeFirst());
+        sent = true;
       } catch (_) {
         break;
       }
     }
     _audioBufferBytes = 0;
+    if (sent) _lastSentAt = DateTime.now();
   }
 
   void _clearAudioBuffer() {
@@ -905,6 +1130,7 @@ class SonioxRealtimeService {
 
     _subscription?.cancel();
     _subscription = null;
+    _resetSessionHealth();
     _lateTranslationTimer?.cancel();
 
     // Discard, don't flush — the whole point is to drop the prior utterance.
@@ -927,6 +1153,73 @@ class SonioxRealtimeService {
     }
   }
 
+  // ─── Session health ───
+
+  void _armHealthCheck(WebSocketChannel channel) {
+    _resetSessionHealth();
+    _healthTimer = Timer(healthyAfter, () {
+      _healthTimer = null;
+      if (_channel == channel && !_intentionallyClosed) _markSessionHealthy();
+    });
+  }
+
+  void _markSessionHealthy() {
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    if (_sessionFailed) return;
+    _sessionHealthy = true;
+    _reconnectAttempts = 0;
+    _setReconnecting(false);
+  }
+
+  void _resetSessionHealth() {
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    _sessionHealthy = false;
+    _sessionFailed = false;
+  }
+
+  void _setReconnecting(bool reconnecting) {
+    if (_reportedReconnecting == reconnecting) return;
+    _reportedReconnecting = reconnecting;
+    final cb = onReconnectingChanged;
+    if (cb != null) _runCallback('reconnectingChanged', () => cb(reconnecting));
+  }
+
+  // ─── Diagnostics ───
+  // Rate-limited per kind, so a reconnect storm can't become an analytics
+  // storm.
+  final Map<String, DateTime> _diagnosticsSent = {};
+  DateTime? _sessionStartedAt;
+
+  void _diagnose(String event, Map<String, dynamic> meta, {String? key}) {
+    final cb = onDiagnostic;
+    if (cb == null) return;
+    final k = key ?? event;
+    final now = DateTime.now();
+    final last = _diagnosticsSent[k];
+    if (last != null && now.difference(last) < const Duration(minutes: 1)) {
+      return;
+    }
+    if (last == null && _diagnosticsSent.length >= 50) return;
+    _diagnosticsSent[k] = now;
+    final started = _sessionStartedAt;
+    try {
+      cb(event, {
+        ...meta,
+        'attempt': _reconnectAttempts,
+        if (started != null) 'sessionSec': now.difference(started).inSeconds,
+      });
+    } catch (_) {}
+  }
+
+  /// Shortens free text for analytics. Handshake errors quote the proxy URL,
+  /// whose query carries the auth token, so that never leaves the device.
+  static String _clip(String s) {
+    final t = s.replaceAll(RegExp(r'''token=[^&\s'"#]*'''), 'token=<redacted>');
+    return t.length > 200 ? t.substring(0, 200) : t;
+  }
+
   // ─── Reconnection ───
 
   void _tryReconnect() {
@@ -934,22 +1227,31 @@ class SonioxRealtimeService {
     // A reconnect is already scheduled — don't stack a second chain.
     if (_reconnectTimer != null) return;
     if (_reconnectAttempts >= _maxReconnectAttempts) {
+      _setReconnecting(false);
       onError
           ?.call('Connection lost. Please check your internet and try again.');
       return;
     }
 
     _isReconnecting = true;
+    _setReconnecting(true);
     _reconnectAttempts++;
+    if (_reconnectAttempts == _announceFailureAfter) {
+      // Several attempts in a row died before working. Say so once; the
+      // retries carry on, and a session that works resets the count.
+      onError?.call('Transcription interrupted. Reconnecting…');
+    }
 
     // Exponential backoff (1,2,4,8,16) capped at 30s, with ±30% jitter so a
     // fleet of clients dropped by the same proxy restart doesn't reconnect in
     // lockstep and hammer the proxy/Soniox in synchronized waves.
-    final baseSeconds =
+    final factor =
         (_reconnectAttempts <= 5) ? (1 << (_reconnectAttempts - 1)) : 30;
-    final cappedSeconds = baseSeconds > 30 ? 30 : baseSeconds;
-    final delayMs =
-        (cappedSeconds * 1000 * (0.7 + _rand.nextDouble() * 0.6)).round();
+    final cappedFactor = factor > 30 ? 30 : factor;
+    final delayMs = (cappedFactor *
+            reconnectBaseDelay.inMilliseconds *
+            (0.7 + _rand.nextDouble() * 0.6))
+        .round();
 
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       _reconnectTimer = null;
@@ -972,6 +1274,7 @@ class SonioxRealtimeService {
 
     _subscription?.cancel();
     _subscription = null;
+    _resetSessionHealth();
     try {
       await _channel?.sink.close();
     } catch (_) {}
@@ -1002,12 +1305,14 @@ class SonioxRealtimeService {
     _isRotating = false;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _stopRotationTimer();
+    _stopSessionTimers();
     _lateTranslationTimer?.cancel();
     _completeSettle();
     _clearAudioBuffer();
     _subscription?.cancel();
     _subscription = null;
+    _resetSessionHealth();
+    _setReconnecting(false);
 
     // Flush translation first (pairs with the pending utterance flushed
     // below; with no pending utterance to flush it's late — it belongs to

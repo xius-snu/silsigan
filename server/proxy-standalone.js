@@ -15,23 +15,46 @@ const RENDER_API_URL = process.env.RENDER_API_URL || 'https://silsigan.onrender.
 // Soniox API keys (same env vars as the Render server)
 const SONIOX_API_KEYS = (process.env.SONIOX_API_KEYS || '')
     .split(',').map(k => k.trim()).filter(k => k.length > 0);
-let _sonioxKeyIndex = 0;
-function nextSonioxKey() {
-    if (SONIOX_API_KEYS.length === 0) return null;
-    const key = SONIOX_API_KEYS[_sonioxKeyIndex];
-    _sonioxKeyIndex = (_sonioxKeyIndex + 1) % SONIOX_API_KEYS.length;
-    return key;
-}
-
 const LIMITED_SONIOX_API_KEYS = (process.env.LIMITED_SONIOX_API_KEYS || '')
     .split(',').map(k => k.trim()).filter(k => k.length > 0);
-let _limitedKeyIndex = 0;
-function nextLimitedSonioxKey() {
-    if (LIMITED_SONIOX_API_KEYS.length === 0) return null;
-    const key = LIMITED_SONIOX_API_KEYS[_limitedKeyIndex];
-    _limitedKeyIndex = (_limitedKeyIndex + 1) % LIMITED_SONIOX_API_KEYS.length;
-    return key;
+
+// A key Soniox just refused for account reasons (revoked 401, balance
+// exhausted 402, forbidden 403) is skipped for a while, and a key at its
+// concurrency limit (429) briefly. Plain round-robin kept handing a dead key
+// every Nth session, so that share of connects, and of the clients' 10-minute
+// rotations, failed until someone noticed.
+const KEY_COOLDOWN_MS = { 401: 10 * 60_000, 402: 10 * 60_000, 403: 10 * 60_000, 429: 30_000 };
+const keyCooldownUntil = new Map();
+
+function maskKey(key) {
+    return key ? `…${key.slice(-4)}` : 'none';
 }
+
+function coolDownKey(key, code, log) {
+    const ms = KEY_COOLDOWN_MS[code];
+    if (!key || !ms) return;
+    keyCooldownUntil.set(key, Date.now() + ms);
+    log.warn(`Soniox key ${maskKey(key)} cooling down ${ms / 1000}s after ${code}`);
+}
+
+function createKeyPool(keys) {
+    let index = 0;
+    return function next() {
+        if (keys.length === 0) return null;
+        const now = Date.now();
+        for (let i = 0; i < keys.length; i++) {
+            const key = keys[index];
+            index = (index + 1) % keys.length;
+            if ((keyCooldownUntil.get(key) || 0) <= now) return key;
+        }
+        // Every key is cooling down: hand one out anyway rather than none.
+        const key = keys[index];
+        index = (index + 1) % keys.length;
+        return key;
+    };
+}
+const nextSonioxKey = createKeyPool(SONIOX_API_KEYS);
+const nextLimitedSonioxKey = createKeyPool(LIMITED_SONIOX_API_KEYS);
 
 const SONIOX_PRIVATE_KEY = process.env.SONIOX_PRIVATE_KEY || null;
 const PUBLIC_ACCESS_DISABLED = process.env.PUBLIC_ACCESS_DISABLED === 'true';
@@ -49,7 +72,12 @@ async function verifyUser(userId, token, { checkUsage = false, checkPrivate = fa
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, tokenHash: hashToken(token), checkUsage, checkPrivate }),
+        signal: AbortSignal.timeout(10_000),
     });
+    // Render down, deploying or erroring is not the client's credentials
+    // being wrong: throw, so the caller closes with 4002 (retry) and the
+    // logs don't read as a flood of bad tokens.
+    if (res.status >= 500) throw new Error(`proxy-auth HTTP ${res.status}`);
     if (!res.ok) return { valid: false };
     return await res.json();
 }
@@ -136,6 +164,23 @@ function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []
     const pendingMessages = [];
     let clientClosed = false;
 
+    // Soniox reports a failure as one small JSON frame, then closes. The
+    // client only shows a generic message, so this log is where the actual
+    // cause (408 idle timeout, 400 context too long, 402 balance, 503 ...)
+    // can be read. Token frames are the hot path: skip them on sight.
+    function noteUpstreamError(data) {
+        if (data.length > 2048 || !data.includes('"error_code"')) return;
+        let msg;
+        try {
+            msg = JSON.parse(data.toString());
+        } catch (_) {
+            return;
+        }
+        if (msg.error_code == null) return;
+        fastifyLog.warn(`Soniox error ${msg.error_code} ${msg.error_type || ''} "${msg.error_message || ''}" (user ${userId}, key ${maskKey(apiKey)})`);
+        coolDownKey(apiKey, Number(msg.error_code), fastifyLog);
+    }
+
     // Process a single message (shared by early replay and live handler)
     function handleMessage(data, isBinary) {
         if (clientClosed) return;
@@ -162,12 +207,16 @@ function setupSonioxRelay(socket, userId, apiKey, fastifyLog, earlyMessages = []
                 });
 
                 sonioxWs.on('message', (sData, sIsBinary) => {
+                    if (!sIsBinary) noteUpstreamError(sData);
                     if (socket.readyState === WebSocket.OPEN) {
                         socket.send(sData, { binary: sIsBinary });
                     }
                 });
 
-                sonioxWs.on('close', () => {
+                sonioxWs.on('close', (code, reason) => {
+                    if (code !== 1000 && code !== 1005) {
+                        fastifyLog.warn(`Soniox closed ${code} ${reason} (user ${userId}, key ${maskKey(apiKey)})`);
+                    }
                     if (socket.readyState === WebSocket.OPEN) {
                         socket.close(1000, 'Soniox closed');
                     }
