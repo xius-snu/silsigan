@@ -72,7 +72,11 @@ async function verifyUser(userId, token, { checkUsage = false, checkPrivate = fa
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, tokenHash: hashToken(token), checkUsage, checkPrivate }),
-        signal: AbortSignal.timeout(10_000),
+        // Long enough for a Render cold start. While the check is pending the
+        // client's audio waits in memory and is replayed after, so cutting a
+        // slow-but-alive check short would lose it. The cap only stops a hung
+        // Render from piling up buffered audio for minutes.
+        signal: AbortSignal.timeout(60_000),
     });
     // Render down, deploying or erroring is not the client's credentials
     // being wrong: throw, so the caller closes with 4002 (retry) and the
