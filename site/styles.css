@@ -65,7 +65,7 @@ a {
   width: 100%;
   max-width: 920px;
   display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
+  grid-template-columns: 1.25fr 0.75fr;
   gap: 28px;
   align-items: center;
   margin-bottom: 48px;
@@ -77,7 +77,7 @@ a {
 }
 
 .hero {
-  padding: 48px 44px 40px;
+  padding: 48px 40px 40px;
 }
 
 .kicker {
@@ -110,10 +110,9 @@ h1 {
 }
 
 .downloads {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
 }
 
 .btn {
@@ -122,7 +121,7 @@ h1 {
   justify-content: center;
   gap: 10px;
   min-height: 52px;
-  padding: 14px 22px;
+  padding: 14px 18px;
   border-radius: 10px;
   background: var(--text);
   color: #fff;
@@ -130,6 +129,7 @@ h1 {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  text-align: center;
 }
 
 .btn:hover {
@@ -150,22 +150,6 @@ h1 {
 .os-icon.apple {
   width: 15px;
   height: 18px;
-}
-
-.stores {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.stores a {
-  color: var(--text-2);
-  text-decoration: none;
-  border-bottom: 1px solid var(--border);
-}
-
-.stores a:hover {
-  color: var(--text);
 }
 
 .sep {
@@ -429,14 +413,6 @@ h1 {
   .tagline {
     font-size: 16px;
     margin-bottom: 24px;
-  }
-
-  .downloads {
-    flex-direction: column;
-  }
-
-  .btn {
-    width: 100%;
   }
 
   .hero-wrap,
