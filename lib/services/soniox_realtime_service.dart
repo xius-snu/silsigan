@@ -141,10 +141,28 @@ class SonioxRealtimeService {
 
   // Word timestamps — per-utterance accumulation
   final List<WordTimestamp> _pendingWords = [];
+  // The non-final tail of the utterance. A stop or rotation emits that text
+  // too, and its words should stay tappable in the saved session.
+  List<WordTimestamp> _provisionalWords = [];
 
-  /// Word timestamps for the most recently completed utterance.
+  /// Word timestamps for the most recently completed utterance, on the
+  /// recording's timeline (see [sendAudio]).
   /// Read this synchronously inside the onTranscriptionCompleted callback.
   List<WordTimestamp> lastCompletedWords = [];
+
+  // ─── Recording timeline ───
+  // Soniox times each token from the start of the audio that session
+  // received, and a new session opens on every rotation, reconnect and
+  // restart. Saved word times used to restart near zero each time, so a tap
+  // on a word past the first rotation jumped back toward the start of the
+  // recording. The first chunk a session receives anchors its tokens instead.
+  int _nextAudioOffset = 0;
+  int? _sessionAudioOffset;
+
+  static int _bytesToMs(int bytes) =>
+      bytes * 1000 ~/ (AppConstants.sampleRate * AppConstants.numChannels * 2);
+
+  int get _sessionStartMs => _bytesToMs(_sessionAudioOffset ?? 0);
 
   // Context — set by the caller to improve accuracy on rotations
   String? contextText;
@@ -164,9 +182,10 @@ class SonioxRealtimeService {
   // without the transcript context, the only part of the config that grows.
   bool _omitContext = false;
 
-  // Audio buffer during reconnection — capped at 30s of audio to avoid OOM
+  // Audio buffer during reconnection — capped at 30s of audio to avoid OOM.
+  // Each chunk keeps its offset in the recording.
   static const _maxBufferBytes = 24000 * 2 * 30;
-  final Queue<Uint8List> _audioBuffer = Queue<Uint8List>();
+  final Queue<({Uint8List bytes, int offset})> _audioBuffer = Queue();
   int _audioBufferBytes = 0;
 
   // Session rotation — prevents translation model degradation in long sessions
@@ -262,6 +281,7 @@ class SonioxRealtimeService {
     _setReconnecting(false);
     _resetTokenState();
     _clearAudioBuffer();
+    _nextAudioOffset = 0;
     await _doConnect();
     // Callers may run connect() unawaited (optimistic recording start) and
     // disconnect() while the handshake is still in flight — that teardown
@@ -352,6 +372,8 @@ class SonioxRealtimeService {
       _subscription = null;
       final previous = _channel;
       _channel = channel;
+      // A fresh Soniox session: its clock starts at the first chunk it gets.
+      _sessionAudioOffset = null;
       if (previous != null && previous != channel) {
         try {
           await previous.sink.close();
@@ -619,12 +641,13 @@ class SonioxRealtimeService {
     }
     if (_pendingUtterance.isNotEmpty || _provisionalText.isNotEmpty) {
       if (willEmitTranscript) {
-        lastCompletedWords = List.from(_pendingWords);
+        lastCompletedWords = [..._pendingWords, ..._provisionalWords];
         _emitTranscriptionCompleted(utteranceText);
       }
       _pendingUtterance = '';
       _provisionalText = '';
       _pendingWords.clear();
+      _provisionalWords = [];
     }
   }
 
@@ -850,6 +873,8 @@ class SonioxRealtimeService {
     final hadProvisional = _provisionalText.isNotEmpty;
     String newProvisionalText = '';
     String newFinalText = '';
+    final newProvisionalWords = <WordTimestamp>[];
+    final sessionStartMs = _sessionStartMs;
 
     for (final token in tokens) {
       final text = token['text'] as String? ?? '';
@@ -878,19 +903,22 @@ class SonioxRealtimeService {
         }
       }
       if (text.startsWith('<') && text.endsWith('>')) continue;
+      final startMs = (token['start_ms'] as num?)?.toInt();
+      final word = startMs == null
+          ? null
+          : WordTimestamp(text, sessionStartMs + startMs);
       if (isFinal) {
         newFinalText += text;
-        final startMs = token['start_ms'] as int?;
-        if (startMs != null) {
-          _pendingWords.add(WordTimestamp(text, startMs));
-        }
+        if (word != null) _pendingWords.add(word);
       } else {
         newProvisionalText += text;
+        if (word != null) newProvisionalWords.add(word);
       }
     }
 
     _pendingUtterance += newFinalText;
     _provisionalText = newProvisionalText;
+    _provisionalWords = newProvisionalWords;
 
     // Safety cap on transcription buffer (same logic as translation)
     if (_pendingUtterance.length > 2000) {
@@ -902,6 +930,7 @@ class SonioxRealtimeService {
       _pendingUtterance = '';
       _provisionalText = '';
       _pendingWords.clear();
+      _provisionalWords = [];
       _rotateSession();
       return;
     }
@@ -1022,21 +1051,26 @@ class SonioxRealtimeService {
 
   // ─── Audio sending ───
 
-  void sendAudio(Uint8List audioBytes) {
+  /// [recordingOffset] is where these bytes sit in the saved recording.
+  /// Without it, chunks are taken to follow one another from [connect] on.
+  void sendAudio(Uint8List audioBytes, {int? recordingOffset}) {
+    final offset = recordingOffset ?? _nextAudioOffset;
+    _nextAudioOffset = offset + audioBytes.length;
     if (_intentionallyClosed) return;
 
     if (_isReconnecting || _isRotating || _channel == null) {
-      _audioBuffer.addLast(audioBytes);
+      _audioBuffer.addLast((bytes: audioBytes, offset: offset));
       _audioBufferBytes += audioBytes.length;
       while (_audioBufferBytes > _maxBufferBytes && _audioBuffer.isNotEmpty) {
         final removed = _audioBuffer.removeFirst();
-        _audioBufferBytes -= removed.length;
+        _audioBufferBytes -= removed.bytes.length;
       }
       return;
     }
 
     try {
       _channel!.sink.add(audioBytes);
+      _sessionAudioOffset ??= offset;
       _lastSentAt = DateTime.now();
     } catch (_) {}
   }
@@ -1045,14 +1079,17 @@ class SonioxRealtimeService {
     if (_channel == null) return;
     var sent = false;
     while (_audioBuffer.isNotEmpty) {
+      final chunk = _audioBuffer.first;
       try {
-        _channel!.sink.add(_audioBuffer.removeFirst());
-        sent = true;
+        _channel!.sink.add(chunk.bytes);
       } catch (_) {
         break;
       }
+      _audioBuffer.removeFirst();
+      _audioBufferBytes -= chunk.bytes.length;
+      _sessionAudioOffset ??= chunk.offset;
+      sent = true;
     }
-    _audioBufferBytes = 0;
     if (sent) _lastSentAt = DateTime.now();
   }
 
@@ -1291,6 +1328,7 @@ class SonioxRealtimeService {
     _pendingTranslation = '';
     _provisionalTranslation = '';
     _pendingWords.clear();
+    _provisionalWords = [];
     currentSourceLanguage = null;
     currentTranslationSourceLanguage = null;
     // Speaker numbering restarts with each Soniox session (rotation/reconnect
@@ -1333,12 +1371,13 @@ class SonioxRealtimeService {
     if (_pendingUtterance.isNotEmpty || _provisionalText.isNotEmpty) {
       final text = (_pendingUtterance + _provisionalText).trim();
       if (text.isNotEmpty) {
-        lastCompletedWords = List.from(_pendingWords);
+        lastCompletedWords = [..._pendingWords, ..._provisionalWords];
         _pendingWords.clear();
         _emitTranscriptionCompleted(text);
       }
       _pendingUtterance = '';
       _provisionalText = '';
+      _provisionalWords = [];
     }
 
     try {

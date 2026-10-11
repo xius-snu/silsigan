@@ -183,7 +183,10 @@ class AudioService {
   String? _tempFilePath;
   int _pcmBytesWritten = 0;
 
-  Function(Uint8List)? onAudioChunk;
+  /// Each chunk as it is written to the recording, with its byte offset in
+  /// the recording's PCM data (the saved WAV minus its header). A continued
+  /// session appends, so offsets carry on from the earlier part.
+  void Function(Uint8List bytes, int recordingOffset)? onAudioChunk;
 
   bool get _useRecord => !Platform.isIOS;
 
@@ -712,11 +715,12 @@ class AudioService {
       bytes = _pending.takeBytes();
     }
     if (bytes.isEmpty) return;
+    final offset = _pcmBytesWritten;
     // One disk write per tick instead of one per recorder callback — the
     // recorder delivers many small buffers per second and each writeFromSync
     // was a blocking syscall on the UI isolate.
     _writeToDisk(bytes);
-    onAudioChunk?.call(bytes);
+    onAudioChunk?.call(bytes, offset);
   }
 
   Future<void> stop() async {

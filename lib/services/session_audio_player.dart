@@ -27,6 +27,7 @@ class SessionAudioPlayer {
   bool _wavePaused = false;
   bool _suppressFinish = false;
   void Function(Duration position, Duration duration)? _onProgress;
+  String? _loadedPath;
 
   bool get _waveOut => !kIsWeb && Platform.isWindows;
 
@@ -35,6 +36,11 @@ class SessionAudioPlayer {
   bool get isPaused => _waveOut
       ? _wavePaused
       : (_audioPlayers ? _apPaused : (_fs?.isPaused ?? false));
+
+  /// The file the last [startPlayer] played, until it stops or finishes.
+  /// Resume and seek must check it: the history sheet once resumed a paused
+  /// recording after the user had opened another session.
+  String? get loadedPath => _loadedPath;
 
   Future<void> openPlayer({
     required void Function(Duration position, Duration duration) onProgress,
@@ -69,6 +75,7 @@ class SessionAudioPlayer {
   }
 
   Future<void> closePlayer() async {
+    _loadedPath = null;
     _wavePoll?.cancel();
     _wavePoll = null;
     _suppressFinish = true;
@@ -94,6 +101,8 @@ class SessionAudioPlayer {
   }
 
   Future<void> stopPlayer() async {
+    _loadedPath = null;
+    _apDuration = Duration.zero;
     _wavePaused = false;
     _apPaused = false;
     _suppressFinish = true;
@@ -145,7 +154,13 @@ class SessionAudioPlayer {
     Codec? codec,
     VoidCallback? whenFinished,
   }) async {
-    _whenFinished = whenFinished;
+    _loadedPath = fromURI;
+    void finished() {
+      if (_loadedPath == fromURI) _loadedPath = null;
+      whenFinished?.call();
+    }
+
+    _whenFinished = finished;
     if (_waveOut) {
       _wavePaused = false;
       _suppressFinish = false;
@@ -155,13 +170,15 @@ class SessionAudioPlayer {
     }
     if (_audioPlayers) {
       _apPaused = false;
+      // The previous recording's length until this one reports its own.
+      _apDuration = Duration.zero;
       await _ap!.play(DeviceFileSource(fromURI, mimeType: 'audio/wav'));
       return;
     }
     await _fs!.startPlayer(
       fromURI: fromURI,
       codec: codec ?? Codec.pcm16WAV,
-      whenFinished: whenFinished,
+      whenFinished: finished,
     );
   }
 

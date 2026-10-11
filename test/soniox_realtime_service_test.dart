@@ -19,6 +19,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:silsigan/models/word_timestamp.dart';
 import 'package:silsigan/services/soniox_realtime_service.dart';
 
 class _Conn {
@@ -75,6 +76,19 @@ class _FakeProxy {
   String get url => 'ws://127.0.0.1:${_server.port}/ws/soniox-limited';
 
   Future<void> close() => _server.close(force: true);
+}
+
+/// Soniox hears [word] at [startMs] of that session's audio, first as a
+/// provisional token and then final: the endpoint that completes an
+/// utterance.
+void _sayWord(_Conn conn, String word, int startMs) {
+  for (final isFinal in [false, true]) {
+    conn.ws.add(jsonEncode({
+      'tokens': [
+        {'text': word, 'is_final': isFinal, 'start_ms': startMs},
+      ],
+    }));
+  }
 }
 
 Future<void> _waitFor(bool Function() done,
@@ -264,6 +278,66 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 200));
       expect(proxy.connections.length, 1);
       expect(service.isClosed, isTrue);
+    });
+
+    // Saved word times used to be Soniox-session times, which restart at
+    // every rotation and reconnect: a tap on a word past the first ten
+    // minutes of a recording jumped back near its start.
+    test('word times stay on the recording timeline across a reconnect',
+        () async {
+      proxy.onConfig = (conn) => conn.sendEmptyResponse();
+      final completed = <List<WordTimestamp>>[];
+      service
+        ..reconnectBaseDelay = const Duration(milliseconds: 300)
+        ..onTranscriptionCompleted =
+            (_) => completed.add(List.of(service.lastCompletedWords));
+      await service.connect(targetLanguageCode: 'en');
+      // The first second of the recording.
+      service.sendAudio(Uint8List(48000), recordingOffset: 0);
+      await _waitFor(() =>
+          proxy.connections.isNotEmpty &&
+          proxy.connections.single.audioBytes == 48000);
+      _sayWord(proxy.connections.single, 'hello', 500);
+      await _waitFor(() => completed.length == 1);
+      expect(completed[0].single.startMs, 500);
+
+      // The link drops. Audio from 2 s into the recording waits for the
+      // next session, whose clock starts at that audio.
+      await proxy.connections.single.ws.close(1001);
+      await _waitFor(() => !service.isConnected);
+      service.sendAudio(Uint8List(4800), recordingOffset: 96000);
+      await _waitFor(() =>
+          proxy.connections.length == 2 &&
+          proxy.connections[1].audioBytes == 4800);
+      _sayWord(proxy.connections[1], 'again', 30);
+      await _waitFor(() => completed.length == 2);
+      expect(completed[1].single.startMs, 2030);
+    });
+
+    test('a long outage times the next session from the audio it kept',
+        () async {
+      proxy.onConfig = (conn) => conn.sendEmptyResponse();
+      final completed = <List<WordTimestamp>>[];
+      service
+        ..reconnectBaseDelay = const Duration(milliseconds: 300)
+        ..onTranscriptionCompleted =
+            (_) => completed.add(List.of(service.lastCompletedWords));
+      await service.connect(targetLanguageCode: 'en');
+      await _waitFor(() =>
+          proxy.connections.isNotEmpty &&
+          proxy.connections.single.config != null);
+      await proxy.connections.single.ws.close(1001);
+      await _waitFor(() => !service.isConnected);
+      // 31 one-second chunks from 2 s on; the buffer keeps the last 30 s.
+      for (var i = 0; i < 31; i++) {
+        service.sendAudio(Uint8List(48000), recordingOffset: 96000 + i * 48000);
+      }
+      await _waitFor(() =>
+          proxy.connections.length == 2 &&
+          proxy.connections[1].audioBytes == 30 * 48000);
+      _sayWord(proxy.connections[1], 'kept', 0);
+      await _waitFor(() => completed.length == 1);
+      expect(completed.single.single.startMs, 3000);
     });
 
     test('a throwing UI callback does not break the stream', () async {

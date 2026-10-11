@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/transcript_session.dart';
+import 'session_audio_files.dart';
 
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
@@ -285,16 +286,21 @@ class DatabaseService {
       whereArgs: [createdAt],
     );
     for (final map in maps) {
-      final audioPath = map['audio_path'] as String?;
-      if (audioPath != null) {
-        final file = File(audioPath);
-        if (await file.exists()) {
-          await file.delete();
-        }
-      }
+      await _deleteAudio(map['audio_path'] as String?);
     }
     await db
         .delete('sessions', where: 'created_at = ?', whereArgs: [createdAt]);
+  }
+
+  /// Removes a session's recording wherever it now lives (see
+  /// [SessionAudioFiles]). A file that can't be removed must not keep the
+  /// session from being deleted.
+  Future<void> _deleteAudio(String? audioPath) async {
+    final path = await SessionAudioFiles.resolve(audioPath);
+    if (path == null) return;
+    try {
+      await File(path).delete();
+    } catch (_) {}
   }
 
   Future<void> addTombstone(String createdAt, {bool synced = false}) async {
@@ -445,12 +451,7 @@ class DatabaseService {
     if (session != null) {
       await addTombstone(session.createdAt);
     }
-    if (session?.audioPath != null) {
-      final file = File(session!.audioPath!);
-      if (await file.exists()) {
-        await file.delete();
-      }
-    }
+    await _deleteAudio(session?.audioPath);
     final db = await database;
     return db.delete('sessions', where: 'id = ?', whereArgs: [id]);
   }

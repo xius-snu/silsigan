@@ -13,24 +13,32 @@ import '../../models/word_timestamp.dart';
 import '../../providers/account_provider.dart';
 import '../../providers/session_history_provider.dart';
 import '../../services/database_service.dart';
+import '../../services/session_audio_files.dart';
 import '../../services/session_audio_player.dart';
 import '../../services/sync_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/text_direction_utils.dart';
+import '../../utils/word_timeline.dart';
 import 'account_sheet.dart';
 import 'session_card.dart';
 
-/// Isolate entry for parsing a saved session's per-word timestamps — the JSON
-/// carries one entry per word, so a long session decoded inline janked the
-/// open animation.
-List<List<WordTimestamp>> _parseTimestampsJson(String json) {
-  final raw = jsonDecode(json) as List;
-  return raw
+/// Isolate entry: a saved session's word timestamps (`args[0]`, JSON) on the
+/// recording's timeline and matched to its transcript as it reads now
+/// (`args[1]`). Returns per transcript line the spans [alignWordSpans]
+/// describes. The JSON carries one entry per word, so a long session decoded
+/// inline janked the open animation.
+List<List<int>> _wordSpansFor(List<String> args) {
+  final raw = jsonDecode(args[0]) as List;
+  final words = raw
       .map((line) => (line as List)
           .map((w) => WordTimestamp.fromJson(w as Map<String, dynamic>))
           .toList())
       .toList();
+  return alignWordSpans(
+    args[1].split('\n'),
+    wordsOnRecordingTimeline(words),
+  );
 }
 
 enum _SessionTextField { transcription, translation }
@@ -68,8 +76,18 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   final SessionAudioPlayer _player = SessionAudioPlayer();
   bool _playerInitialized = false;
 
-  // Word timestamps for tap-to-seek (per-line, for transcription)
-  List<List<WordTimestamp>>? _parsedTimestamps;
+  /// The selected session's recording as it is found now (see
+  /// [SessionAudioFiles]); null when it has none or it isn't on this device.
+  String? _audioFile;
+
+  // Bumped whenever playback stops or the selection changes, so a start
+  // still in flight can't play over the next session.
+  int _playbackEpoch = 0;
+
+  // Tap-to-seek spans per transcription line (see alignWordSpans), for the
+  // transcription text in [_wordSpansText]. An edit re-matches them.
+  List<List<int>>? _wordSpans;
+  String? _wordSpansText;
   bool _isPlaying = false;
 
   // Playback position/duration as notifiers, NOT setState fields: the
@@ -176,10 +194,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
   void _selectSession(TranscriptSession session) async {
     final epoch = ++_selectEpoch;
-    // Stop any playing audio when switching
-    if (_isPlaying) {
-      await _player.stopPlayer();
-    }
+    // Stop the previous recording even when it's only paused: a paused
+    // player used to be resumed by this session's play button, playing the
+    // other recording from where it was left.
+    await _stopPlayback();
     // Always re-read from SQLite so a just-saved edit (or a cloud pull
     // that landed while the list was cached) is what we display.
     if (session.id != null) {
@@ -187,51 +205,54 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
       if (fresh != null) session = fresh;
     }
     if (!mounted || epoch != _selectEpoch) return;
-    // Parse word timestamps off the UI isolate if available
-    List<List<WordTimestamp>>? timestamps;
-    if (session.timestampsJson != null) {
+    final audioFile = await SessionAudioFiles.resolve(session.audioPath);
+    var duration = Duration.zero;
+    if (audioFile != null) {
       try {
-        timestamps =
-            await compute(_parseTimestampsJson, session.timestampsJson!);
+        // Duration from the file size: 44-byte header, then PCM16.
+        final dataSize = await File(audioFile).length() - 44;
+        const bytesPerSecond =
+            AppConstants.sampleRate * AppConstants.numChannels * 2;
+        duration = Duration(
+          milliseconds: (dataSize / bytesPerSecond * 1000).round(),
+        );
+      } catch (_) {}
+    }
+    // Word spans off the UI isolate; only a recording on this device gives
+    // a tap somewhere to seek to.
+    List<List<int>>? spans;
+    if (audioFile != null && session.timestampsJson != null) {
+      try {
+        spans = await compute(
+          _wordSpansFor,
+          [session.timestampsJson!, session.koreanFull],
+        );
       } catch (_) {}
     }
     if (!mounted || epoch != _selectEpoch) return;
     setState(() {
       _selectedSession = session;
-      _parsedTimestamps = timestamps;
+      _audioFile = audioFile;
+      _wordSpans = spans;
+      _wordSpansText = spans == null ? null : session.koreanFull;
       _isPlaying = false;
       _editingBox = null;
       _reachedTranscriptBottom = false;
       _showJumpToTop = false;
     });
     _position.value = Duration.zero;
-    _duration.value = Duration.zero;
-    // Calculate duration from file
-    if (session.audioPath != null) {
-      final file = File(session.audioPath!);
-      if (await file.exists()) {
-        final fileSize = await file.length();
-        final dataSize = fileSize - 44;
-        final bytesPerSecond =
-            AppConstants.sampleRate * AppConstants.numChannels * 2;
-        final durationSecs = dataSize / bytesPerSecond;
-        if (mounted && epoch == _selectEpoch) {
-          _duration.value =
-              Duration(milliseconds: (durationSecs * 1000).round());
-        }
-      }
-    }
+    _duration.value = duration > Duration.zero ? duration : Duration.zero;
   }
 
   void _goBackToList() async {
     await _saveTextEdit();
-    if (_isPlaying) {
-      await _player.stopPlayer();
-    }
+    await _stopPlayback();
     if (!mounted) return;
     setState(() {
       _selectedSession = null;
-      _parsedTimestamps = null;
+      _audioFile = null;
+      _wordSpans = null;
+      _wordSpansText = null;
       _isPlaying = false;
       _isEditingTitle = false;
       _editingBox = null;
@@ -240,6 +261,38 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     });
     _position.value = Duration.zero;
     _duration.value = Duration.zero;
+  }
+
+  /// Stops playback, paused included, and drops the loaded recording.
+  /// Callers reset [_isPlaying] in their own setState.
+  Future<void> _stopPlayback() async {
+    _playbackEpoch++;
+    if (!_playerInitialized) return;
+    if (!_isPlaying && !_player.isPaused && _player.loadedPath == null) return;
+    try {
+      await _player.stopPlayer().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+  }
+
+  /// Re-matches tap-to-seek spans after the transcription text was edited.
+  Future<void> _refreshWordSpans() async {
+    final session = _selectedSession;
+    final json = session?.timestampsJson;
+    if (session == null || json == null || _audioFile == null) return;
+    final text = session.koreanFull;
+    if (text == _wordSpansText) return;
+    final epoch = _selectEpoch;
+    List<List<int>>? spans;
+    try {
+      spans = await compute(_wordSpansFor, [json, text]);
+    } catch (_) {}
+    if (!mounted || epoch != _selectEpoch) return;
+    // Edited again while matching: that edit's own refresh lands instead.
+    if (_selectedSession?.koreanFull != text) return;
+    setState(() {
+      _wordSpans = spans;
+      _wordSpansText = text;
+    });
   }
 
   void _startEditingTitle() {
@@ -409,6 +462,9 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     _PendingTextEdit pending, {
     required bool updateUi,
   }) async {
+    if (updateUi && pending.field == _SessionTextField.transcription) {
+      unawaited(_refreshWordSpans());
+    }
     await DatabaseService.instance.updateSessionText(
       id: pending.id,
       koreanFull: pending.field == _SessionTextField.transcription
@@ -435,16 +491,22 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     ref.invalidate(sessionHistoryProvider);
   }
 
+  /// Whether the player holds the selected session's recording (playing or
+  /// paused), as opposed to nothing or another session's.
+  bool get _playerHoldsSelected =>
+      _audioFile != null && _player.loadedPath == _audioFile;
+
   Future<void> _playPause() async {
     if (!_playerInitialized) return;
-    final audioPath = _selectedSession?.audioPath;
+    final audioPath = _audioFile;
     if (audioPath == null) return;
+    final epoch = _playbackEpoch;
 
     try {
       if (_isPlaying) {
         await _player.pausePlayer();
         if (mounted) setState(() => _isPlaying = false);
-      } else if (_player.isPaused) {
+      } else if (_player.isPaused && _playerHoldsSelected) {
         await _player.resumePlayer();
         if (mounted) setState(() => _isPlaying = true);
       } else {
@@ -456,6 +518,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           }
           return;
         }
+        if (epoch != _playbackEpoch) return;
         final seekTarget =
             _position.value > Duration.zero ? _position.value : null;
         if (mounted) setState(() => _isPlaying = true);
@@ -463,12 +526,17 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           fromURI: audioPath,
           codec: Codec.pcm16WAV,
           whenFinished: () {
-            if (mounted) {
+            if (mounted && epoch == _playbackEpoch) {
               setState(() => _isPlaying = false);
               _position.value = Duration.zero;
             }
           },
         );
+        // Back or another session while the player was starting.
+        if (epoch != _playbackEpoch) {
+          if (_player.loadedPath == audioPath) await _player.stopPlayer();
+          return;
+        }
         // If user tapped a word before playing, seek to that position
         if (seekTarget != null) {
           await Future.delayed(const Duration(milliseconds: 50));
@@ -488,7 +556,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   Future<void> _seekRelative(int seconds) async {
-    if (!_playerInitialized) return;
+    if (!_playerInitialized || !_playerHoldsSelected) return;
     if (!_isPlaying && !_player.isPaused) return;
     final newPos = _position.value + Duration(seconds: seconds);
     final clamped = newPos < Duration.zero
@@ -498,7 +566,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   Future<void> _seekTo(Duration position) async {
-    if (!_playerInitialized) return;
+    if (!_playerInitialized || !_playerHoldsSelected) return;
     if (!_isPlaying && !_player.isPaused) return;
     await _player.seekToPlayer(position);
   }
@@ -507,16 +575,16 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   /// - If playing: seek and continue playing.
   /// - If paused or stopped: just update position visually (no auto-play).
   Future<void> _seekToMs(int ms) async {
-    if (!_playerInitialized) return;
-    final audioPath = _selectedSession?.audioPath;
-    if (audioPath == null) return;
+    if (!_playerInitialized || _audioFile == null) return;
 
-    final target = Duration(milliseconds: ms);
+    var target = Duration(milliseconds: ms);
+    final duration = _duration.value;
+    if (duration > Duration.zero && target > duration) target = duration;
 
-    if (_isPlaying) {
+    if (_isPlaying && _playerHoldsSelected) {
       // Currently playing — seek and continue
       await _player.seekToPlayer(target);
-    } else if (_player.isPaused) {
+    } else if (_player.isPaused && _playerHoldsSelected) {
       // Paused — seek but stay paused, update UI
       await _player.seekToPlayer(target);
       _position.value = target;
@@ -527,7 +595,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   }
 
   Future<void> _shareAudio() async {
-    final audioPath = _selectedSession?.audioPath;
+    final audioPath = _audioFile;
     if (audioPath == null) return;
     final file = File(audioPath);
     if (!await file.exists()) {
@@ -578,7 +646,9 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     );
 
     if (confirmed == true && _selectedSession?.id != null) {
-      if (_isPlaying) await _player.stopPlayer();
+      // Paused counts too: the Windows player keeps the WAV open, and an
+      // open file can't be deleted there.
+      await _stopPlayback();
       final createdAt = _selectedSession!.createdAt;
       await DatabaseService.instance.deleteSession(_selectedSession!.id!);
       unawaited(SyncService.instance.deleteFromServer(createdAt).then((ok) {
@@ -809,8 +879,13 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     final session = _selectedSession!;
     final koreanLines = session.koreanFull.split('\n');
     final vietnameseLines = session.vietnameseFull.split('\n');
-    final hasAudio = session.audioPath != null;
+    final hasAudio = _audioFile != null;
+    // Recorded with audio, but the file is no longer on this device.
+    final audioMissing = !hasAudio && session.audioPath != null;
     final hasTranslation = session.vietnameseFull.trim().isNotEmpty;
+    // Spans matched to an older text would point at the wrong words.
+    final wordSpans =
+        hasAudio && _wordSpansText == session.koreanFull ? _wordSpans : null;
 
     return Column(
       key: const ValueKey('history-detail'),
@@ -917,7 +992,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                         label: 'TRANSCRIPTION',
                         lines: koreanLines,
                         fullText: session.koreanFull,
-                        timestamps: hasAudio ? _parsedTimestamps : null,
+                        wordSpans: wordSpans,
                       ),
                       if (hasTranslation) ...[
                         const SliverToBoxAdapter(child: SizedBox(height: 5)),
@@ -930,7 +1005,8 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                       ],
                       SliverToBoxAdapter(
                         child: SizedBox(
-                          height: 16 + (hasAudio ? 0 : _androidNavInset),
+                          height: 16 +
+                              (hasAudio || audioMissing ? 0 : _androidNavInset),
                         ),
                       ),
                     ],
@@ -963,8 +1039,42 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           ),
         ),
         // Audio player
-        if (hasAudio) _buildAudioPlayer(),
+        if (hasAudio)
+          _buildAudioPlayer()
+        else if (audioMissing)
+          _buildMissingAudioNote(),
       ],
+    );
+  }
+
+  /// In place of the player when the recording isn't on this device (the
+  /// app was deleted and reinstalled, say), instead of a 00:00 player whose
+  /// button does nothing.
+  Widget _buildMissingAudioNote() {
+    return Container(
+      width: double.infinity,
+      color: AppConstants.panelColor,
+      padding: EdgeInsets.only(
+          left: 20, right: 20, top: 14, bottom: 18 + _androidNavInset),
+      child: Row(
+        children: [
+          Icon(
+            Icons.music_off_outlined,
+            size: 20,
+            color: AppConstants.textSecondary.withOpacity(0.7),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              "This session's audio isn't on this device.",
+              style: TextStyle(
+                fontSize: 13,
+                color: AppConstants.textSecondary.withOpacity(0.8),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1132,7 +1242,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     required String label,
     required List<String> lines,
     required String fullText,
-    List<List<WordTimestamp>>? timestamps,
+    List<List<int>>? wordSpans,
   }) {
     final hasText = fullText.trim().isNotEmpty;
     final isEditing = _editingBox == field;
@@ -1190,10 +1300,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
 
                 final lineIdx = index - 2;
                 final line = lines[lineIdx];
-                final words = (timestamps != null &&
-                        lineIdx < timestamps.length &&
-                        timestamps[lineIdx].isNotEmpty)
-                    ? timestamps[lineIdx]
+                final spans = (wordSpans != null &&
+                        lineIdx < wordSpans.length &&
+                        wordSpans[lineIdx].isNotEmpty)
+                    ? wordSpans[lineIdx]
                     : null;
 
                 // Align start, not stretch: sliver rows span the full width,
@@ -1204,10 +1314,10 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Align(
                     alignment: Alignment.centerLeft,
-                    child: words != null
+                    child: spans != null
                         ? _TappableTimestampLine(
                             line: line,
-                            words: words,
+                            spans: spans,
                             onSeek: _seekToMs,
                           )
                         : Text(
@@ -1321,14 +1431,17 @@ class _PendingTextEdit {
 /// both keeps a multi-thousand-word session smooth.
 class _TappableTimestampLine extends StatefulWidget {
   final String line;
-  final List<WordTimestamp> words;
+
+  /// Flat `[start, end, ms]` triples from [alignWordSpans]: the characters of
+  /// [line] a word covers and where it starts in the recording.
+  final List<int> spans;
 
   /// Called with the tapped word's start offset in milliseconds.
   final ValueChanged<int> onSeek;
 
   const _TappableTimestampLine({
     required this.line,
-    required this.words,
+    required this.spans,
     required this.onSeek,
   });
 
@@ -1365,7 +1478,7 @@ class _TappableTimestampLineState extends State<_TappableTimestampLine> {
     // A recycled list element can be handed a different line (e.g. switching
     // sessions) — recompute the segment cache for the new content.
     if (widget.line != oldWidget.line ||
-        !identical(widget.words, oldWidget.words)) {
+        !identical(widget.spans, oldWidget.spans)) {
       _disposeSegments();
       _computeSegments();
       _highlightTimer?.cancel();
@@ -1387,31 +1500,29 @@ class _TappableTimestampLineState extends State<_TappableTimestampLine> {
     _segments.clear();
   }
 
-  /// Words are matched sequentially: walk through the line text finding each
-  /// timestamp token, making matched portions tappable and gaps plain text.
+  /// Matched words become tappable; the text between them stays plain.
   void _computeSegments() {
     final line = widget.line;
+    final spans = widget.spans;
     int cursor = 0;
     int wordIdx = 0;
-    for (final wt in widget.words) {
-      final token = wt.text;
-      if (token.isEmpty) continue;
-
-      // Find this token in the remaining line text
-      final idx = line.indexOf(token, cursor);
-      if (idx < 0) continue;
+    for (var i = 0; i + 2 < spans.length; i += 3) {
+      final start = spans[i];
+      final end = spans[i + 1];
+      final startMs = spans[i + 2];
+      if (start < cursor || end <= start || end > line.length) continue;
 
       final currentWordIdx = wordIdx;
       final recognizer = TapGestureRecognizer()
-        ..onTap = () => _onWordTap(currentWordIdx, wt.startMs);
+        ..onTap = () => _onWordTap(currentWordIdx, startMs);
       _segments.add(_WordSegment(
-        idx > cursor ? line.substring(cursor, idx) : '',
-        token,
+        line.substring(cursor, start),
+        line.substring(start, end),
         currentWordIdx,
         recognizer,
       ));
 
-      cursor = idx + token.length;
+      cursor = end;
       wordIdx++;
     }
     _trailing = cursor < line.length ? line.substring(cursor) : '';

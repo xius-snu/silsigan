@@ -23,6 +23,7 @@ import '../../services/database_service.dart';
 import '../../services/tts_service.dart';
 import '../../providers/tts_provider.dart';
 import '../../utils/constants.dart';
+import '../../utils/word_timeline.dart';
 import '../widgets/transcript_panel.dart';
 import '../widgets/record_button.dart';
 import '../widgets/save_discard_row.dart';
@@ -87,7 +88,9 @@ List<String> _encodeAutosaveDraft(List<Object> args) {
 /// wordTimestampsPerLine]`. An hour-long draft is a multi-MB payload with
 /// tens of thousands of word timestamps — decoded on the UI isolate it
 /// blocked the first frames of every relaunch until the draft was
-/// saved or discarded.
+/// saved or discarded. A draft an older version wrote holds Soniox-session
+/// times; they go on the recording's timeline here, before a continued
+/// recording appends words that are already on it.
 List<Object> _decodeAutosaveDraft(List<String?> args) {
   final koreanHistory = (jsonDecode(args[0]!) as List).cast<String>();
   final vietnameseHistory = (jsonDecode(args[1]!) as List).cast<String>();
@@ -102,7 +105,11 @@ List<Object> _decodeAutosaveDraft(List<String?> args) {
       );
     }
   }
-  return [koreanHistory, vietnameseHistory, timestamps];
+  return [
+    koreanHistory,
+    vietnameseHistory,
+    wordsOnRecordingTimeline(timestamps),
+  ];
 }
 
 /// Isolate entry for session-save serialization (see `_saveSession`). [args]
@@ -1482,9 +1489,11 @@ class _MainScreenState extends ConsumerState<MainScreen>
       _showSonioxError(error);
     };
 
-    // Set up audio callback
-    _audioService.onAudioChunk = (bytes) {
-      _sonioxService.sendAudio(bytes);
+    // Set up audio callback. The offset puts saved word timestamps on the
+    // recording's timeline, across rotations, reconnects and continued
+    // recordings.
+    _audioService.onAudioChunk = (bytes, recordingOffset) {
+      _sonioxService.sendAudio(bytes, recordingOffset: recordingOffset);
     };
 
     try {
@@ -2299,7 +2308,13 @@ class _MainScreenState extends ConsumerState<MainScreen>
 
       // Recover audio from the crash: the PCM the recorder streamed to disk may
       // still be there. Adopt it so a subsequent Save includes the audio.
-      await _audioService.adoptOrphanRecording();
+      if (!await _audioService.adoptOrphanRecording()) {
+        // Gone (the OS can clear temp files): these lines have no audio, and
+        // a continued recording starts a new file their times don't fit.
+        for (var i = 0; i < _wordTimestampsPerLine.length; i++) {
+          _wordTimestampsPerLine[i] = <WordTimestamp>[];
+        }
+      }
 
       // Show recovery notification
       if (mounted) {
@@ -2568,7 +2583,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
     final theirLang = ref.read(theirLanguageProvider);
 
     _setupConversationCallbacks();
-    _audioService.onAudioChunk = (bytes) => _sonioxService.sendAudio(bytes);
+    // Conversation audio isn't saved, so its place in the recording is moot.
+    _audioService.onAudioChunk = (bytes, _) => _sonioxService.sendAudio(bytes);
 
     try {
       await BackgroundService.startRecordingService();
