@@ -18,10 +18,12 @@ import '../../services/session_audio_player.dart';
 import '../../services/sync_service.dart';
 import '../../services/user_service.dart';
 import '../../utils/constants.dart';
+import '../../utils/desktop.dart';
 import '../../utils/text_direction_utils.dart';
 import '../../utils/word_timeline.dart';
 import 'account_sheet.dart';
 import 'session_card.dart';
+import 'transcript_rows.dart';
 
 /// Isolate entry: a saved session's word timestamps (`args[0]`, JSON) on the
 /// recording's timeline and matched to its transcript as it reads now
@@ -89,6 +91,14 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
   List<List<int>>? _wordSpans;
   String? _wordSpansText;
   bool _isPlaying = false;
+
+  // Desktop only: the open session's line heights, so the scroll extent of
+  // the rows not built yet is exact and the scrollbar holds still (see
+  // TranscriptRowHeights). Measured a slice per event-loop turn.
+  TranscriptRowHeights? _transcriptRows;
+  TranscriptRowHeights? _translationRows;
+  Timer? _rowMeasureTimer;
+  int _rowHeightsGeneration = 0;
 
   // Playback position/duration as notifiers, NOT setState fields: the
   // progress stream ticks at 10Hz during playback, and a sheet-level
@@ -183,6 +193,7 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     _textEditController.dispose();
     _position.dispose();
     _duration.dispose();
+    _rowMeasureTimer?.cancel();
     if (pending != null) {
       unawaited(_persistTextEdit(pending, updateUi: false));
     }
@@ -248,11 +259,15 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     await _saveTextEdit();
     await _stopPlayback();
     if (!mounted) return;
+    _rowMeasureTimer?.cancel();
+    _rowMeasureTimer = null;
     setState(() {
       _selectedSession = null;
       _audioFile = null;
       _wordSpans = null;
       _wordSpansText = null;
+      _transcriptRows = null;
+      _translationRows = null;
       _isPlaying = false;
       _isEditingTitle = false;
       _editingBox = null;
@@ -292,6 +307,93 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     setState(() {
       _wordSpans = spans;
       _wordSpansText = text;
+    });
+  }
+
+  /// Keeps [_transcriptRows] and [_translationRows] measured for [session]
+  /// as laid out at [viewportWidth]. Desktop only: phones show no scrollbar,
+  /// so the estimated extent there costs nothing to leave alone.
+  void _measureRows(
+    BuildContext context,
+    double viewportWidth,
+    TranscriptSession session,
+  ) {
+    if (!isDesktopPlatform) return;
+    // Less the boxes' outer (16) and inner horizontal padding.
+    final maxWidth = viewportWidth - 32 - 2 * AppConstants.panelPaddingH;
+    if (maxWidth <= 0) {
+      _transcriptRows = null;
+      _translationRows = null;
+      return;
+    }
+    // What each line's Text lays out with.
+    final defaults = DefaultTextStyle.of(context);
+    var style = defaults.style.merge(const TextStyle(
+      fontSize: AppConstants.contentFontSize,
+      height: 1.5,
+    ));
+    if (MediaQuery.boldTextOf(context)) {
+      style = style.merge(const TextStyle(fontWeight: FontWeight.bold));
+    }
+    final textScaler = MediaQuery.textScalerOf(context);
+    final locale = Localizations.maybeLocaleOf(context);
+    final heightBehavior = defaults.textHeightBehavior ??
+        DefaultTextHeightBehavior.maybeOf(context);
+
+    TranscriptRowHeights fit(TranscriptRowHeights? current, String text) {
+      if (current != null &&
+          current.fits(
+            text: text,
+            maxWidth: maxWidth,
+            style: style,
+            textScaler: textScaler,
+            locale: locale,
+            textHeightBehavior: heightBehavior,
+          )) {
+        return current;
+      }
+      final next = TranscriptRowHeights(
+        text: text,
+        maxWidth: maxWidth,
+        style: style,
+        textScaler: textScaler,
+        locale: locale,
+        textHeightBehavior: heightBehavior,
+      );
+      // A first slice now, so a short session is exact from its first
+      // frame. A window resize remeasures in the background instead.
+      if (current?.text != text) {
+        next.measure(const Duration(milliseconds: 4));
+      }
+      return next;
+    }
+
+    _transcriptRows = fit(_transcriptRows, session.koreanFull);
+    _translationRows = session.vietnameseFull.trim().isEmpty
+        ? null
+        : fit(_translationRows, session.vietnameseFull);
+    if (!_transcriptRows!.isComplete ||
+        !(_translationRows?.isComplete ?? true)) {
+      _scheduleRowMeasuring();
+    }
+  }
+
+  /// Measures the rest a slice per event-loop turn, then lays the boxes out
+  /// once more so the exact extent shows without waiting for a scroll.
+  void _scheduleRowMeasuring() {
+    _rowMeasureTimer ??= Timer(Duration.zero, () {
+      _rowMeasureTimer = null;
+      if (!mounted) return;
+      final pending = [_transcriptRows, _translationRows]
+          .firstWhere((rows) => rows?.isComplete == false, orElse: () => null);
+      if (pending == null) return;
+      pending.measure(const Duration(milliseconds: 4));
+      if ((_transcriptRows?.isComplete ?? true) &&
+          (_translationRows?.isComplete ?? true)) {
+        setState(() => _rowHeightsGeneration++);
+      } else {
+        _scheduleRowMeasuring();
+      }
     });
   }
 
@@ -976,43 +1078,51 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
         Expanded(
           child: Stack(
             children: [
-              NotificationListener<ScrollNotification>(
-                onNotification: (n) {
-                  _onTranscriptScroll(n.metrics);
-                  return false;
-                },
-                child: SelectionArea(
-                  child: CustomScrollView(
-                    controller: scrollController,
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
-                    slivers: [
-                      ..._buildTextBoxSlivers(
-                        field: _SessionTextField.transcription,
-                        label: 'TRANSCRIPTION',
-                        lines: koreanLines,
-                        fullText: session.koreanFull,
-                        wordSpans: wordSpans,
-                      ),
-                      if (hasTranslation) ...[
-                        const SliverToBoxAdapter(child: SizedBox(height: 5)),
+              // The width tells _measureRows what the lines wrap at.
+              LayoutBuilder(builder: (context, constraints) {
+                _measureRows(context, constraints.maxWidth, session);
+                return NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    _onTranscriptScroll(n.metrics);
+                    return false;
+                  },
+                  child: SelectionArea(
+                    child: CustomScrollView(
+                      controller: scrollController,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      slivers: [
                         ..._buildTextBoxSlivers(
-                          field: _SessionTextField.translation,
-                          label: 'TRANSLATION',
-                          lines: vietnameseLines,
-                          fullText: session.vietnameseFull,
+                          field: _SessionTextField.transcription,
+                          label: 'TRANSCRIPTION',
+                          lines: koreanLines,
+                          fullText: session.koreanFull,
+                          wordSpans: wordSpans,
+                          rowHeights: _transcriptRows,
+                        ),
+                        if (hasTranslation) ...[
+                          const SliverToBoxAdapter(child: SizedBox(height: 5)),
+                          ..._buildTextBoxSlivers(
+                            field: _SessionTextField.translation,
+                            label: 'TRANSLATION',
+                            lines: vietnameseLines,
+                            fullText: session.vietnameseFull,
+                            rowHeights: _translationRows,
+                          ),
+                        ],
+                        SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: 16 +
+                                (hasAudio || audioMissing
+                                    ? 0
+                                    : _androidNavInset),
+                          ),
                         ),
                       ],
-                      SliverToBoxAdapter(
-                        child: SizedBox(
-                          height: 16 +
-                              (hasAudio || audioMissing ? 0 : _androidNavInset),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ),
+                );
+              }),
               if (_showJumpToTop)
                 Positioned(
                   top: 8,
@@ -1243,9 +1353,87 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
     required List<String> lines,
     required String fullText,
     List<List<int>>? wordSpans,
+    TranscriptRowHeights? rowHeights,
   }) {
     final hasText = fullText.trim().isNotEmpty;
     final isEditing = _editingBox == field;
+    // Row 0 is the label row, row 1 the gap below it, then lines (or a
+    // single TextField while editing).
+    final rowCount = isEditing ? 3 : lines.length + 2;
+
+    Widget buildRow(BuildContext context, int index) {
+      if (index == 0) {
+        return _buildTextBoxHeader(
+          field: field,
+          label: label,
+          fullText: fullText,
+          hasText: hasText,
+          isEditing: isEditing,
+        );
+      }
+      if (index == 1) return const SizedBox(height: transcriptLabelGap);
+
+      if (isEditing) {
+        return SelectionContainer.disabled(
+          child: TextField(
+            controller: _textEditController,
+            focusNode: _textEditFocusNode,
+            maxLines: null,
+            minLines: 1,
+            scrollPhysics: const NeverScrollableScrollPhysics(),
+            keyboardType: TextInputType.multiline,
+            textInputAction: TextInputAction.newline,
+            textDirection: directionOf(_textEditController.text),
+            style: TextStyle(
+              fontSize: AppConstants.contentFontSize,
+              color: AppConstants.textPrimary,
+              height: 1.5,
+            ),
+            cursorColor: AppConstants.textPrimary,
+            decoration: const InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+        );
+      }
+
+      final lineIdx = index - 2;
+      final line = lines[lineIdx];
+      final spans = (wordSpans != null &&
+              lineIdx < wordSpans.length &&
+              wordSpans[lineIdx].isNotEmpty)
+          ? wordSpans[lineIdx]
+          : null;
+
+      // Align start, not stretch: sliver rows span the full width, but the
+      // old Column start-aligned each line at its intrinsic width — this
+      // keeps short RTL lines on the left edge exactly as before. Keep the
+      // style in step with _measureRows, which measures these lines.
+      return Padding(
+        padding: const EdgeInsets.only(bottom: transcriptLineSpacing),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: spans != null
+              ? _TappableTimestampLine(
+                  line: line,
+                  spans: spans,
+                  onSeek: _seekToMs,
+                )
+              : Text(
+                  line,
+                  textDirection: directionOf(line),
+                  style: TextStyle(
+                    fontSize: AppConstants.contentFontSize,
+                    color: AppConstants.textPrimary,
+                    height: 1.5,
+                  ),
+                ),
+        ),
+      );
+    }
+
     return [
       SliverPadding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1256,83 +1444,26 @@ class _HistorySheetState extends ConsumerState<HistorySheet> {
           ),
           sliver: SliverPadding(
             padding: const EdgeInsets.all(AppConstants.panelPaddingH),
-            sliver: SliverList.builder(
-              // Row 0 is the label row, row 1 the gap below it, then lines
-              // (or a single TextField while editing).
-              itemCount: isEditing ? 3 : lines.length + 2,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return _buildTextBoxHeader(
-                    field: field,
-                    label: label,
-                    fullText: fullText,
-                    hasText: hasText,
-                    isEditing: isEditing,
-                  );
-                }
-                if (index == 1) return const SizedBox(height: 12);
-
-                if (isEditing) {
-                  return SelectionContainer.disabled(
-                    child: TextField(
-                      controller: _textEditController,
-                      focusNode: _textEditFocusNode,
-                      maxLines: null,
-                      minLines: 1,
-                      scrollPhysics: const NeverScrollableScrollPhysics(),
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.newline,
-                      textDirection: directionOf(_textEditController.text),
-                      style: TextStyle(
-                        fontSize: AppConstants.contentFontSize,
-                        color: AppConstants.textPrimary,
-                        height: 1.5,
-                      ),
-                      cursorColor: AppConstants.textPrimary,
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                  );
-                }
-
-                final lineIdx = index - 2;
-                final line = lines[lineIdx];
-                final spans = (wordSpans != null &&
-                        lineIdx < wordSpans.length &&
-                        wordSpans[lineIdx].isNotEmpty)
-                    ? wordSpans[lineIdx]
-                    : null;
-
-                // Align start, not stretch: sliver rows span the full width,
-                // but the old Column start-aligned each line at its intrinsic
-                // width — this keeps short RTL lines on the left edge exactly
-                // as before.
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: spans != null
-                        ? _TappableTimestampLine(
-                            line: line,
-                            spans: spans,
-                            onSeek: _seekToMs,
-                          )
-                        : Text(
-                            line,
-                            textDirection: directionOf(line),
-                            style: TextStyle(
-                              fontSize: AppConstants.contentFontSize,
-                              color: AppConstants.textPrimary,
-                              height: 1.5,
+            sliver: rowHeights == null
+                ? SliverList.builder(
+                    itemCount: rowCount,
+                    itemBuilder: buildRow,
+                  )
+                : RelayoutSliver(
+                    generation: _rowHeightsGeneration,
+                    sliver: SliverList(
+                      delegate: isEditing
+                          ? SliverChildBuilderDelegate(
+                              buildRow,
+                              childCount: rowCount,
+                            )
+                          : TranscriptRowsDelegate(
+                              buildRow,
+                              childCount: rowCount,
+                              heights: rowHeights,
                             ),
-                          ),
+                    ),
                   ),
-                );
-              },
-            ),
           ),
         ),
       ),

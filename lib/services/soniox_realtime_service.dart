@@ -228,6 +228,15 @@ class SonioxRealtimeService {
   /// isn't shown these one by one.
   void Function(String event, Map<String, dynamic> meta)? onDiagnostic;
 
+  /// Rewrites recognized text on its way to the callbacks above. Soniox has
+  /// a single Chinese and writes it in characters of its choosing, so the
+  /// app puts it in the script the user picked. [translation] says which
+  /// stream the text is from, and [language] is the language it was spoken
+  /// in. Word timestamps go through it too, word by word, so a rewritten
+  /// transcript still lines up with them. Unset, text passes unchanged.
+  String Function(String text, {required bool translation, String? language})?
+      rewriteText;
+
   bool _forceTranslation = false;
   String? _languageHint;
   bool _enableSpeakerDiarization = false;
@@ -687,8 +696,35 @@ class SonioxRealtimeService {
     lastCompletedSourceLanguage = currentSourceLanguage;
     lastCompletedSpeaker = _dominantPendingSpeaker();
     _pendingSpeakerCounts.clear();
+    if (rewriteText != null) {
+      final language = lastCompletedSourceLanguage;
+      text = _rewrite(text, translation: false, language: language);
+      lastCompletedWords = [
+        for (final w in lastCompletedWords)
+          WordTimestamp(
+            _rewrite(w.text, translation: false, language: language),
+            w.startMs,
+          ),
+      ];
+    }
     final cb = onTranscriptionCompleted;
     if (cb != null) _runCallback('transcriptionCompleted', () => cb(text));
+  }
+
+  String _rewrite(
+    String text, {
+    required bool translation,
+    String? language,
+  }) {
+    final rewrite = rewriteText;
+    if (rewrite == null || text.isEmpty) return text;
+    try {
+      return rewrite(text, translation: translation, language: language);
+    } catch (e) {
+      // Unconverted text beats a broken token stream.
+      debugPrint('Text rewrite failed: $e');
+      return text;
+    }
   }
 
   /// The speaker with the most final tokens in the in-progress utterance,
@@ -717,16 +753,28 @@ class SonioxRealtimeService {
   void _emitTranslationCompleted(String text, {bool isLate = false}) {
     lastTranslationWasLate = isLate;
     lastCompletedTranslationSourceLanguage = currentTranslationSourceLanguage;
+    text = _rewrite(
+      text,
+      translation: true,
+      language: lastCompletedTranslationSourceLanguage,
+    );
     final cb = onTranslationCompleted;
     if (cb != null) _runCallback('translationCompleted', () => cb(text));
   }
 
   void _emitTranscriptionDraft(String draft) {
+    draft =
+        _rewrite(draft, translation: false, language: currentSourceLanguage);
     final cb = onTranscriptionDraft;
     if (cb != null) _runCallback('transcriptionDraft', () => cb(draft));
   }
 
   void _emitTranslationDraft(String draft) {
+    draft = _rewrite(
+      draft,
+      translation: true,
+      language: currentTranslationSourceLanguage,
+    );
     final cb = onTranslationDraft;
     if (cb != null) _runCallback('translationDraft', () => cb(draft));
   }

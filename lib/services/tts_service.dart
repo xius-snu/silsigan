@@ -17,6 +17,8 @@ class TtsService {
     'vi': 'vi-VN',
     'tr': 'tr-TR',
     'zh': 'zh-CN',
+    // Chinese (Traditional): a Taiwan voice reads Traditional characters.
+    'zh-Hant': 'zh-TW',
     'ja': 'ja-JP',
     'th': 'th-TH',
     'ms': 'ms-MY',

@@ -35,7 +35,7 @@ class SourceLanguageSelector extends StatelessWidget {
   Widget build(BuildContext context) {
     final String label;
     if (source != null) {
-      label = source!.displayName;
+      label = source!.shortName;
     } else if (isRecording && detectedLanguage != null) {
       label = languageDisplayName(detectedLanguage!);
     } else {
@@ -77,11 +77,14 @@ class SourceLanguageSelector extends StatelessWidget {
           borderRadius: BorderRadius.circular(AppConstants.langBoxRadius),
         ),
         alignment: Alignment.center,
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: AppConstants.langFontSize,
-            color: textColor ?? AppConstants.textPrimary,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: AppConstants.langFontSize,
+              color: textColor ?? AppConstants.textPrimary,
+            ),
           ),
         ),
       ),

@@ -340,6 +340,32 @@ void main() {
       expect(completed.single.single.startMs, 3000);
     });
 
+    // The app writes Chinese in the script the user picked (Soniox has one
+    // Chinese). Word timestamps must match the rewritten transcript, or tap
+    // to seek can't find the words.
+    test('rewriteText reaches the transcript and its word timestamps',
+        () async {
+      proxy.onConfig = (conn) => conn.sendEmptyResponse();
+      final completed = <String>[];
+      final words = <List<WordTimestamp>>[];
+      service
+        ..rewriteText = ((text, {required translation, language}) =>
+            translation ? text : text.toUpperCase())
+        ..onTranscriptionCompleted = (text) {
+          completed.add(text);
+          words.add(List.of(service.lastCompletedWords));
+        };
+      await service.connect(targetLanguageCode: 'en');
+      await _waitFor(() =>
+          proxy.connections.isNotEmpty &&
+          proxy.connections.single.config != null);
+      _sayWord(proxy.connections.single, 'hello', 500);
+      await _waitFor(() => completed.length == 1);
+      expect(completed.single, 'HELLO');
+      expect(words.single.single.text, 'HELLO');
+      expect(words.single.single.startMs, 500);
+    });
+
     test('a throwing UI callback does not break the stream', () async {
       proxy.onConfig = (conn) {
         conn.ws.add(jsonEncode({

@@ -22,6 +22,7 @@ import '../../services/soniox_realtime_service.dart';
 import '../../services/database_service.dart';
 import '../../services/tts_service.dart';
 import '../../providers/tts_provider.dart';
+import '../../utils/chinese_script.dart';
 import '../../utils/constants.dart';
 import '../../utils/word_timeline.dart';
 import '../widgets/transcript_panel.dart';
@@ -284,6 +285,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         );
     _sonioxService.onReconnectingChanged = _onTranscriptionReconnecting;
     _sonioxService.onDiagnostic = _reportDiagnostic;
+    _sonioxService.rewriteText = _writeInChosenScript;
     // Signing in or out repoints usage, purchases and cloud history at a
     // different server row. The change can also arrive unprompted — the
     // once-per-install restore probe lands a second or two after launch — so
@@ -1500,6 +1502,8 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // Locks the diarization toggle and blocks re-entry from here on; every
       // exit from the try (success or catch) clears it.
       setState(() => _isStartingRecording = true);
+      await _prepareChineseScripts(
+          [ref.read(sourceLanguageProvider), targetLanguage]);
       // Start foreground service first (Android) to prevent OS killing the app
       await BackgroundService.startRecordingService();
       await UserService.instance.ensureAuthenticated();
@@ -1533,9 +1537,9 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // Wait for capture consent, then connect.
       Future<void> connectProxy() => _sonioxService.connect(
             targetLanguageCode:
-                isTranscriptionOnly ? null : targetLanguage.code,
+                isTranscriptionOnly ? null : targetLanguage.sonioxCode,
             forceTranslation: !isTranscriptionOnly,
-            languageHint: sourceLang?.code ?? '',
+            languageHint: sourceLang?.sonioxCode ?? '',
             enableSpeakerDiarization: ref.read(diarizationEnabledProvider),
             maxEndpointDelayMs:
                 isLineByLine ? AppConstants.lineByLineEndpointDelayMs : null,
@@ -2227,6 +2231,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       final desktopAudio = await loadSavedDesktopAudioSettings();
       ref.read(desktopAudioSettingsProvider.notifier).state = desktopAudio;
     }
+    _preloadChineseScripts();
   }
 
   /// True while any mode's session is live or in its optimistic-start window.
@@ -2496,10 +2501,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
   /// speaks it, or null when it's neither configured language.
   ConversationSpeaker? _speakerForLanguage(String? code) {
     if (code == null) return null;
-    if (code == ref.read(myLanguageProvider).code) {
+    if (code == ref.read(myLanguageProvider).sonioxCode) {
       return ConversationSpeaker.bottom;
     }
-    if (code == ref.read(theirLanguageProvider).code) {
+    if (code == ref.read(theirLanguageProvider).sonioxCode) {
       return ConversationSpeaker.top;
     }
     return null;
@@ -2587,6 +2592,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
     _audioService.onAudioChunk = (bytes, _) => _sonioxService.sendAudio(bytes);
 
     try {
+      await _prepareChineseScripts([myLang, theirLang]);
       await BackgroundService.startRecordingService();
       await UserService.instance.ensureAuthenticated();
       _sonioxService.userId = UserService.instance.userId;
@@ -2602,7 +2608,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
       // Screen-share picker: wait for consent so Soniox doesn't idle-timeout
       // while the system sheet is still up.
       Future<void> connectProxy() => _sonioxService.connect(
-            twoWayLanguageCodes: [myLang.code, theirLang.code],
+            twoWayLanguageCodes: [myLang.sonioxCode, theirLang.sonioxCode],
           );
       if (_needsScreenSharePicker) {
         try {
@@ -2745,15 +2751,96 @@ class _MainScreenState extends ConsumerState<MainScreen>
     saveConversationLanguages(theirLang, myLang);
   }
 
+  // ── Chinese script ───────────────────────────────────────────────────
+  // Soniox has a single Chinese (zh) and picks the characters itself. The
+  // app offers Chinese (Simplified) and Chinese (Traditional) and writes
+  // each in its own script (ChineseScriptConverter).
+
+  /// [SonioxRealtimeService.rewriteText]: Chinese text in the script of the
+  /// language it belongs to.
+  String _writeInChosenScript(
+    String text, {
+    required bool translation,
+    String? language,
+  }) {
+    final script = chineseScriptFor(
+      translation: translation,
+      language: language,
+      conversation: ref.read(displayModeProvider) == DisplayMode.conversation,
+      source: ref.read(sourceLanguageProvider),
+      target: ref.read(targetLanguageProvider),
+      my: ref.read(myLanguageProvider),
+      their: ref.read(theirLanguageProvider),
+    );
+    if (script == null) return text;
+    return ChineseScriptConverter.ready(script)?.convert(text) ?? text;
+  }
+
+  /// Starts loading the script tables the chosen languages need, so they're
+  /// ready before a session starts.
+  void _preloadChineseScripts() {
+    for (final lang in _chosenLanguages) {
+      final script = lang?.chineseScript;
+      if (script != null) unawaited(ChineseScriptConverter.load(script));
+    }
+  }
+
+  List<TargetLanguage?> get _chosenLanguages => [
+        ref.read(sourceLanguageProvider),
+        ref.read(targetLanguageProvider),
+        ref.read(myLanguageProvider),
+        ref.read(theirLanguageProvider),
+      ];
+
+  /// Waits (briefly) for the script tables of [languages], so a session's
+  /// first line is already in the chosen script. Loaded tables are kept, so
+  /// this only ever waits once.
+  Future<void> _prepareChineseScripts(List<TargetLanguage?> languages) async {
+    final loads = [
+      for (final lang in languages)
+        if (lang?.chineseScript != null)
+          ChineseScriptConverter.load(lang!.chineseScript!),
+    ];
+    if (loads.isEmpty) return;
+    try {
+      await Future.wait(loads).timeout(const Duration(seconds: 3));
+    } catch (_) {}
+  }
+
+  /// Sets one Conversation side's language. Soniox can't translate a
+  /// language into itself, and both Chinese entries are one language to it,
+  /// so picking the other side's language swaps the two sides instead.
+  void _setConversationLanguage(TargetLanguage lang, {required bool mine}) {
+    var my = ref.read(myLanguageProvider);
+    var their = ref.read(theirLanguageProvider);
+    if (lang.sonioxCode == (mine ? their : my).sonioxCode) {
+      if (mine) {
+        their = my;
+      } else {
+        my = their;
+      }
+    }
+    if (mine) {
+      my = lang;
+    } else {
+      their = lang;
+    }
+    ref.read(myLanguageProvider.notifier).state = my;
+    ref.read(theirLanguageProvider.notifier).state = their;
+    saveConversationLanguages(my, their);
+    _preloadChineseScripts();
+  }
+
   // ── Language swap (line-by-line / split) ────────────────────────────
 
-  /// The [TargetLanguage] whose code matches [code], or null if [code] isn't
+  /// The [TargetLanguage] Soniox reports as [code], or null if [code] isn't
   /// one of the supported target languages (unlike [TargetLanguage.fromCode],
-  /// which falls back to Vietnamese).
+  /// which falls back to Vietnamese). Soniox reports both Chinese entries as
+  /// zh, so a recently used one wins.
   TargetLanguage? _targetForCode(String? code) {
     if (code == null) return null;
-    for (final l in TargetLanguage.values) {
-      if (l.code == code) return l;
+    for (final l in [..._recentTargets, ...TargetLanguage.values]) {
+      if (l.sonioxCode == code) return l;
     }
     return null;
   }
@@ -3186,16 +3273,10 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     onToggleListening: _toggleConversationSession,
                     onSwapLanguages: _swapConversationLanguages,
                     onClear: _clearConversation,
-                    onMyLanguageChanged: (lang) {
-                      ref.read(myLanguageProvider.notifier).state = lang;
-                      saveConversationLanguages(
-                          lang, ref.read(theirLanguageProvider));
-                    },
-                    onTheirLanguageChanged: (lang) {
-                      ref.read(theirLanguageProvider.notifier).state = lang;
-                      saveConversationLanguages(
-                          ref.read(myLanguageProvider), lang);
-                    },
+                    onMyLanguageChanged: (lang) =>
+                        _setConversationLanguage(lang, mine: true),
+                    onTheirLanguageChanged: (lang) =>
+                        _setConversationLanguage(lang, mine: false),
                   );
                 }),
               ),
@@ -3321,6 +3402,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                               ref.read(sourceLanguageProvider.notifier).state =
                                   lang;
                               saveSourceLanguage(lang);
+                              _preloadChineseScripts();
                               if (_langSwapped) {
                                 setState(() => _langSwapped = false);
                               }
@@ -3372,6 +3454,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                   lang;
                               saveTargetLanguage(lang);
                               _recordRecentTarget(lang);
+                              _preloadChineseScripts();
                               if (_langSwapped) {
                                 setState(() => _langSwapped = false);
                               }
@@ -3401,11 +3484,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
                                 ),
                               ),
                               alignment: Alignment.center,
-                              child: Text(
-                                targetLanguage.displayName,
-                                style: TextStyle(
-                                  fontSize: AppConstants.langFontSize,
-                                  color: AppConstants.textPrimary,
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  targetLanguage.shortName,
+                                  style: TextStyle(
+                                    fontSize: AppConstants.langFontSize,
+                                    color: AppConstants.textPrimary,
+                                  ),
                                 ),
                               ),
                             ),

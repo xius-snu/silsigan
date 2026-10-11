@@ -72,7 +72,7 @@ lib/
 ├── providers/
 │   ├── recording_provider.dart            # idle/recording/processing/postRecording
 │   ├── display_mode_provider.dart         # lineByLine/split/conversation/transcription
-│   ├── target_language_provider.dart      # 8 languages + sourceLanguageProvider (null = Any)
+│   ├── target_language_provider.dart      # 14 languages + sourceLanguageProvider (null = Any) + chineseScriptFor
 │   ├── detected_language_provider.dart    # Soniox-detected source language
 │   ├── theme_provider.dart                # darkModeProvider (toggle-driven, persisted)
 │   ├── transcript_provider.dart           # koreanDraft + koreanHistory (legacy naming)
@@ -110,6 +110,7 @@ lib/
 │       ├── record_button.dart             # Animated mic/stop with haptics
 │       ├── save_discard_row.dart          # idle/postRecording side buttons
 │       ├── history_sheet.dart             # Bottom sheet: list + inline detail + audio player
+│       ├── transcript_rows.dart           # Measured line heights → exact scroll extent (desktop scrollbar)
 │       ├── session_card.dart              # History list item
 │       ├── status_bar.dart                # Pulsing recording dot + remaining time
 │       ├── tts_control_button.dart        # TTS toggle + rate slider
@@ -117,6 +118,7 @@ lib/
 └── utils/
     ├── audio_utils.dart
     ├── word_timeline.dart                 # Saved word times → recording timeline + tap-to-seek matching
+    ├── chinese_script.dart                # Simplified ↔ Traditional Chinese (OpenCC tables in assets/chinese)
     └── constants.dart                     # serverBaseUrl, proxy URLs, design tokens
 
 server/
@@ -144,7 +146,9 @@ server/
 
 ## Target Languages
 
-Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese, Korean, Japanese, Thai, Malay, Russian, Indonesian, Arabic, Persian**. Each has a `displayName` and ISO `code`. TTS support matches the locale map in `tts_service.dart`.
+Fourteen languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chinese (Simplified), Chinese (Traditional), Korean, Japanese, Thai, Malay, Russian, Indonesian, Arabic, Persian, French**. Each has a `displayName`, a `shortName` for the fixed-width language boxes, the app's own `code` (prefs, drafts, TTS voice key) and a `sonioxCode` (session config, detected-language matching). TTS support matches the locale map in `tts_service.dart`.
+
+**Chinese:** Soniox has a single Chinese, `zh`, and writes it in characters of its choosing. Chinese (Simplified) keeps the old `zh` code, so saved choices still work. Chinese (Traditional) is saved as `zh-Hant` but is `zh` to Soniox. `SonioxRealtimeService.rewriteText` converts text before any callback sees it (drafts, completions and word timestamps). `chineseScriptFor` (`target_language_provider.dart`) decides when it applies: translations follow the target; a transcript follows a pinned source; in Conversation, each side's speech follows its own language and its translation the other side's. `ChineseScriptConverter` (`utils/chinese_script.dart`) loads OpenCC's tables from `assets/chinese/` (Apache-2.0; rebuilt with `tool/build_chinese_tables.dart`). Sessions wait up to 3s for the tables, and choices preload them. Two Chinese entries can't sit on both Conversation sides, because Soniox can't translate zh into zh: picking the other side's language swaps the sides.
 
 **Source language** is also selectable (left side, `sourceLanguageProvider`; `null` = **Any**/auto-detect). A pinned source is sent to Soniox as a `language_hints` entry (`SourceLanguageSelector`), enabling e.g. English → Vietnamese. Applies to line-by-line and split modes; conversation has its own two-language slots. While recording with "Any", the box shows the detected language.
 
@@ -154,7 +158,7 @@ Twelve languages in `TargetLanguage` enum: **Vietnamese, English, Turkish, Chine
 
 ### Navigation
 - `MainScreen` is the only route (behind the one-time consent gate).
-- History: modal bottom sheet (`HistorySheet`) — list + inline detail + audio player.
+- History: modal bottom sheet (`HistorySheet`) — list + inline detail + audio player. The detail view builds its rows lazily. On desktop, where a scrollbar shows, `TranscriptRowHeights` (`widgets/transcript_rows.dart`) measures every line with a TextPainter in 4 ms slices, so the scroll extent of unbuilt rows is exact; Flutter's own estimate (the average of the built rows) made the scrollbar jump on long sessions. Keep `_measureRows`' style, width and row spacing in step with the rows it measures.
 - Save flow: save → open history sheet with the saved session pre-selected.
 - Purchase and TTS settings are modal sheets/dialogs.
 - Support chat is a pushed page (`SupportChatScreen` / `SupportInboxScreen`) so the keyboard and thread can take the whole screen. The Add More Time sheet is closed before it opens.

@@ -386,12 +386,15 @@ class _ConversationPanelState extends State<ConversationPanel> {
           borderRadius: BorderRadius.circular(AppConstants.langBoxRadius),
         ),
         alignment: Alignment.center,
-        child: Text(
-          language.displayName,
-          style: TextStyle(
-            fontSize: AppConstants.langFontSize,
-            color: textColor,
-            fontWeight: FontWeight.w500,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            language.shortName,
+            style: TextStyle(
+              fontSize: AppConstants.langFontSize,
+              color: textColor,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ),
